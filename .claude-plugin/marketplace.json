@@ -1,0 +1,22 @@
+{
+  "name": "dkod-ai",
+  "owner": {
+    "name": "DKOD",
+    "url": "https://dkod.ai"
+  },
+  "metadata": {
+    "description": "The DKOD plugin for Claude Code"
+  },
+  "plugins": [
+    {
+      "name": "dkod",
+      "source": "./",
+      "description": "Build and deploy apps through your company's DKOD: governance questions, policy, templates and Deliver, with a guard that stops a raw git push to the app repository.",
+      "version": "0.1.0",
+      "category": "deployment",
+      "tags": ["deploy", "governance", "mcp", "gitops"],
+      "homepage": "https://dkod.ai/docs",
+      "repository": "https://github.com/dkod-ai/dkod-plugin"
+    }
+  ]
+}

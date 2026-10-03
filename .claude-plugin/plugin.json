@@ -1,0 +1,13 @@
+{
+  "name": "dkod",
+  "version": "0.1.0",
+  "description": "Build and deploy apps through your company's DKOD: governance questions, policy, templates and Deliver, with a guard that stops a raw git push to the app repository.",
+  "author": {
+    "name": "DKOD",
+    "url": "https://dkod.ai"
+  },
+  "homepage": "https://dkod.ai/docs",
+  "repository": "https://github.com/dkod-ai/dkod-plugin",
+  "license": "MIT",
+  "keywords": ["dkod", "deploy", "governance", "platform", "mcp", "gitops"]
+}

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "dkod": {
+      "type": "http",
+      "url": "https://dashboard.dkod.app/api/v1/dkoder/mcp"
+    }
+  }
+}
