@@ -11,10 +11,15 @@
     {
       "name": "dkod",
       "source": "./",
-      "description": "Build and deploy apps through your company's DKOD: governance questions, policy, templates and Deliver, with a guard that stops a raw git push to the app repository.",
-      "version": "0.1.0",
+      "description": "Build and deploy apps through your company's DKOD: policy, templates, Deploy questions and Deliver, with a DKOD band above the prompt and the DKOD rules on every command and file write.",
+      "version": "0.2.2",
       "category": "deployment",
-      "tags": ["deploy", "governance", "mcp", "gitops"],
+      "tags": [
+        "deploy",
+        "governance",
+        "mcp",
+        "gitops"
+      ],
       "homepage": "https://dkod.ai/docs",
       "repository": "https://github.com/dkod-ai/dkod-plugin"
     }
