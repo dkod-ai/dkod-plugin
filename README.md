@@ -6,7 +6,7 @@ It adds three things:
 
 - **MCP server** `dkod`: your org's policy, templates, Deploy questions, Deploy, build answers, Deliver and Remove.
 - **Skill** `dkod`: tells Claude how to use them, in the right order.
-- **Push guard**: a hook that stops `git push` to the app repository until Deliver has run.
+- **DKOD band and rules**: a band above the prompt shows whether you are signed in to DKOD, and the same rules DKOD Guard uses check every command and file write.
 
 ## Install
 
@@ -15,27 +15,27 @@ It adds three things:
 /plugin install dkod@dkod-ai
 ```
 
-Then run `/mcp`, pick `dkod` and choose **Authenticate**. You sign in with your company's own sign-in. DKOD never sees a password.
+Then run `/mcp`, pick `dkod` and choose **Authenticate**. You sign in with your company's own sign-in. DKOD never sees a password. Until you sign in, the band above the prompt is yellow.
 
-## How the push guard works
+## What the rules check
 
-When Claude runs `git push`, the hook finds the remote and checks two files in the repository's git dir:
+The rules need to know your org: which GitHub owners are yours, which repository is the governance repository, and the org's own blocked commands. Your company gives the rules those facts when it installs DKOD Guard on its devices from the DKOD dashboard. Then, in the org's repositories, the rules refuse:
 
-- `dkoder/session`: written after `dkoder.session.start`. It names the app remote and the governance remote.
-- `dkoder/deliver`: written after `dkoder.deliver` returns ok.
+- `git push`, `gh pr merge` and GitHub API writes to an app repository. App code ships through Deliver.
+- A secret value (private keys, cloud keys, vendor tokens) written into a file.
+- Skipped git hooks (`--no-verify`, `core.hooksPath`).
 
-A push to the app remote is refused unless a deliver stamp for the same session and remote exists. Pushes to the governance remote, and pushes in repositories with no DKOD session, are not touched.
+With this plugin alone, nothing names your org, so a repository with a remote is left alone. A folder with no remote still gets the secret check. This plugin sends no events and needs no install file.
 
-The hook reads its input with `jq`, `python3` or `node`, whichever is installed.
+## Limits
 
-### Limits
-
-The push guard is a guardrail that keeps Claude on the Deliver path. It is not a security boundary.
-
-- The session and deliver files are plain files that the agent writes. Anyone who can write the git dir can write a stamp.
-- The hook reads the Bash command as text. A push hidden in a script, an alias, `bash -c` or `eval` is not seen.
+The rules keep Claude on the Deliver path. They are not a security boundary against a person.
 
 To stop direct pushes for real, protect the app repository on GitHub (branch protection or rulesets). DKOD's Deliver does not need a person to push.
+
+## Source
+
+This repository is generated from DKOD's source. Do not edit it here: changes are overwritten by the next release.
 
 ## Docs
 
