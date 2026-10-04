@@ -35,10 +35,11 @@ test('git push to an app repo is refused with the Deliver message', async ($: an
   expect(r.deny ?? r.text ?? '').toContain('Deliver')
 })
 
-test('git push to the governance repo runs', async ($: any, on: any) => {
+// #620: the governance repo is closed to every session. An org admin changes it in the dashboard.
+test('git push to the governance repo is refused and points at the dashboard', async ($: any, on: any) => {
   host(on, 'https://github.com/dkod-demo/dkod-governance.git')
   const r = await $.tool.call({ tool: 'Bash', command: 'git push origin main' })
-  expect(r.deny).toBe(undefined)
+  expect(r.deny ?? r.text ?? '').toContain('DKOD dashboard')
 })
 
 test('a config kept in the user-writable store cannot open the governance repo', async ($: any, on: any) => {

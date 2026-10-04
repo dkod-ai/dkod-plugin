@@ -602,10 +602,12 @@ function repoFromApiPath(endpoint) {
 }
 var WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 var GH_REPO_WRITES = new Set(["delete", "edit", "rename", "archive", "unarchive", "sync", "set-default"]);
+var isDynamic = (w) => /[$`]/.test(w);
 function ghActions(cmd) {
   const a = cmd.argv;
   const dir = cmd.cd;
-  let repoFlag = null;
+  const envRepo = cmd.env.filter((e) => e.startsWith("GH_REPO=")).pop()?.slice("GH_REPO=".length) ?? null;
+  let repoFlag = envRepo !== null && envRepo !== "" ? envRepo : null;
   const words = [];
   for (let i = 1;i < a.length; i += 1) {
     const w = a[i];
@@ -618,24 +620,29 @@ function ghActions(cmd) {
       repoFlag = w.slice("--repo=".length);
       continue;
     }
+    if (/^-R./.test(w)) {
+      repoFlag = w.slice(w[2] === "=" ? 3 : 2);
+      continue;
+    }
     words.push(w);
   }
-  const repo = repoFlag === null ? null : repoFromRef(repoFlag) ?? repoFlag;
+  const repo = repoFlag === null ? null : isDynamic(repoFlag) ? "unknown" : repoFromRef(repoFlag) ?? repoFlag;
+  const targetRepo = (target) => target === undefined ? repo : isDynamic(target) ? "unknown" : repoFromRef(target) ?? repo;
   const [group, verb] = words;
   if (group === undefined)
     return [];
   if (group === "pr" && verb === "merge") {
     const target = words.slice(2).find((w) => !w.startsWith("-"));
+    if (target !== undefined && isDynamic(target))
+      return [{ kind: "merge", cmd, dir, repo: "unknown" }];
     const fromUrl = target !== undefined && target.includes("://") ? repoFromRef(target) : null;
     return [{ kind: "merge", cmd, dir, repo: fromUrl ?? repo }];
   }
   if (group === "repo" && verb !== undefined && GH_REPO_WRITES.has(verb)) {
-    const target = words.slice(2).find((w) => !w.startsWith("-"));
-    return [{ kind: "repo-write", cmd, dir, repo: (target !== undefined ? repoFromRef(target) : null) ?? repo }];
+    return [{ kind: "repo-write", cmd, dir, repo: targetRepo(words.slice(2).find((w) => !w.startsWith("-"))) }];
   }
   if (group === "repo" && verb === "create" && words.includes("--push")) {
-    const target = words.slice(2).find((w) => !w.startsWith("-"));
-    return [{ kind: "repo-write", cmd, dir, repo: (target !== undefined ? repoFromRef(target) : null) ?? repo }];
+    return [{ kind: "repo-write", cmd, dir, repo: targetRepo(words.slice(2).find((w) => !w.startsWith("-"))) }];
   }
   if (group === "alias" && (verb === "set" || verb === "import")) {
     const value = words.slice(3).filter((w) => !w.startsWith("-")).join(" ");
@@ -689,6 +696,8 @@ function ghActions(cmd) {
     const isWrite = method !== null ? WRITE_METHODS.has(method) : hasFields;
     if (!isWrite || endpoint === null)
       return [];
+    if (isDynamic(endpoint))
+      return [{ kind: "api-write", cmd, dir, repo: "unknown" }];
     if (/^graphql\/?$/i.test(apiPath(endpoint)))
       return mutation || hasFields ? [{ kind: "api-write", cmd, dir, repo }] : [];
     const named = repoFromApiPath(endpoint);
@@ -832,15 +841,20 @@ function httpActions(cmd) {
   }
   return out;
 }
+var EXPORTERS = new Set(["export", "declare", "typeset", "readonly", "local", "set"]);
 function actionsOf(cmds, depth = 0) {
   const out = [];
   const made = new Map;
+  const lineEnv = [];
   for (const cmd of cmds) {
     const prog = programName(cmd.argv[0] ?? "");
+    lineEnv.push(...cmd.env.filter((e) => e.startsWith("GH_REPO=")).filter(() => cmd.argv.length === 0));
+    if (EXPORTERS.has(prog))
+      lineEnv.push(...cmd.argv.slice(1).filter((w) => w.startsWith("GH_REPO=")));
     if (prog === "git" || prog.startsWith("git-") && GIT_BUILTINS.has(prog.slice(4)))
       out.push(...gitActions(cmd, depth, made));
     else if (prog === "gh")
-      out.push(...ghActions(cmd));
+      out.push(...ghActions(lineEnv.length > 0 ? { ...cmd, env: [...lineEnv, ...cmd.env] } : cmd));
     else if (HTTP_TOOLS.has(prog))
       out.push(...httpActions(cmd));
   }
@@ -1707,6 +1721,9 @@ function classifyRepo(repo, config) {
   return "protected";
 }
 var DELIVER = "App code ships through Deliver (the dkoder.deliver tool), never a direct push or merge.";
+function governanceMessage(repo) {
+  return `${repo} is your org's governance repo. It changes only through the DKOD dashboard, by an org admin. Guard does not push, merge or write to it.`;
+}
 function describe(a) {
   if (a.kind === "push")
     return "git push";
@@ -1719,7 +1736,7 @@ function describe(a) {
   return a.cmd.argv.slice(0, 2).join(" ");
 }
 function worst(repos, config) {
-  const order = ["protected", "allowed", "governance", "outside"];
+  const order = ["protected", "governance", "allowed", "outside"];
   let best = { cls: "outside", repo: null };
   for (const r of repos) {
     const cls = classifyRepo(r, config);
@@ -1766,7 +1783,7 @@ async function decideBash(cmds, config, resolver, seen = []) {
       if (value === undefined) {
         const remotes = await resolver.repoRemotes(a.dir);
         const { cls: cls2, repo: repo2 } = worst(remotes, config);
-        if (remotes.length > 0 && (cls2 === "outside" || cls2 === "governance"))
+        if (remotes.length > 0 && cls2 === "outside")
           continue;
         judged("alias", repo2, true);
         return { rule: "deliver-only", ...repo2 !== null ? { repo: repo2 } : {}, message: `Guard could not tell what "${a.tool} ${a.name}" runs, so it did not run. Use the plain ${a.tool} command.` };
@@ -1785,7 +1802,7 @@ async function decideBash(cmds, config, resolver, seen = []) {
       const remotes = await resolver.repoRemotes(a.dir);
       const { cls: cls2, repo: repo2 } = worst(remotes, config);
       judged("hook-bypass", repo2, remotes.length === 0 || cls2 !== "outside");
-      if (remotes.length > 0 && (cls2 === "outside" || cls2 === "governance"))
+      if (remotes.length > 0 && cls2 === "outside")
         continue;
       return { rule: "no-hook-bypass", ...repo2 !== null ? { repo: repo2 } : {}, message: `${a.how} is not allowed: it skips the checks your org runs before code leaves this machine.` };
     }
@@ -1804,9 +1821,11 @@ async function decideBash(cmds, config, resolver, seen = []) {
       const repos2 = [...targets ?? await resolver.repoRemotes(a.dir), ...also];
       const { cls: cls2, repo: repo2 } = worst(repos2, config);
       judged("push", repo2, cls2 !== "outside" || targets === null);
-      if (targets === null && also.length === 0 && cls2 !== "outside" && cls2 !== "governance") {
+      if (targets === null && also.length === 0 && cls2 !== "outside") {
         return { rule: "deliver-only", ...repo2 !== null ? { repo: repo2 } : {}, message: `Guard could not tell which repo this push goes to, and this folder has an org remote. ${DELIVER}` };
       }
+      if (cls2 === "governance")
+        return { rule: "deliver-only", repo: repo2, message: governanceMessage(repo2) };
       if (cls2 === "protected") {
         if (a.force)
           return { rule: "no-force-push", repo: repo2, message: `Force push to ${repo2} is not allowed. ${DELIVER}` };
@@ -1814,15 +1833,18 @@ async function decideBash(cmds, config, resolver, seen = []) {
       }
       continue;
     }
-    if (a.kind === "api-write" && a.repo === "unknown") {
+    if (a.repo === "unknown") {
       if (config.owners.length === 0)
         continue;
       judged(a.kind, null, true);
-      return { rule: "deliver-only", message: `Guard could not tell which repo this GitHub API write reaches, so it did not run. ${DELIVER}` };
+      const what = a.kind === "api-write" ? "GitHub API write" : describe(a);
+      return { rule: "deliver-only", message: `Guard could not tell which repo this ${what} reaches, so it did not run. ${DELIVER}` };
     }
     const repos = a.repo !== null ? [a.repo] : await resolver.repoRemotes(a.dir);
     const { cls, repo } = worst(repos, config);
     judged(a.kind, repo, cls !== "outside");
+    if (cls === "governance")
+      return { rule: "deliver-only", repo, message: governanceMessage(repo) };
     if (cls === "protected")
       return { rule: "deliver-only", repo, message: `${describe(a)} on ${repo} is not allowed. ${DELIVER}` };
   }
@@ -1919,7 +1941,7 @@ function rulesText(config) {
     "- When Guard refuses a call, tell the person why and take the DKOD path instead. Do not try another way around it."
   ];
   if (config.governanceRepo !== null)
-    lines.push(`- The governance repo ${config.governanceRepo} may be pushed to directly.`);
+    lines.push(`- The governance repo ${config.governanceRepo} changes only through the DKOD dashboard, by an org admin. Never push, merge or write to it from here.`);
   if (config.policyText)
     lines.push("", "## Organization policy", config.policyText);
   return lines.join(`
