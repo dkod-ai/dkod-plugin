@@ -1,4 +1,4 @@
-// Run with: claude plugin test packages/guard/claude/plugins/dkod
+// Run with: claude plugin test packages/dkoder-plugin/claude/plugins/dkod
 // The band above the prompt, drawn by the built mod on the terminal and on the desktop: the DKOD
 // wordmark in cyan while signed in, yellow with how to sign in while the DKOD MCP server asks for
 // authentication, and the Guard icon that pulses in the decision's color when Guard judges an action.
@@ -11,7 +11,7 @@ const CORAL = '#fb7185'
 
 function host(on: any, mcp: 'ok' | 'auth') {
   mock.store(on, {})
-  on('fs.read', ($: any, e: any) => (e.path.endsWith('/guard.json') ? { value: JSON.stringify(CONFIG) } : { deny: 'ENOENT' }))
+  on('fs.read', ($: any, e: any) => (e.path.endsWith('/dkoder.json') ? { value: JSON.stringify(CONFIG) } : { deny: 'ENOENT' }))
   on('fs.exists', ($: any, e: any) => ({ value: e.path.startsWith('/w/app') }))
   on('session.cwd', () => ({ value: '/w/app' }))
   on('mcp.connect', () => ({ value: mcp === 'ok' ? { isConnected: true, server: 'plugin:dkod:dkod' } : { isConnected: false, reason: 'auth', message: 'dkod needs authentication' } }))
@@ -110,7 +110,7 @@ test('session start writes the backstop heartbeat for this session, and the cloc
   const writes: { path: string; text: string }[] = []
   on('fs.write', ($: any, e: any) => { writes.push({ path: e.path, text: e.text }); return { value: undefined } })
   await $.session.start({ cwd: '/w/app', surface: 'terminal', isInteractive: true })
-  expect(writes.map((w) => w.path)).toContain('/home/dev/.dkod-guard/heartbeat/sess-123')
+  expect(writes.map((w) => w.path)).toContain('/home/dev/.dkoder/heartbeat/sess-123')
   const first = writes.length
   await clock.advance(6000)
   expect(writes.length).toBeGreaterThan(first)

@@ -1,4 +1,4 @@
-// Built by packages/guard/scripts/build-claude.ts from dkod-app. Do not edit: run `bun run --cwd packages/guard build:claude`.
+// Built by packages/dkoder-plugin/scripts/build-claude.ts from dkod-app. Do not edit: run `bun run --cwd packages/dkoder-plugin build:claude`.
 var MAX_DEPTH = 4;
 var MAX_LINE = 64 * 1024;
 var OPERATORS = ["&&", "||", ";;", "|&", ";", "|", "&", "(", ")", `
@@ -926,12 +926,12 @@ function bandTree(el, view) {
   const letters = wordmark(view.frame, view.auth).map((l) => h(el.Text, { color: l.color, bold: l.bold }, l.ch));
   const mark = icon(view.pulse, view.pulseFrame);
   const words = message(view.auth, view.pulse, view.now, view.status);
-  return h(el.Box, { key: "dkod-guard-band", flexDirection: "row" }, h(el.Text, null, ...letters), h(el.Text, { color: mark.color, bold: true }, `  ${mark.glyph} `), h(el.Text, { color: COLORS.dim }, "Dkoder  "), h(el.Text, { color: words.color, wrap: "truncate-end" }, words.text));
+  return h(el.Box, { key: "dkod-band", flexDirection: "row" }, h(el.Text, null, ...letters), h(el.Text, { color: mark.color, bold: true }, `  ${mark.glyph} `), h(el.Text, { color: COLORS.dim }, "Dkoder  "), h(el.Text, { color: words.color, wrap: "truncate-end" }, words.text));
 }
 function withBelow(el, ours, below) {
   if (below === null || below === undefined || below === false)
     return ours;
-  return h(el.Box, { key: "dkod-guard-stack", flexDirection: "column" }, ours, below);
+  return h(el.Box, { key: "dkod-stack", flexDirection: "column" }, ours, below);
 }
 
 var IGNORED_BASENAMES = new Set(["readme.md", "license", "license.md", "licence", "licence.md"]);
@@ -2072,7 +2072,7 @@ function createGuard(initial) {
       return config;
     let file = {};
     try {
-      file = JSON.parse(await io.read(`${io.root}/guard.json`));
+      file = JSON.parse(await io.read(`${io.root}/dkoder.json`));
     } catch {
       file = {};
     }
@@ -2084,7 +2084,7 @@ function createGuard(initial) {
     if (file.dashboardUrl && file.token) {
       device = "offline";
       try {
-        const r = await io.fetch(`${file.dashboardUrl.replace(/\/$/, "")}/api/v1/guard/config`, { headers: { authorization: `Bearer ${file.token}` } });
+        const r = await io.fetch(`${file.dashboardUrl.replace(/\/$/, "")}/api/v1/dkoder/config`, { headers: { authorization: `Bearer ${file.token}` } });
         if (r.status === 401 || r.status === 403)
           device = "refused";
         if (r.ok) {
@@ -2129,7 +2129,7 @@ function createGuard(initial) {
       return;
     const device2 = typeof install.deviceId === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(install.deviceId) ? { device: install.deviceId } : {};
     const body = JSON.stringify({ ...event, ...device2, agent: "claude-code", at: new Date().toISOString() });
-    io.fetch(`${install.dashboardUrl.replace(/\/$/, "")}/api/v1/guard/events`, { method: "POST", headers: { authorization: `Bearer ${install.token}`, "content-type": "application/json" }, body }).catch(() => {
+    io.fetch(`${install.dashboardUrl.replace(/\/$/, "")}/api/v1/dkoder/events`, { method: "POST", headers: { authorization: `Bearer ${install.token}`, "content-type": "application/json" }, body }).catch(() => {
       return;
     });
   };
@@ -2323,33 +2323,33 @@ function refusedBy(found) {
     return "Dkoder refused this, by DKOD's floor and your organization's Guard rules.";
   return layers.has("guard") ? "Guard refused this, by your organization's rules." : "Dkoder refused this, by DKOD's floor (the rules every organization has).";
 }
-var GUARD_DIR = ".dkod-guard";
-var GUARD_FILES_DENY = `Dkoder refused this: it touches Dkoder's own files (${GUARD_DIR}). Leave them alone.`;
+var DKODER_DIR = ".dkoder";
+var DKODER_FILES_DENY = `Dkoder refused this: it touches Dkoder's own files (${DKODER_DIR}). Leave them alone.`;
 var WRITERS = new Set(["cp", "mv", "tee", "touch", "mkdir", "rm", "rmdir", "ln", "install", "rsync", "truncate", "chmod", "chown", "chflags", "dd", "sed", "unzip", "tar", "ditto"]);
 var INTERPRETERS = new Set(["python", "python3", "node", "bun", "deno", "perl", "ruby", "osascript"]);
-function inGuardDir(word) {
+function inDkoderDir(word) {
   if (/\s/.test(word))
     return false;
   const p = word.replace(/\\/g, "/").replace(/\/+$/, "");
-  return p === GUARD_DIR || p.endsWith(`/${GUARD_DIR}`) || p.startsWith(`${GUARD_DIR}/`) || p.includes(`/${GUARD_DIR}/`);
+  return p === DKODER_DIR || p.endsWith(`/${DKODER_DIR}`) || p.startsWith(`${DKODER_DIR}/`) || p.includes(`/${DKODER_DIR}/`);
 }
 var underCd = (cd, word) => cd === "" || word.startsWith("/") || word.startsWith("~") ? word : `${cd}/${word}`;
-function touchesGuardFiles(e) {
+function touchesDkoderFiles(e) {
   for (const path of [e.file_path, e.notebook_path, e.path])
-    if (typeof path === "string" && inGuardDir(path))
+    if (typeof path === "string" && inDkoderDir(path))
       return true;
-  if (typeof e.command !== "string" || !e.command.includes(GUARD_DIR))
+  if (typeof e.command !== "string" || !e.command.includes(DKODER_DIR))
     return false;
   for (const cmd of parseCommands(e.command)) {
-    if (inGuardDir(cmd.cd))
+    if (inDkoderDir(cmd.cd))
       return true;
-    if ((cmd.writes ?? []).some((w) => inGuardDir(underCd(cmd.cd, w))))
+    if ((cmd.writes ?? []).some((w) => inDkoderDir(underCd(cmd.cd, w))))
       return true;
     const program = programName(cmd.argv[0] ?? "");
     const args = cmd.argv.slice(1);
-    if (WRITERS.has(program) && args.some((a) => inGuardDir(underCd(cmd.cd, a))))
+    if (WRITERS.has(program) && args.some((a) => inDkoderDir(underCd(cmd.cd, a))))
       return true;
-    if (INTERPRETERS.has(program) && args.some((a) => a.includes(GUARD_DIR)))
+    if (INTERPRETERS.has(program) && args.some((a) => a.includes(DKODER_DIR)))
       return true;
   }
   return false;
@@ -2370,7 +2370,7 @@ function register(on) {
     return;
   };
   on("session.start", async ($, e, next) => {
-    const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkod-guard.config"), keepConfig: (v) => $.store.set("dkod-guard.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => {
+    const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => {
       $.state.set(STATUS, t ?? "").catch(() => {
         return;
       });
@@ -2389,7 +2389,7 @@ function register(on) {
     const beat = async () => {
       if (!home || !/^[A-Za-z0-9_-]+$/.test(sid))
         return;
-      await $.fs.write(`${home}/.dkod-guard/heartbeat/${sid}`, String(Math.floor(await $.clock.now() / 1000))).catch(() => {
+      await $.fs.write(`${home}/.dkoder/heartbeat/${sid}`, String(Math.floor(await $.clock.now() / 1000))).catch(() => {
         return;
       });
     };
@@ -2446,7 +2446,7 @@ function register(on) {
     return next(e);
   });
   on("prompt.submit", async ($, e, next) => {
-    const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkod-guard.config"), keepConfig: (v) => $.store.set("dkod-guard.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME"), pulse: (decision, text) => {
+    const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME"), pulse: (decision, text) => {
       pulseAt = tick;
       $.clock.now().then((at) => $.state.set(PULSE, { decision, text, at })).catch(() => {
         return;
@@ -2459,17 +2459,17 @@ function register(on) {
     return next(note === null ? e : { ...e, context: [...e.context ?? [], note] });
   });
   on("prompt.compose", async ($, e, next) => {
-    const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkod-guard.config"), keepConfig: (v) => $.store.set("dkod-guard.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME") };
+    const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME") };
     const r = await next(e);
     return { sections: [...r.sections, await guard.promptSection(io)] };
   });
   on("tool.call", async ($, e, next) => {
     if (typeof e.command !== "string" && writeShape(e) === null)
       return next(e);
-    if (touchesGuardFiles(e))
-      return { deny: GUARD_FILES_DENY };
+    if (touchesDkoderFiles(e))
+      return { deny: DKODER_FILES_DENY };
     try {
-      const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkod-guard.config"), keepConfig: (v) => $.store.set("dkod-guard.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME"), pulse: (decision, text) => {
+      const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME"), pulse: (decision, text) => {
         pulseAt = tick;
         $.clock.now().then((at) => $.state.set(PULSE, { decision, text, at })).catch(() => {
           return;

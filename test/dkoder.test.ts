@@ -1,7 +1,7 @@
-// Run with: claude plugin test packages/guard/claude/plugins/dkod
+// Run with: claude plugin test packages/dkoder-plugin/claude/plugins/dkod
 // The engine loads the built mod (hooks/register.js) as a session would. The hooks `on` registers
 // here sit beneath the mod and stand for the host: git answers for a repo whose remote is the app
-// repo, and guard.json (root-owned on a device) is served from memory.
+// repo, and dkoder.json (root-owned on a device) is served from memory.
 import { expect, mock, test } from 'claude-code/testing'
 
 const STRIPE = 'sk_' + 'live_' + '4eC39HqLyjWDarjtT1zdp7dc'
@@ -11,8 +11,8 @@ const GUARD_JSON = JSON.stringify(CONFIG)
 
 function host(on: any, remote: string, opts: { install?: boolean; kept?: Record<string, unknown> } = {}) {
   const install = opts.install ?? true
-  mock.store(on, install ? {} : (opts.kept ?? { 'dkod-guard.config': CONFIG }))
-  on('fs.read', ($: any, e: any) => (install && e.path.endsWith('/guard.json') ? { value: GUARD_JSON } : { deny: 'ENOENT' }))
+  mock.store(on, install ? {} : (opts.kept ?? { 'dkoder.config': CONFIG }))
+  on('fs.read', ($: any, e: any) => (install && e.path.endsWith('/dkoder.json') ? { value: GUARD_JSON } : { deny: 'ENOENT' }))
   on('fs.exists', ($: any, e: any) => ({ value: e.path.startsWith('/w/app') }))
   on('session.cwd', () => ({ value: '/w/app' }))
   on('process.run', ($: any, e: any) => {
@@ -49,7 +49,7 @@ test('a config kept in the user-writable store cannot open the governance repo',
 })
 
 test('a hook that cannot check the call refuses it (fail closed): the engine runs the tool when a hook throws', async ($: any, on: any) => {
-  mock.store(on, { 'dkod-guard.config': CONFIG })
+  mock.store(on, { 'dkoder.config': CONFIG })
   on('fs.read', () => ({ deny: 'ENOENT' }))
   on('process.run', () => ({ deny: 'git is broken' }))
   on('session.cwd', () => ({ deny: 'no cwd' }))

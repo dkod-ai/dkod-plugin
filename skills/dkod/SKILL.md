@@ -33,6 +33,6 @@ If a tool says the server needs sign-in, or the DKOD band above the prompt is ye
 
 ## Ship
 
-When the build is ready, call `dkoder.deliver` with `sessionId` and the build `id`. DKOD writes the code to the app repository and the GitOps repository; nobody pushes by hand. `dkoder.guard.delivered` (repo, commit) says whether Deliver wrote a commit.
+When the build is ready, call `dkoder.deliver` with `sessionId` and the build `id`. DKOD writes the code to the app repository and the GitOps repository; nobody pushes by hand. `dkoder.delivered` (repo, commit) says whether Deliver wrote a commit.
 
 Use `dkoder.session.append` to add a note to the session when something worth recording happens.

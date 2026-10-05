@@ -1,4 +1,4 @@
-// DKOD Guard's band values (packages/guard/src/claude-band.ts), held by the host for the session.
+// DKOD Guard's band values (packages/dkoder-plugin/src/claude-band.ts), held by the host for the session.
 export type GuardPulse = { decision: 'allowed' | 'blocked' | 'declined'; text: string; at: number }
 
 declare module 'claude-code' {
