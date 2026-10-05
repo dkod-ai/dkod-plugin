@@ -1,4 +1,4 @@
-// Run with: claude plugin test packages/guard/claude/plugins/dkod-guard
+// Run with: claude plugin test packages/guard/claude/plugins/dkod
 // The band above the prompt, drawn by the built mod on the terminal and on the desktop: the DKOD
 // wordmark in cyan while signed in, yellow with how to sign in while the DKOD MCP server asks for
 // authentication, and the Guard icon that pulses in the decision's color when Guard judges an action.
@@ -14,7 +14,7 @@ function host(on: any, mcp: 'ok' | 'auth') {
   on('fs.read', ($: any, e: any) => (e.path.endsWith('/guard.json') ? { value: JSON.stringify(CONFIG) } : { deny: 'ENOENT' }))
   on('fs.exists', ($: any, e: any) => ({ value: e.path.startsWith('/w/app') }))
   on('session.cwd', () => ({ value: '/w/app' }))
-  on('mcp.connect', () => ({ value: mcp === 'ok' ? { isConnected: true, server: 'plugin:dkod-guard:dkod' } : { isConnected: false, reason: 'auth', message: 'dkod needs authentication' } }))
+  on('mcp.connect', () => ({ value: mcp === 'ok' ? { isConnected: true, server: 'plugin:dkod:dkod' } : { isConnected: false, reason: 'auth', message: 'dkod needs authentication' } }))
   on('process.run', ($: any, e: any) => {
     const args = e.argv.slice(3).join(' ')
     const remote = 'git@github.com:dkod-demo/rc-news-app.git'
@@ -75,7 +75,7 @@ test('not signed in: the wordmark turns yellow and the line says how to sign in'
     const ui = await $.ui.mount(band(surface))
     const [d] = await letters(ui)
     expect(d?.props.color).toBe(YELLOW)
-    expect(await ui.find({ type: 'Text', text: /Sign in to DKOD: type \/mcp/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Sign in to DKOD for Deliver and your organization's Guard rules: type \/mcp/ })).toBeDefined()
     await ui.unmount()
   }
 })

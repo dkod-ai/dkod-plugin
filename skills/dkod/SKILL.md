@@ -1,17 +1,17 @@
 ---
 name: dkod
-description: Use when the user wants to build, ship, deploy or remove an app through their company's DKOD, asks what the org's policy or templates are, or wants to push or merge app code. Covers the dkoder MCP tools (session, policy, templates, deploy questions, deploy, build answers, deliver, remove) and how DKOD Guard treats pushes.
+description: Use when the user wants to build, ship, deploy or remove an app through their company's DKOD, asks what the org's policy or templates are, or wants to push or merge app code. Covers the dkoder MCP tools (session, policy, templates, deploy questions, deploy, build answers, deliver, remove) and how Dkoder and the org's Guard rules treat pushes.
 ---
 
 # DKOD
 
-DKOD is the company's platform. It holds the org's policy, its app templates and its Deploy rules. The `dkod` MCP server that comes with DKOD Guard gives you its tools; their names end in `dkoder_<name>` (for example `dkoder.deliver`).
+DKOD is the company's platform. It holds the org's policy, its app templates and its Deploy rules. The `dkod` MCP server that comes with Dkoder gives you its tools; their names end in `dkoder_<name>` (for example `dkoder.deliver`).
 
 If a tool says the server needs sign-in, or the DKOD band above the prompt is yellow, tell the user to type `/mcp`, pick `dkod` and choose Authenticate. They sign in with their company's own sign-in.
 
 ## The rules
 
-- App code ships through Deliver (`dkoder.deliver`). DKOD Guard refuses `git push`, `gh pr merge` and GitHub API writes to the org's app repositories. When Guard refuses a call, tell the user why in one or two sentences and offer Deliver. Do not try another way around it.
+- App code ships through Deliver (`dkoder.deliver`). Dkoder refuses `git push`, `gh pr merge` and GitHub API writes to the org's app repositories. Guard adds the org's own rules from its governance repo once the person signs in. When Dkoder or Guard refuses a call, tell the user why in one or two sentences and offer Deliver. Do not try another way around it.
 - Pushes to the governance repository are allowed.
 - Never write a secret value into a file. Put the name of the secret there and resolve it at run time.
 - The app lives in the customer's GitHub org. Never use `dkod-ai/` as the app destination.
