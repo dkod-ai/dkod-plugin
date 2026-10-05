@@ -910,9 +910,9 @@ function message(auth, pulse, now, status) {
     return { text: pulse.text, color };
   }
   if (auth === "signin")
-    return { text: "Sign in to DKOD: type /mcp, pick dkod, then Authenticate", color: COLORS.yellow };
+    return { text: "Sign in to DKOD for Deliver and your organization's Guard rules: type /mcp, pick dkod, then Authenticate", color: COLORS.yellow };
   if (auth === "device")
-    return { text: "This device is not enrolled in DKOD Guard. Ask your DKOD admin.", color: COLORS.yellow };
+    return { text: "This device is not enrolled in your organization's Guard. Ask your DKOD admin.", color: COLORS.yellow };
   if (auth === "offline")
     return { text: "DKOD is not connected. Type /mcp and connect dkod.", color: COLORS.yellow };
   return { text: status, color: COLORS.dim };
@@ -926,7 +926,7 @@ function bandTree(el, view) {
   const letters = wordmark(view.frame, view.auth).map((l) => h(el.Text, { color: l.color, bold: l.bold }, l.ch));
   const mark = icon(view.pulse, view.pulseFrame);
   const words = message(view.auth, view.pulse, view.now, view.status);
-  return h(el.Box, { key: "dkod-guard-band", flexDirection: "row" }, h(el.Text, null, ...letters), h(el.Text, { color: mark.color, bold: true }, `  ${mark.glyph} `), h(el.Text, { color: COLORS.dim }, "Guard  "), h(el.Text, { color: words.color, wrap: "truncate-end" }, words.text));
+  return h(el.Box, { key: "dkod-guard-band", flexDirection: "row" }, h(el.Text, null, ...letters), h(el.Text, { color: mark.color, bold: true }, `  ${mark.glyph} `), h(el.Text, { color: COLORS.dim }, "Dkoder  "), h(el.Text, { color: words.color, wrap: "truncate-end" }, words.text));
 }
 function withBelow(el, ours, below) {
   if (below === null || below === undefined || below === false)
@@ -1720,9 +1720,12 @@ function classifyRepo(repo, config) {
     return "allowed";
   return "protected";
 }
+function ruleLayer(rule) {
+  return rule === "blocked-command" || rule === "guardrails" ? "guard" : "floor";
+}
 var DELIVER = "App code ships through Deliver (the dkoder.deliver tool), never a direct push or merge.";
 function governanceMessage(repo) {
-  return `${repo} is your org's governance repo. It changes only through the DKOD dashboard, by an org admin. Guard does not push, merge or write to it.`;
+  return `${repo} is your org's governance repo. It changes only through the DKOD dashboard, by an org admin. Dkoder does not push, merge or write to it.`;
 }
 function describe(a) {
   if (a.kind === "push")
@@ -1786,10 +1789,10 @@ async function decideBash(cmds, config, resolver, seen = []) {
         if (remotes.length > 0 && cls2 === "outside")
           continue;
         judged("alias", repo2, true);
-        return { rule: "deliver-only", ...repo2 !== null ? { repo: repo2 } : {}, message: `Guard could not tell what "${a.tool} ${a.name}" runs, so it did not run. Use the plain ${a.tool} command.` };
+        return { rule: "deliver-only", ...repo2 !== null ? { repo: repo2 } : {}, message: `Dkoder could not tell what "${a.tool} ${a.name}" runs, so it did not run. Use the plain ${a.tool} command.` };
       }
       if ((expansions += 1) > 20 && judged("alias", null, true))
-        return { rule: "no-hook-bypass", message: "This command expands too many aliases for Guard to read. Run the git or gh command directly." };
+        return { rule: "no-hook-bypass", message: "This command expands too many aliases for Dkoder to read. Run the git or gh command directly." };
       queue.unshift(...expandAlias(a.tool, value, a.prefix, a.args, { ...a.cmd, cd: a.dir }));
       continue;
     }
@@ -1809,20 +1812,20 @@ async function decideBash(cmds, config, resolver, seen = []) {
     if (a.kind === "push") {
       if (a.opaque !== null && config.owners.length > 0) {
         judged("push", null, true);
-        return { rule: "deliver-only", message: `Guard cannot tell where this push goes (${a.opaque}). Run a plain git push, or ship with Deliver. ${DELIVER}` };
+        return { rule: "deliver-only", message: `Dkoder cannot tell where this push goes (${a.opaque}). Run a plain git push, or ship with Deliver. ${DELIVER}` };
       }
       const targets = await resolver.pushTargets(a.dir, a.remote);
       const lineUrls = (a.also ?? []).map(repoFromRemoteUrl);
       const also = lineUrls.filter((r) => r !== null);
       if (a.lineRemote === true && config.owners.length > 0 && (targets === null && also.length === 0 || also.length < lineUrls.length)) {
         judged("push", null, true);
-        return { rule: "deliver-only", message: `Guard cannot tell where this push goes: an earlier command in the same line makes the remote. Run the push as its own command, or ship with Deliver. ${DELIVER}` };
+        return { rule: "deliver-only", message: `Dkoder cannot tell where this push goes: an earlier command in the same line makes the remote. Run the push as its own command, or ship with Deliver. ${DELIVER}` };
       }
       const repos2 = [...targets ?? await resolver.repoRemotes(a.dir), ...also];
       const { cls: cls2, repo: repo2 } = worst(repos2, config);
       judged("push", repo2, cls2 !== "outside" || targets === null);
       if (targets === null && also.length === 0 && cls2 !== "outside") {
-        return { rule: "deliver-only", ...repo2 !== null ? { repo: repo2 } : {}, message: `Guard could not tell which repo this push goes to, and this folder has an org remote. ${DELIVER}` };
+        return { rule: "deliver-only", ...repo2 !== null ? { repo: repo2 } : {}, message: `Dkoder could not tell which repo this push goes to, and this folder has an org remote. ${DELIVER}` };
       }
       if (cls2 === "governance")
         return { rule: "deliver-only", repo: repo2, message: governanceMessage(repo2) };
@@ -1838,7 +1841,7 @@ async function decideBash(cmds, config, resolver, seen = []) {
         continue;
       judged(a.kind, null, true);
       const what = a.kind === "api-write" ? "GitHub API write" : describe(a);
-      return { rule: "deliver-only", message: `Guard could not tell which repo this ${what} reaches, so it did not run. ${DELIVER}` };
+      return { rule: "deliver-only", message: `Dkoder could not tell which repo this ${what} reaches, so it did not run. ${DELIVER}` };
     }
     const repos = a.repo !== null ? [a.repo] : await resolver.repoRemotes(a.dir);
     const { cls, repo } = worst(repos, config);
@@ -1856,7 +1859,7 @@ function commitTargets(cmds) {
 var MAX_SCAN_CHARS = 8 * 1024 * 1024;
 function checkFile(path, content, config) {
   if (content.length > MAX_SCAN_CHARS) {
-    return [{ rule: "no-secrets", message: `${path} is larger than ${String(MAX_SCAN_CHARS / 1024 / 1024)} MB, too large for Guard to check for secrets. Keep large data out of the repo.` }];
+    return [{ rule: "no-secrets", message: `${path} is larger than ${String(MAX_SCAN_CHARS / 1024 / 1024)} MB, too large for Dkoder to check for secrets. Keep large data out of the repo.` }];
   }
   const text = content;
   const out = [];
@@ -1933,17 +1936,17 @@ function mergeConfig(base, live, trusted = true) {
 }
 function rulesText(config) {
   const lines = [
-    "# DKOD Guard (your organization's rules)",
-    "DKOD Guard is installed by your organization and checks every command and file write.",
+    "# Dkoder (DKOD's floor, the same for every organization)",
+    "Dkoder checks every command and file write.",
     "- App code ships through Deliver (the dkoder.deliver tool of the DKOD MCP server). Never git push, gh pr merge or write through the GitHub API to an app repo of the organization.",
     "- Never write a secret value into a file, and never commit one. Put the NAME of a secret in the file and resolve it at run time.",
     "- Never skip git hooks (--no-verify, core.hooksPath) and never force push to an organization repo.",
-    "- When Guard refuses a call, tell the person why and take the DKOD path instead. Do not try another way around it."
+    "- When Dkoder or Guard refuses a call, tell the person why and take the DKOD path instead. Do not try another way around it."
   ];
   if (config.governanceRepo !== null)
     lines.push(`- The governance repo ${config.governanceRepo} changes only through the DKOD dashboard, by an org admin. Never push, merge or write to it from here.`);
   if (config.policyText)
-    lines.push("", "## Organization policy", config.policyText);
+    lines.push("", "## Guard: your organization's policy", config.policyText);
   return lines.join(`
 `);
 }
@@ -2093,6 +2096,17 @@ function createGuard(initial) {
         live = null;
       }
     }
+    if (live === null && !file.token && io.mcpConfig) {
+      try {
+        const answer = await io.mcpConfig();
+        if (typeof answer === "object" && answer !== null && answer.enabled === true) {
+          live = configFrom(answer);
+          await io.keepConfig(live);
+        }
+      } catch {
+        live = null;
+      }
+    }
     if (live === null) {
       try {
         const kept = await io.keptConfig();
@@ -2127,10 +2141,10 @@ function createGuard(initial) {
   const refuse = (io, tool, found, action) => {
     for (const r of found)
       report(io, tool, r, action);
-    const shown = found.slice(0, 5).map((r) => `- ${r.message}`);
+    const shown = found.slice(0, 5).map((r) => `- ${ruleLayer(r.rule) === "guard" ? "Guard, your organization's rule" : "Dkoder floor"}: ${r.message}`);
     if (found.length > 5)
       shown.push(`- and ${String(found.length - 5)} more.`);
-    return { deny: `DKOD Guard refused this, by your organization's rules.
+    return { deny: `${refusedBy(found)}
 ${shown.join(`
 `)}
 Do not try another way to run it. Tell the person why, and offer the allowed way above.` };
@@ -2241,7 +2255,8 @@ Do not try another way to run it. Tell the person why, and offer the allowed way
     const protectedRepo = remotes.find((r) => classifyRepo(r, cfg) === "protected");
     const orgRepo = remotes.find((r) => classifyRepo(r, cfg) !== "outside");
     send(io, { kind: "session", repo: orgRepo ?? null });
-    io.status(protectedRepo !== undefined ? `DKOD Guard: ${protectedRepo.split("/")[1]}, Deliver required` : "DKOD Guard: on");
+    const guardOn = cfg.owners.length > 0 ? "on, Guard on" : "on";
+    io.status(protectedRepo !== undefined ? `Dkoder: ${guardOn} · ${protectedRepo.split("/")[1]}, Deliver required` : `Dkoder: ${guardOn}`);
   };
   const promptNote = async (io, text) => {
     if (!asksDirectShip(text))
@@ -2254,18 +2269,18 @@ Do not try another way to run it. Tell the person why, and offer the allowed way
       return null;
     send(io, { kind: "action", action: "direct-ship-request", decision: "declined", rule: "deliver-only", repo, tool: "prompt" });
     return [
-      `DKOD Guard: this message asks to push or merge code directly. ${repo} is an app repo of your organization, and your organization's rules (with DKOD's floor) do not allow that.`,
+      `Dkoder: this message asks to push or merge code directly. ${repo} is an app repo of your organization, and your organization's rules (with DKOD's floor) do not allow that.`,
       DELIVER,
-      "Do the rest of the work. Do not run git push, gh pr merge or a GitHub API write for it: Guard refuses them. Tell the person, in one or two sentences, why it will not be pushed or merged directly, and offer Deliver."
+      "Do the rest of the work. Do not run git push, gh pr merge or a GitHub API write for it: Dkoder refuses them. Tell the person, in one or two sentences, why it will not be pushed or merged directly, and offer Deliver."
     ].join(`
 `);
   };
-  const promptSection = async (io) => ({ id: "dkod-guard", text: rulesText(await load(io)), scope: "session" });
+  const promptSection = async (io) => ({ id: "dkod", text: rulesText(await load(io)), scope: "session" });
   const failClosed = async (tool, check) => {
     try {
       return await check();
     } catch (err) {
-      return { deny: `DKOD Guard could not check this ${tool} call (${err instanceof Error ? err.message.slice(0, 120) : "unknown error"}), so it did not run. Try again; if it keeps failing, tell your DKOD admin.` };
+      return { deny: `Dkoder could not check this ${tool} call (${err instanceof Error ? err.message.slice(0, 120) : "unknown error"}), so it did not run. Try again; if it keeps failing, tell your DKOD admin.` };
     }
   };
   const bash = (io, command) => failClosed("Bash", () => bashCheck(io, command));
@@ -2293,10 +2308,23 @@ Do not try another way to run it. Tell the person why, and offer the allowed way
     return null;
   });
   const deviceState = () => device;
-  return { sessionStart, promptSection, promptNote, bash, write, load, checkWrite, checkCommit, resolver, deviceState };
+  const afterSignIn = async (io) => {
+    if (install.token)
+      return;
+    loaded = false;
+    await load(io);
+    await sessionStart(io, await io.cwd());
+  };
+  return { sessionStart, promptSection, promptNote, bash, write, load, checkWrite, checkCommit, resolver, deviceState, afterSignIn };
+}
+function refusedBy(found) {
+  const layers = new Set(found.map((r) => ruleLayer(r.rule)));
+  if (layers.size > 1)
+    return "Dkoder refused this, by DKOD's floor and your organization's Guard rules.";
+  return layers.has("guard") ? "Guard refused this, by your organization's rules." : "Dkoder refused this, by DKOD's floor (the rules every organization has).";
 }
 var GUARD_DIR = ".dkod-guard";
-var GUARD_FILES_DENY = `DKOD Guard refused this: it touches DKOD Guard's own files (${GUARD_DIR}). Leave them alone.`;
+var GUARD_FILES_DENY = `Dkoder refused this: it touches Dkoder's own files (${GUARD_DIR}). Leave them alone.`;
 var WRITERS = new Set(["cp", "mv", "tee", "touch", "mkdir", "rm", "rmdir", "ln", "install", "rsync", "truncate", "chmod", "chown", "chflags", "dd", "sed", "unzip", "tar", "ditto"]);
 var INTERPRETERS = new Set(["python", "python3", "node", "bun", "deno", "perl", "ruby", "osascript"]);
 function inGuardDir(word) {
@@ -2346,7 +2374,14 @@ function register(on) {
       $.state.set(STATUS, t ?? "").catch(() => {
         return;
       });
-    }, cwd: () => $.session.cwd(), home: () => $.env.get("HOME") };
+    }, cwd: () => $.session.cwd(), home: () => $.env.get("HOME"), mcpConfig: async () => {
+      const r = await $.mcp.connect("dkod");
+      if (!r.isConnected)
+        return;
+      const out = await $.mcp.call(r.server, "dkoder.guard.config", {});
+      const text = out.isError ? undefined : out.content.find((c) => c.type === "text")?.text;
+      return text === undefined ? undefined : JSON.parse(text);
+    } };
     const home = await $.env.get("HOME").catch(() => {
       return;
     });
@@ -2362,14 +2397,20 @@ function register(on) {
     await beat();
     await guard.sessionStart(io, e.cwd);
     let told = false;
+    let wasOut = false;
     const checkAuth = async () => {
       const device = guard.deviceState();
       const r = await $.mcp.connect("dkod").catch(() => null);
       const auth = r === null ? "offline" : r.isConnected ? device === "refused" ? "device" : "ok" : r.reason === "auth" ? "signin" : device === "refused" ? "device" : "offline";
       await $.state.set(AUTH, auth);
+      if (auth === "ok" && wasOut)
+        await guard.afterSignIn(io).catch(() => {
+          return;
+        });
+      wasOut = auth === "signin";
       if (!signedIn(auth) && !told) {
         told = true;
-        $.ui.toast(auth === "signin" ? "DKOD: sign in to use Deliver. Type /mcp, pick dkod, then Authenticate." : auth === "device" ? "DKOD Guard: this device is not enrolled. Ask your DKOD admin." : "DKOD is not connected. Type /mcp and connect dkod.");
+        $.ui.toast(auth === "signin" ? "DKOD: sign in to use Deliver. Type /mcp, pick dkod, then Authenticate." : auth === "device" ? "Dkoder: this device is not enrolled in your organization's Guard. Ask your DKOD admin." : "DKOD is not connected. Type /mcp and connect dkod.");
       }
       if (signedIn(auth))
         told = false;
@@ -2444,7 +2485,7 @@ function register(on) {
       }
       return await guard.write(io, e) ?? next(e);
     } catch (err) {
-      return { deny: `DKOD Guard could not check this ${e.tool} call (${err instanceof Error ? err.message.slice(0, 120) : "unknown error"}), so it did not run. Try again; if it keeps failing, tell your DKOD admin.` };
+      return { deny: `Dkoder could not check this ${e.tool} call (${err instanceof Error ? err.message.slice(0, 120) : "unknown error"}), so it did not run. Try again; if it keeps failing, tell your DKOD admin.` };
     }
   });
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
@@ -2458,7 +2499,7 @@ function register(on) {
       pulse: pulse.value ?? null,
       pulseFrame: typeof pulseFrame.value === "number" ? pulseFrame.value : -1,
       now: await $.clock.now(),
-      status: typeof status.value === "string" && status.value !== "" ? status.value.replace(/^DKOD Guard: /, "") : "on"
+      status: typeof status.value === "string" && status.value !== "" ? status.value.replace(/^Dkoder: /, "") : "on"
     });
     return withBelow(el, ours, await next(e));
   });

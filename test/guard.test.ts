@@ -1,4 +1,4 @@
-// Run with: claude plugin test packages/guard/claude/plugins/dkod-guard
+// Run with: claude plugin test packages/guard/claude/plugins/dkod
 // The engine loads the built mod (hooks/register.js) as a session would. The hooks `on` registers
 // here sit beneath the mod and stand for the host: git answers for a repo whose remote is the app
 // repo, and guard.json (root-owned on a device) is served from memory.
@@ -55,7 +55,7 @@ test('a hook that cannot check the call refuses it (fail closed): the engine run
   on('session.cwd', () => ({ deny: 'no cwd' }))
   on('tool.call', () => ({ result: { stdout: 'ran', stderr: '', interrupted: false } }))
   const r = await $.tool.call({ tool: 'Bash', command: 'git push origin main' })
-  expect(r.deny ?? r.text ?? '').toContain('DKOD Guard could not check')
+  expect(r.deny ?? r.text ?? '').toContain('Dkoder could not check')
 })
 
 test('writing a live Stripe key into a source file is refused', async ($: any, on: any) => {
@@ -89,4 +89,23 @@ test('with no install file, a repo of an org nobody named is not judged', async 
   host(on, 'git@github.com:someone/side-project.git', { install: false, kept: {} })
   const r = await $.tool.call({ tool: 'Bash', command: 'git push origin main' })
   expect(r.deny).toBe(undefined)
+})
+
+// DKO-691: no device install. The person is signed in through /mcp, so Dkoder asks DKOD for the
+// org's Guard config (dkoder.guard.config) and a push to the org's app repo is refused.
+test('signed in with no device install: the org Guard config comes from dkoder.guard.config', async ($: any, on: any) => {
+  host(on, 'git@github.com:dkod-demo/rc-news-app.git', { install: false, kept: {} })
+  const calls: string[] = []
+  on('mcp.connect', () => ({ value: { isConnected: true, server: 'plugin:dkod:dkod' } }))
+  on('mcp.call', ($: any, e: any) => {
+    calls.push(`${e.server} ${e.tool}`)
+    return { value: { content: [{ type: 'text', text: JSON.stringify({ enabled: true, ...CONFIG }) }] } }
+  })
+  on('session.start', ($: any, e: any) => ({ cwd: e.cwd }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  await $.session.start({ cwd: '/w/app', surface: 'terminal', isInteractive: true })
+  expect(calls).toContain('plugin:dkod:dkod dkoder.guard.config')
+  const r = await $.tool.call({ tool: 'Bash', command: 'git push origin HEAD:main' })
+  expect(r.deny ?? r.text ?? '').toContain('Dkoder refused this')
 })
