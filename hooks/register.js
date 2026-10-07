@@ -192,8 +192,8 @@ function tokenize(line, subs) {
       let j = i;
       while (j < n && (line[j] === ">" || line[j] === "<" || line[j] === "&" || line[j] === "|" || line[j] === "-"))
         j += 1;
-      const op2 = line.slice(i, j);
-      out.push({ kind: "op", text: "redirect", write: op2.includes(">") && !op2.endsWith("&") });
+      const op = line.slice(i, j);
+      out.push({ kind: "op", text: "redirect", write: op.includes(">") && !op.endsWith("&") });
       i = j;
       continue;
     }
@@ -985,6 +985,15 @@ function looksLikeReference(value) {
     return true;
   return false;
 }
+var CODE_FILE_RE = /\.(?:[cm]?[jt]sx?|py|go|java|kt|kts|rb|rs|cs|php|swift|scala|dart)$/;
+function looksLikeCodeExpression(path, value) {
+  if (isConfigFile(path) || !CODE_FILE_RE.test(basename(path)))
+    return false;
+  const v = value.trim().replace(/[,;]$/, "").trim();
+  if (!v.includes("(") && !v.includes(".") && !/^(?:await|new)[ \t]/.test(v))
+    return false;
+  return /^(?:await[ \t]+|new[ \t]+)?[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)*[ \t]*(?:[!?]?\(.*)?$/.test(v);
+}
 function nameWords(name) {
   return name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/([A-Z])([A-Z][a-z])/g, "$1_$2").toLowerCase().split(/[_.-]/).filter((w) => w !== "");
 }
@@ -1353,6 +1362,8 @@ function checkSecrets(file) {
     if (!SECRET_KEY_RE.test(key))
       continue;
     if (looksLikeReference(match[2]))
+      continue;
+    if (!/^\s*\*/.test(line) && looksLikeCodeExpression(file.path, match[2]))
       continue;
     out.push({
       rule: "no-plaintext-secrets",
@@ -1785,11 +1796,11 @@ async function decideBash(cmds, config, resolver, seen = []) {
         continue;
       if (value === undefined) {
         const remotes = await resolver.repoRemotes(a.dir);
-        const { cls: cls2, repo: repo2 } = worst(remotes, config);
-        if (remotes.length > 0 && cls2 === "outside")
+        const { cls, repo } = worst(remotes, config);
+        if (remotes.length > 0 && cls === "outside")
           continue;
-        judged("alias", repo2, true);
-        return { rule: "deliver-only", ...repo2 !== null ? { repo: repo2 } : {}, message: `Dkoder could not tell what "${a.tool} ${a.name}" runs, so it did not run. Use the plain ${a.tool} command.` };
+        judged("alias", repo, true);
+        return { rule: "deliver-only", ...repo !== null ? { repo } : {}, message: `Dkoder could not tell what "${a.tool} ${a.name}" runs, so it did not run. Use the plain ${a.tool} command.` };
       }
       if ((expansions += 1) > 20 && judged("alias", null, true))
         return { rule: "no-hook-bypass", message: "This command expands too many aliases for Dkoder to read. Run the git or gh command directly." };
@@ -1797,17 +1808,17 @@ async function decideBash(cmds, config, resolver, seen = []) {
       continue;
     }
     if (a.kind === "commit") {
-      const { cls: cls2, repo: repo2 } = worst(await resolver.repoRemotes(a.dir), config);
-      judged("commit", repo2, cls2 !== "outside");
+      const { cls, repo } = worst(await resolver.repoRemotes(a.dir), config);
+      judged("commit", repo, cls !== "outside");
       continue;
     }
     if (a.kind === "hook-bypass") {
       const remotes = await resolver.repoRemotes(a.dir);
-      const { cls: cls2, repo: repo2 } = worst(remotes, config);
-      judged("hook-bypass", repo2, remotes.length === 0 || cls2 !== "outside");
-      if (remotes.length > 0 && cls2 === "outside")
+      const { cls, repo } = worst(remotes, config);
+      judged("hook-bypass", repo, remotes.length === 0 || cls !== "outside");
+      if (remotes.length > 0 && cls === "outside")
         continue;
-      return { rule: "no-hook-bypass", ...repo2 !== null ? { repo: repo2 } : {}, message: `${a.how} is not allowed: it skips the checks your org runs before code leaves this machine.` };
+      return { rule: "no-hook-bypass", ...repo !== null ? { repo } : {}, message: `${a.how} is not allowed: it skips the checks your org runs before code leaves this machine.` };
     }
     if (a.kind === "push") {
       if (a.opaque !== null && config.owners.length > 0) {
@@ -1821,18 +1832,18 @@ async function decideBash(cmds, config, resolver, seen = []) {
         judged("push", null, true);
         return { rule: "deliver-only", message: `Dkoder cannot tell where this push goes: an earlier command in the same line makes the remote. Run the push as its own command, or ship with Deliver. ${DELIVER}` };
       }
-      const repos2 = [...targets ?? await resolver.repoRemotes(a.dir), ...also];
-      const { cls: cls2, repo: repo2 } = worst(repos2, config);
-      judged("push", repo2, cls2 !== "outside" || targets === null);
-      if (targets === null && also.length === 0 && cls2 !== "outside") {
-        return { rule: "deliver-only", ...repo2 !== null ? { repo: repo2 } : {}, message: `Dkoder could not tell which repo this push goes to, and this folder has an org remote. ${DELIVER}` };
+      const repos = [...targets ?? await resolver.repoRemotes(a.dir), ...also];
+      const { cls, repo } = worst(repos, config);
+      judged("push", repo, cls !== "outside" || targets === null);
+      if (targets === null && also.length === 0 && cls !== "outside") {
+        return { rule: "deliver-only", ...repo !== null ? { repo } : {}, message: `Dkoder could not tell which repo this push goes to, and this folder has an org remote. ${DELIVER}` };
       }
-      if (cls2 === "governance")
-        return { rule: "deliver-only", repo: repo2, message: governanceMessage(repo2) };
-      if (cls2 === "protected") {
+      if (cls === "governance")
+        return { rule: "deliver-only", repo, message: governanceMessage(repo) };
+      if (cls === "protected") {
         if (a.force)
-          return { rule: "no-force-push", repo: repo2, message: `Force push to ${repo2} is not allowed. ${DELIVER}` };
-        return { rule: "deliver-only", repo: repo2, message: `git push to ${repo2} is not allowed. ${DELIVER}` };
+          return { rule: "no-force-push", repo, message: `Force push to ${repo} is not allowed. ${DELIVER}` };
+        return { rule: "deliver-only", repo, message: `git push to ${repo} is not allowed. ${DELIVER}` };
       }
       continue;
     }
@@ -2019,10 +2030,10 @@ function createGuard(initial) {
       try {
         const cwd = await absolute(io, dir);
         if (tool === "git") {
-          const r2 = await io.run(["git", "-C", cwd, "config", "--get", `alias.${name}`], { timeoutMs: 1e4 });
-          if (r2.exitCode === 1 && r2.stdout === "")
+          const r = await io.run(["git", "-C", cwd, "config", "--get", `alias.${name}`], { timeoutMs: 1e4 });
+          if (r.exitCode === 1 && r.stdout === "")
             return null;
-          return r2.exitCode === 0 ? r2.stdout.replace(/\n$/, "") : undefined;
+          return r.exitCode === 0 ? r.stdout.replace(/\n$/, "") : undefined;
         }
         const r = await io.run(["gh", "alias", "list"], { cwd, timeoutMs: 1e4 });
         if (r.exitCode !== 0)
@@ -2127,8 +2138,8 @@ function createGuard(initial) {
       io.pulse?.(event.decision, pulseText(event.decision, event.action, event.repo));
     if (!install.dashboardUrl || !install.token)
       return;
-    const device2 = typeof install.deviceId === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(install.deviceId) ? { device: install.deviceId } : {};
-    const body = JSON.stringify({ ...event, ...device2, agent: "claude-code", at: new Date().toISOString() });
+    const device = typeof install.deviceId === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(install.deviceId) ? { device: install.deviceId } : {};
+    const body = JSON.stringify({ ...event, ...device, agent: "claude-code", at: new Date().toISOString() });
     io.fetch(`${install.dashboardUrl.replace(/\/$/, "")}/api/v1/dkoder/events`, { method: "POST", headers: { authorization: `Bearer ${install.token}`, "content-type": "application/json" }, body }).catch(() => {
       return;
     });
