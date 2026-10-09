@@ -1,1 +1,18 @@
-{ "modules": ["./register.js"] }
+{
+  "modules": [
+    "./register.js"
+  ],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/backstop.sh\" --always"
+          }
+        ]
+      }
+    ]
+  }
+}
