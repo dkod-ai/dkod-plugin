@@ -12,7 +12,7 @@
       "name": "dkod",
       "source": "./",
       "description": "Build and deploy apps through your company's DKOD: policy, templates, Deploy questions and Deliver, with a DKOD band above the prompt and the DKOD rules on every command and file write.",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "category": "deployment",
       "tags": [
         "deploy",

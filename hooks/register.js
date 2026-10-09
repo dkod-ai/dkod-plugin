@@ -2113,6 +2113,9 @@ function createGuard(initial) {
         if (typeof answer === "object" && answer !== null && answer.enabled === true) {
           live = configFrom(answer);
           await io.keepConfig(live);
+          await io.keepHookConfig?.({ owners: live.owners, appRepos: live.appRepos })?.catch(() => {
+            return;
+          });
         }
       } catch {
         live = null;
@@ -2392,6 +2395,11 @@ function register(on) {
       const out = await $.mcp.call(r.server, "dkoder.guard.config", {});
       const text = out.isError ? undefined : out.content.find((c) => c.type === "text")?.text;
       return text === undefined ? undefined : JSON.parse(text);
+    }, keepHookConfig: async (c) => {
+      const h2 = await $.env.get("HOME");
+      if (h2)
+        await $.fs.write(`${h2}/.dkoder/guard.json`, `${JSON.stringify(c)}
+`);
     } };
     const home = await $.env.get("HOME").catch(() => {
       return;
