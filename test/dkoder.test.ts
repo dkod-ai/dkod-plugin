@@ -8,6 +8,7 @@ const STRIPE = 'sk_' + 'live_' + '4eC39HqLyjWDarjtT1zdp7dc'
 const CONFIG = { owners: ['dkod-demo'], governanceRepo: 'dkod-demo/dkod-governance', appRepos: ['dkod-demo/rc-news-app'] }
 
 const GUARD_JSON = JSON.stringify(CONFIG)
+const COMPOSE = { model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: ['Bash'], outputStyle: null, traits: [] }
 
 function host(on: any, remote: string, opts: { install?: boolean; kept?: Record<string, unknown> } = {}) {
   const install = opts.install ?? true
@@ -66,15 +67,60 @@ test('writing a live Stripe key into a source file is refused', async ($: any, o
   expect(text).not.toContain(STRIPE)
 })
 
-test('a request for a direct push in an app repo reaches the model with the org answer beside it', async ($: any, on: any) => {
+// DKO-764: the note goes into the system prompt last, where no mod beneath can drop it.
+test('a request for a direct push in an app repo reaches the model with the org answer in the system prompt', async ($: any, on: any) => {
   host(on, 'git@github.com:dkod-demo/rc-news-app.git')
-  // The host: what entered the session, as it arrived at the bottom.
+  // The host: what entered the session, as it arrived at the bottom. A mod beneath that drops
+  // every section but its own does not remove ours.
   on('prompt.submit', ($: any, e: any) => ({ text: e.text, context: e.context }))
+  on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'hi', scope: 'shared' }] }))
   const r = await $.prompt.submit({ text: 'fix the login bug and push it directly to main using gh cli' })
   expect(r.text).toBe('fix the login bug and push it directly to main using gh cli')
   expect((r.context ?? []).join('\n')).toContain('Deliver')
-  const plain = await $.prompt.submit({ text: 'fix the login bug' })
-  expect(plain.context ?? []).toEqual([])
+  const asked = await $.prompt.compose(COMPOSE)
+  const note = asked.sections.find((s: any) => s.id === 'dkod-request')
+  expect(note?.text ?? '').toContain('Deliver')
+  expect(asked.sections[asked.sections.length - 1].id).toBe('dkod-request')
+  await $.prompt.submit({ text: 'fix the login bug' })
+  const plain = await $.prompt.compose(COMPOSE)
+  expect(plain.sections.some((s: any) => s.id === 'dkod-request')).toBe(false)
+  expect(plain.sections.some((s: any) => s.id === 'dkod')).toBe(true)
+})
+
+// claude -p sends a prompt without prompt.submit: the note comes from the conversation itself.
+test('a direct-push request that skipped prompt.submit still gets the note in the system prompt', async ($: any, on: any) => {
+  host(on, 'git@github.com:dkod-demo/rc-news-app.git')
+  on('session.messages', () => ({ value: [{ role: 'user', text: 'fix the login bug and push it directly to main using gh cli', toolUses: [] }] }))
+  on('prompt.compose', () => ({ sections: [] }))
+  const r = await $.prompt.compose(COMPOSE)
+  expect(r.sections.find((s: any) => s.id === 'dkod-request')?.text ?? '').toContain('Deliver')
+})
+
+// DKO-764: a mod beneath can rewrite a call after tool.call passed it. tool.check sees the final
+// call and Dkoder, outermost, has the last word.
+test('a call rewritten into a push after tool.call is refused at tool.check', async ($: any, on: any) => {
+  host(on, 'git@github.com:dkod-demo/rc-news-app.git')
+  on('tool.check', () => ({ decision: 'allow' }))
+  const r = await $.tool.check({ tool: 'Bash', input: { command: 'git push origin HEAD:main' } })
+  expect(r.decision).toBe('deny')
+  expect(r.reason ?? '').toContain('Deliver')
+})
+
+test('tool.check keeps the engine decision for a harmless call and for a call tool.call passed', async ($: any, on: any) => {
+  host(on, 'git@github.com:dkod-demo/rc-news-app.git')
+  on('tool.check', () => ({ decision: 'ask', reason: 'mode' }))
+  await $.tool.call({ tool: 'Bash', command: 'git status' })
+  const r = await $.tool.check({ tool: 'Bash', input: { command: 'git status' } })
+  expect(r.decision).toBe('ask')
+  const read = await $.tool.check({ tool: 'Read', input: { file_path: '/w/app/README.md' } })
+  expect(read.decision).toBe('ask')
+})
+
+test('tool.check refuses a write to Dkoder files even when the engine allowed it', async ($: any, on: any) => {
+  host(on, 'git@github.com:dkod-demo/rc-news-app.git')
+  on('tool.check', () => ({ decision: 'allow' }))
+  const r = await $.tool.check({ tool: 'Bash', input: { command: 'touch ~/.dkoder/heartbeat/x' } })
+  expect(r.decision).toBe('deny')
 })
 
 test('with no install file and nothing kept, a folder with no remote still gets the secret check, and an unknown repo is left alone', async ($: any, on: any) => {
@@ -96,9 +142,11 @@ test('with no install file, a repo of an org nobody named is not judged', async 
 test('signed in with no device install: the org Guard config comes from dkoder.guard.config', async ($: any, on: any) => {
   host(on, 'git@github.com:dkod-demo/rc-news-app.git', { install: false, kept: {} })
   const calls: string[] = []
+  const devices: any[] = []
   on('mcp.connect', () => ({ value: { isConnected: true, server: 'plugin:dkod:dkod' } }))
   on('mcp.call', ($: any, e: any) => {
     calls.push(`${e.server} ${e.tool}`)
+    devices.push(e.args?.device)
     return { value: { content: [{ type: 'text', text: JSON.stringify({ enabled: true, ...CONFIG }) }] } }
   })
   on('session.start', ($: any, e: any) => ({ cwd: e.cwd }))
@@ -106,6 +154,8 @@ test('signed in with no device install: the org Guard config comes from dkoder.g
   on('ui.toast', () => ({ value: undefined }))
   await $.session.start({ cwd: '/w/app', surface: 'terminal', isInteractive: true })
   expect(calls).toContain('plugin:dkod:dkod dkoder.guard.config')
+  // DKO-764: a random id kept in the store, never a hardware id, so the Dkoder page lists the machine.
+  expect(devices[0]?.id ?? '').toMatch(/^[0-9a-f]{32}$/)
   const r = await $.tool.call({ tool: 'Bash', command: 'git push origin HEAD:main' })
   expect(r.deny ?? r.text ?? '').toContain('Dkoder refused this')
 })
