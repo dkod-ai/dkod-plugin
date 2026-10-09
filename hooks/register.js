@@ -2375,8 +2375,44 @@ var PULSE_FRAME = { plugin: "dkod", key: "pulseFrame" };
 var STATUS = { plugin: "dkod", key: "status" };
 var AUTH_EVERY_TICKS = Math.round(20000 / TICK_MS);
 var HEARTBEAT_EVERY_TICKS = Math.round(5000 / TICK_MS);
+function failedCheck(next) {
+  const kind = next.error?.kind;
+  return kind === "throw" || kind === "timeout";
+}
+var timedOut = (tool) => `Dkoder could not finish checking this ${tool} call in time, so it did not run. Try again; if it keeps failing, tell your DKOD admin.`;
+function deviceFacts(id, home, pluginVersion, agentVersion) {
+  const short = (v) => typeof v === "string" && /^[A-Za-z0-9_.+-]{1,64}$/.test(v) ? v : null;
+  const os = home === undefined ? null : home.startsWith("/Users/") ? "macos" : home.startsWith("/home/") || home === "/root" ? "linux" : /^[A-Za-z]:/.test(home) ? "windows" : null;
+  return { id, os, pluginVersion: short(pluginVersion), agentVersion: short(agentVersion) };
+}
+var NOTE_SECTION = "dkod-request";
+function callShape(e) {
+  const sorted = (v) => Array.isArray(v) ? v.map(sorted) : typeof v === "object" && v !== null ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sorted(v[k])])) : v;
+  const { tool_use_id: _id, consent: _consent, ...rest } = e;
+  return JSON.stringify(sorted(rest));
+}
+function passedCalls(size = 64) {
+  const shapes = [];
+  return {
+    remember(e) {
+      shapes.push(callShape(e));
+      if (shapes.length > size)
+        shapes.shift();
+    },
+    seen(e) {
+      const i = shapes.indexOf(callShape(e));
+      if (i < 0)
+        return false;
+      shapes.splice(i, 1);
+      return true;
+    }
+  };
+}
 function register(on) {
   const guard = createGuard();
+  const passed = passedCalls();
+  let promptNote = null;
+  let noteFor = null;
   let tick = 0;
   let pulseAt = -1;
   let timer = null;
@@ -2392,7 +2428,23 @@ function register(on) {
       const r = await $.mcp.connect("dkod");
       if (!r.isConnected)
         return;
-      const out = await $.mcp.call(r.server, "dkoder.guard.config", {});
+      const kept = await $.store.get("dkoder.deviceId").catch(() => {
+        return;
+      });
+      const id = typeof kept === "string" && /^[0-9a-f]{32}$/.test(kept) ? kept : crypto.randomUUID().replace(/-/g, "");
+      if (id !== kept)
+        await $.store.set("dkoder.deviceId", id).catch(() => {
+          return;
+        });
+      const pluginVersion = await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`).then((t) => JSON.parse(t).version).catch(() => {
+        return;
+      });
+      const agentVersion = await $.session.version().then((v) => v.version).catch(() => {
+        return;
+      });
+      const out = await $.mcp.call(r.server, "dkoder.guard.config", { device: deviceFacts(id, await $.env.get("HOME").catch(() => {
+        return;
+      }), pluginVersion, agentVersion) });
       const text = out.isError ? undefined : out.content.find((c) => c.type === "text")?.text;
       return text === undefined ? undefined : JSON.parse(text);
     }, keepHookConfig: async (c) => {
@@ -2474,13 +2526,20 @@ function register(on) {
         return;
       });
     } };
-    const note = await guard.promptNote(io, e.text).catch(() => null);
-    return next(note === null ? e : { ...e, context: [...e.context ?? [], note] });
+    noteFor = e.text;
+    promptNote = await guard.promptNote(io, e.text).catch(() => null);
+    return next(promptNote === null ? e : { ...e, context: [...e.context ?? [], promptNote] });
   });
   on("prompt.compose", async ($, e, next) => {
     const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME") };
+    const typed = [...await $.session.messages().catch(() => [])].reverse().find((m) => m.role === "user" && (m.toolResults?.length ?? 0) === 0 && m.text.trim() !== "")?.text ?? null;
+    if (typed !== null && typed !== noteFor) {
+      noteFor = typed;
+      promptNote = await guard.promptNote(io, typed).catch(() => null);
+    }
     const r = await next(e);
-    return { sections: [...r.sections, await guard.promptSection(io)] };
+    const ours = (s) => s.id === "dkod" || s.id === NOTE_SECTION;
+    return { sections: [...r.sections.filter((s) => !ours(s)), await guard.promptSection(io), ...promptNote === null ? [] : [{ id: NOTE_SECTION, text: promptNote, scope: "session" }]] };
   });
   on("tool.call", async ($, e, next) => {
     if (typeof e.command !== "string" && writeShape(e) === null)
@@ -2502,11 +2561,42 @@ function register(on) {
         if (refused !== null)
           return refused;
       }
-      return await guard.write(io, e) ?? next(e);
+      const refused = await guard.write(io, e);
+      if (refused !== null)
+        return refused;
+      passed.remember(e);
+      return next(e);
     } catch (err) {
       return { deny: `Dkoder could not check this ${e.tool} call (${err instanceof Error ? err.message.slice(0, 120) : "unknown error"}), so it did not run. Try again; if it keeps failing, tell your DKOD admin.` };
     }
-  });
+  }).catch(async ($, e, next) => failedCheck(next) ? { deny: timedOut(e.tool) } : next(e));
+  on("tool.check", async ($, e, next) => {
+    const r = await next(e);
+    if (r.decision === "deny")
+      return r;
+    const call = { ...typeof e.input === "object" && e.input !== null ? e.input : {}, tool: e.tool };
+    if (typeof call.command !== "string" && writeShape(call) === null)
+      return r;
+    if (touchesDkoderFiles(call))
+      return { decision: "deny", reason: DKODER_FILES_DENY };
+    if (passed.seen(call))
+      return r;
+    try {
+      const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME"), pulse: (decision, text) => {
+        pulseAt = tick;
+        $.clock.now().then((at) => $.state.set(PULSE, { decision, text, at })).catch(() => {
+          return;
+        });
+        $.state.set(PULSE_FRAME, 0).catch(() => {
+          return;
+        });
+      } };
+      const refused = (typeof call.command === "string" ? await guard.bash(io, call.command) : null) ?? await guard.write(io, call);
+      return refused === null ? r : { decision: "deny", reason: refused.deny };
+    } catch (err) {
+      return { decision: "deny", reason: `Dkoder could not check this ${e.tool} call (${err instanceof Error ? err.message.slice(0, 120) : "unknown error"}), so it did not run. Try again; if it keeps failing, tell your DKOD admin.` };
+    }
+  }).catch(async ($, e, next) => failedCheck(next) ? { decision: "deny", reason: timedOut(e.tool) } : next(e));
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
     if (e.props.hasSurvey)
       return next(e);
