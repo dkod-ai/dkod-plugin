@@ -27,8 +27,9 @@ If a tool says the server needs sign-in, or the DKOD band above the prompt is ye
 
 1. Call `dkoder.deploy.questions`. Ask the user each question. Use the question keys as `deploy_answers`.
 2. Call `dkoder.deploy.business_metrics` with the `app_key`. If it returns rows, show them and ask which to add.
-3. Call `dkoder.deploy` with `app_key`, `deploy_answers`, and `business_metrics` (`"all"`, `"none"` or a list of ids).
-4. Follow the build with `dkoder.build.status` (the build `id`). Do not call `dkoder.deploy` again to check on it: after delivery that starts a new build.
+3. Call `dkoder.deploy.database` with the `app_key`. Show its `summary` and its `notice`. If `change.kind` is not `none`, make that change on the laptop as `change.steps` say, test it against a local Postgres (PGlite is enough), and push before you deploy. If `worker.state` is `queued`, call it again in a minute. Never ask for, read or send a database password: DKOD makes it.
+4. Call `dkoder.deploy` with `app_key`, `deploy_answers`, and `business_metrics` (`"all"`, `"none"` or a list of ids).
+5. Follow the build with `dkoder.build.status` (the build `id`). Do not call `dkoder.deploy` again to check on it: after delivery that starts a new build.
 5. If the build asks its own questions, ask the user, then call `dkoder.build.answer` with `sessionId`, the build `id`, the `key`, and a `value` (or `skip: true`).
 
 ## Ship
