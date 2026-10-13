@@ -32,6 +32,16 @@ If a tool says the server needs sign-in, or the DKOD band above the prompt is ye
 5. Follow the build with `dkoder.build.status` (the build `id`). Do not call `dkoder.deploy` again to check on it: after delivery that starts a new build.
 5. If the build asks its own questions, ask the user, then call `dkoder.build.answer` with `sessionId`, the build `id`, the `key`, and a `value` (or `skip: true`).
 
+## Secrets
+
+The app's secret values never go through you. DKOD never sees them either.
+
+- When the app needs secret values and the user has them in a `.env` file, call `secrets_from_env` (Dkoder's own tool, `mcp__dkod__secrets_from_env`) with the `appKey` and the file's path in `envFile`. Dkoder reads the file on this computer, seals each value for the apps cluster and sends only the sealed text. The answer has names and counts.
+- Never read a `.env` file, never print one, and never put a secret value in a tool call, a file or a message. `dkoder.build.answer` is not for secret values.
+- Tell the user what the answer says: which names it filled, which are `missing`, and which it did not fill and why (`local` points at this computer, `reference` refers to another name). For those, the user types the production value in the dashboard: Launchpad, the app, Replace secrets.
+- It fills only the names the app's code reads. Pass `addOtherNames: true` only when the user asks for the other names too.
+- The values apply on the next deploy.
+
 ## Ship
 
 After Deploy, the build delivers on its own once every answer is in and every gate (if the org has one) is approved: no second click. Watch it with `dkoder.build.status`. Call `dkoder.deliver` with `sessionId` and the build `id` only for a build that is ready but did not move on. DKOD writes the code to the app repository and the GitOps repository; nobody pushes by hand. `dkoder.delivered` (repo, commit) says whether Deliver wrote a commit.
