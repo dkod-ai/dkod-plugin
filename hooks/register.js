@@ -1000,6 +1000,12 @@ function envValueHasReference(entry) {
   return false;
 }
 
+var EXTERNAL_DB_ENV = /^[A-Z][A-Z0-9_]*_DATABASE_URL(?:_UNPOOLED)?$/;
+var EXTERNAL_DB_ENV_NAMES = new Set(["DATABASE_URL_UNPOOLED", "POSTGRES_URL", "POSTGRES_PRISMA_URL", "POSTGRES_URL_NON_POOLING", "POSTGRES_URL_NO_SSL"]);
+var isExternalDatabaseEnvName = (name) => name.length <= 200 && (EXTERNAL_DB_ENV.test(name) || EXTERNAL_DB_ENV_NAMES.has(name));
+var SEQ_TYPES = new Set(["smallint", "integer", "bigint"]);
+var KINDS = new Set(["p", "u", "c", "f", "x"]);
+
 var DROP_RULES = new Set(["env_file", "secret_file", "key_store", "binary_not_scannable"]);
 var GUESS_RULES = new Set(["secret_assignment"]);
 var DIRS = [
@@ -1387,12 +1393,12 @@ function runtimeSecretRows(needed) {
   return [...new Set(needed)].filter((name) => isRuntimeSecretName(name) && name !== AGENT_APP_SECRET).sort();
 }
 function askedSecretNames(names, databaseMade, redisMade = false) {
-  return (databaseMade ? withoutDatabaseEnvNames(names) : [...names]).filter((name) => !(redisMade && isRedisEnvName(name)));
+  return (databaseMade ? withoutDatabaseEnvNames(names).filter((name) => !isExternalDatabaseEnvName(name)) : [...names]).filter((name) => !(redisMade && isRedisEnvName(name)));
 }
 function askedUnsetNames(unset, needed, databaseMade, redisMade) {
   const asked = new Set(needed);
   const names = [...new Set(unset.map((n) => n.name))].filter((name) => isRuntimeSecretName(name) && name !== AGENT_APP_SECRET && !asked.has(name));
-  return (databaseMade ? withoutDatabaseEnvNames(names) : names).filter((name) => !(redisMade && isRedisEnvName(name)));
+  return (databaseMade ? withoutDatabaseEnvNames(names).filter((name) => !isExternalDatabaseEnvName(name)) : names).filter((name) => !(redisMade && isRedisEnvName(name)));
 }
 function heldWhy(entry) {
   if (entry.value === "")

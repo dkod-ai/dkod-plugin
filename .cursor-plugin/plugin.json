@@ -1,0 +1,29 @@
+{
+  "name": "dkod",
+  "version": "0.7.0",
+  "description": "Build and deploy apps through your company's DKOD: policy, templates, Deploy questions and Deliver.",
+  "author": {
+    "name": "DKOD"
+  },
+  "homepage": "https://dkod.ai/docs",
+  "repository": "https://github.com/dkod-ai/dkod-plugin",
+  "license": "MIT",
+  "keywords": [
+    "dkod",
+    "deploy",
+    "governance",
+    "platform",
+    "mcp",
+    "gitops"
+  ],
+  "skills": "./skills/",
+  "mcpServers": {
+    "dkod": {
+      "url": "https://dashboard.dkod.app/api/v1/dkoder/mcp"
+    }
+  },
+  "hooks": {
+    "version": 1,
+    "hooks": {}
+  }
+}

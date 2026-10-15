@@ -17,6 +17,18 @@ It adds three things:
 
 Then run `/mcp`, pick `dkod` and choose **Authenticate**. You sign in with your company's own sign-in. DKOD never sees a password. Until you sign in, the band above the prompt is yellow.
 
+## Cursor
+
+The same repository is a Cursor plugin. In Cursor you get the `dkod` MCP server and the `dkod` skill. You do not get the band or the rules: those run only in Claude Code.
+
+Your team admin can import `dkod-ai/dkod-plugin` as a team marketplace in the Cursor dashboard. To install it for yourself only:
+
+```
+git clone https://github.com/dkod-ai/dkod-plugin ~/.cursor/plugins/local/dkod
+```
+
+Restart Cursor. Then open **Settings → MCP**, find `dkod` and choose **Connect**. You sign in with your company's own sign-in.
+
 ## Dkoder and Guard
 
 | | Dkoder | Guard |
