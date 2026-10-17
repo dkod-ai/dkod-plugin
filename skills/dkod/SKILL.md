@@ -18,11 +18,37 @@ If a tool says the server needs sign-in, or the DKOD band above the prompt is ye
 - Never `git push` the app, add a git remote for it, or make a GitHub repository for it. DKOD makes the app's repository on the first Deliver. To give DKOD the code, follow "Push to prod".
 - Never invent a Deploy answer. Ask the user every question you cannot answer from what they told you.
 - Call `dkoder.remove` only when the user clearly asks to remove the app from production. Calling it is the yes.
+- Read the org's templates and policy only through the dkod tools (`dkoder.templates`, `dkoder.policy`). Each template comes with its text in `content`. Never search the disk, GitHub or the governance repository for them.
+- Push to prod needs no git and no `gh`. Do not check GitHub sign-in, git remotes or repositories.
 
 ## Start a session
 
 1. Call `dkoder.session.start` with the app key. The app key is the app's short name in lowercase kebab-case, usually the app's repository or folder name. If there is no app yet, ask the user for the name.
-2. Call `dkoder.policy` and `dkoder.templates` with the `sessionId`. Follow what they return while you write code.
+2. Call `dkoder.policy` and `dkoder.templates` with the `sessionId`. Follow what they return while you write code. When a template has `content: null`, DKOD could not read it now: work from its `name` and `description`, and do not look for the file anywhere else.
+
+## Cursor: allow the dkod tools
+
+In Cursor, Auto-review can stop each dkod tool call and wait for the user to approve it. The fix is Cursor's allowlist. When a dkod call waits for approval, tell the user this once. Write the file only when the user asks you to.
+
+- The file is `~/.cursor/permissions.json`. It applies to all projects.
+- Add the dkod server to `mcpAllowlist`. Cursor calls the plugin's server `plugin-dkod-DKOD`; a server added by hand has the name it was given, such as `dkod`:
+
+  ```json
+  { "mcpAllowlist": ["plugin-dkod-DKOD:*", "dkod:*"] }
+  ```
+
+- This list replaces the MCP allowlist in Cursor's settings. Copy the entries from there into the file too.
+- Run Mode must be Auto-review, Allowlist or Run Everything. Cursor reads the file again by itself.
+- A Cursor team admin can allow it for the whole team in the team dashboard.
+
+## Cloud sessions
+
+A cloud session (Claude Code on the web or the Desktop app's Cloud, a Cursor cloud agent) runs on another computer. Plugins do not load there, so this skill and its `scripts` folder may not be on disk. The DKOD MCP server works there when the user added it to that cloud:
+
+- Claude Code cloud: on claude.ai, Settings, Connectors, add a custom connector with the DKOD MCP URL (`https://dashboard.dkod.app/api/v1/dkoder/mcp`, or the org's own dashboard), then sign in.
+- Cursor cloud agent: add the same URL in the MCP list at cursor.com/agents. A Cursor team admin can add it for the whole team under Integrations & MCP.
+
+When the dkod tools are missing in a cloud session, tell the user these steps. When there is no dkod skill on disk, call `dkoder.guide`: it returns this text and the names of the scripts. A `.env` file is usually not in a cloud copy of the code: then fill no secrets from it, and tell the user the names the app needs and that they type the values in the dashboard.
 
 ## Push to prod
 
@@ -41,7 +67,7 @@ A person who is not an admin (a Builder) can deploy, follow, answer, fill secret
 
 DKOD builds the code you send it. Send it again after each change, before you deploy. No git is needed. The code goes straight to the organization's own storage; DKOD servers never read it, and DKOD's worker in the organization drops env files and secrets before it commits.
 
-The pack scripts are in the `scripts` folder next to this SKILL.md file. They all do the same thing. Use the first one this computer can run:
+The pack scripts are in the `scripts` folder next to this SKILL.md file. When that folder is not on disk (a cloud session, or this text came from `dkoder.guide`), call `dkoder.guide` with `script` set to the script's name, write its `content` to a new file in the system's temp folder (never in the app's folder), and use that folder as `<scripts>`. They all do the same thing. Use the first one this computer can run:
 
 | Check | Script | Run it as |
 | --- | --- | --- |
@@ -72,7 +98,7 @@ When `dkoder.source.target` answers `app_key_taken`, another app already has tha
 The app's secret values never go through you. DKOD never sees them either.
 
 - When the app needs secret values and the user has them in a `.env` file, and you have the tool `secrets_from_env` (Dkoder's own, `mcp__dkod__secrets_from_env`, in Claude Code): call it with the `appKey` and the file's path in `envFile`. Dkoder reads the file on this computer, seals each value for the apps cluster and sends only the sealed text. The answer has names and counts.
-- Without that tool (for example in Cursor), use `dkod-secrets.mjs` in the `scripts` folder next to this file. It needs Node (`node -v`).
+- Without that tool (for example in Cursor), use `dkod-secrets.mjs` in the `scripts` folder next to this file (or from `dkoder.guide`, as in "Send the code"). It needs Node (`node -v`).
   1. Call `dkoder.secrets.target` with `sessionId` and `appKey`. Write its answer, as it is, to a new file in the system's temp folder, never in the app's folder. It holds names and a public certificate, no value.
   2. Run `node <scripts>/dkod-secrets.mjs seal <the .env file> <that file>`. It reads the `.env` file and seals each value on this computer. It prints one JSON line: the names and `save`.
   3. When `save` is not null, call `dkoder.secrets.save` with `sessionId`, `appKey`, and `certFingerprint` and `secrets` from `save`, copied exactly.

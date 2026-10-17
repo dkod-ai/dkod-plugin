@@ -27,7 +27,22 @@ Your team admin can import `dkod-ai/dkod-plugin` as a team marketplace in the Cu
 git clone https://github.com/dkod-ai/dkod-plugin ~/.cursor/plugins/local/dkod
 ```
 
-Restart Cursor. Then open **Settings → MCP**, find `dkod` and choose **Connect**. You sign in with your company's own sign-in.
+Restart Cursor. Then open **Settings → MCP**, find `DKOD` and choose **Connect**. You sign in with your company's own sign-in.
+
+Cursor's Auto-review can stop each dkod tool call for approval. To allow the dkod tools, add them to `mcpAllowlist` in `~/.cursor/permissions.json`:
+
+```json
+{ "mcpAllowlist": ["plugin-dkod-DKOD:*", "dkod:*"] }
+```
+
+This list replaces the MCP allowlist in Cursor's settings, so copy those entries into the file too. Run Mode must be Auto-review, Allowlist or Run Everything. See [Cursor permissions](https://cursor.com/docs/reference/permissions).
+
+## Cloud sessions
+
+Plugins do not load in a cloud session, so add the DKOD MCP server to the cloud itself. The server gives the agent the dkod skill and its scripts through the `dkoder.guide` tool.
+
+- **Claude Code on the web, or the Desktop app's Cloud:** on claude.ai open **Settings → Connectors**, add a custom connector with `https://dashboard.dkod.app/api/v1/dkoder/mcp` and sign in. The default **Trusted** network reaches your organization's storage on AWS, Google Cloud and Cloudflare R2.
+- **Cursor cloud agents:** add the same URL in the MCP list at [cursor.com/agents](https://cursor.com/agents). A team admin can add it for everyone under **Dashboard → Integrations & MCP**.
 
 ## Dkoder and Guard
 
