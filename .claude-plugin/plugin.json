@@ -6,7 +6,7 @@
     "name": "DKOD",
     "url": "https://dkod.ai"
   },
-  "homepage": "https://dkod.ai/docs",
+  "homepage": "https://dkod.ai",
   "repository": "https://github.com/dkod-ai/dkod-plugin",
   "license": "MIT",
   "keywords": [
