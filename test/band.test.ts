@@ -9,12 +9,13 @@ const CYAN = '#22d3ee'
 const YELLOW = '#facc15'
 const CORAL = '#fb7185'
 
-function host(on: any, mcp: 'ok' | 'auth') {
+function host(on: any, mcp: 'ok' | 'auth' | (() => 'ok' | 'auth')) {
+  const now = typeof mcp === 'function' ? mcp : () => mcp
   mock.store(on, {})
   on('fs.read', ($: any, e: any) => (e.path.endsWith('/dkoder.json') ? { value: JSON.stringify(CONFIG) } : { deny: 'ENOENT' }))
   on('fs.exists', ($: any, e: any) => ({ value: e.path.startsWith('/w/app') }))
   on('session.cwd', () => ({ value: '/w/app' }))
-  on('mcp.connect', () => ({ value: mcp === 'ok' ? { isConnected: true, server: 'plugin:dkod:dkod' } : { isConnected: false, reason: 'auth', message: 'dkod needs authentication' } }))
+  on('mcp.connect', () => ({ value: now() === 'ok' ? { isConnected: true, server: 'plugin:dkod:dkod' } : { isConnected: false, reason: 'auth', message: 'dkod needs authentication' } }))
   on('process.run', ($: any, e: any) => {
     const args = e.argv.slice(3).join(' ')
     const remote = 'git@github.com:dkod-demo/rc-news-app.git'
@@ -78,6 +79,19 @@ test('not signed in: the wordmark turns yellow and the line says how to sign in'
     expect(await ui.find({ type: 'Text', text: /Sign in to DKOD for Deliver and your organization's Guard rules: type \/mcp/ })).toBeDefined()
     await ui.unmount()
   }
+})
+
+test('sign-in in /mcp turns the band cyan within about a second, not the 20 second look', async ($: any, on: any) => {
+  let mcp: 'ok' | 'auth' = 'auth'
+  host(on, () => mcp)
+  const clock = mock.clock(on)
+  await $.session.start({ cwd: '/w/app', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(band('terminal'))
+  expect((await letters(ui))[0]?.props.color).toBe(YELLOW)
+  mcp = 'ok'
+  for (let i = 0; i < 12; i++) await clock.advance(120)
+  expect((await ui.find({ type: 'Text', text: /Deliver required/ }))).toBeDefined()
+  await ui.unmount()
 })
 
 test('a blocked push makes the Guard icon pulse coral and names what was blocked, never the command', async ($: any, on: any) => {

@@ -3119,6 +3119,7 @@ var PULSE = { plugin: "dkod", key: "pulse" };
 var PULSE_FRAME = { plugin: "dkod", key: "pulseFrame" };
 var STATUS = { plugin: "dkod", key: "status" };
 var AUTH_EVERY_TICKS = Math.round(20000 / TICK_MS);
+var AUTH_OUT_EVERY_TICKS = Math.round(1000 / TICK_MS);
 var HEARTBEAT_EVERY_TICKS = Math.round(5000 / TICK_MS);
 function failedCheck(next) {
   const kind = next.error?.kind;
@@ -3164,6 +3165,10 @@ function register(on) {
   let heartbeat = async () => {
     return;
   };
+  let recheckAuth = async () => {
+    return;
+  };
+  let authOut = false;
   on("session.start", async ($, e, next) => {
     const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => {
       $.state.set(STATUS, t ?? "").catch(() => {
@@ -3217,11 +3222,23 @@ function register(on) {
     await guard.sessionStart(io, e.cwd);
     let told = false;
     let wasOut = false;
+    let checking = false;
     const checkAuth = async () => {
+      if (checking)
+        return;
+      checking = true;
+      try {
+        await checkAuthOnce();
+      } finally {
+        checking = false;
+      }
+    };
+    const checkAuthOnce = async () => {
       const device = guard.deviceState();
       const r = await $.mcp.connect("dkod").catch(() => null);
       const auth = r === null ? "offline" : r.isConnected ? device === "refused" ? "device" : "ok" : r.reason === "auth" ? "signin" : device === "refused" ? "device" : "offline";
       await $.state.set(AUTH, auth);
+      authOut = !signedIn(auth);
       if (auth === "ok" && wasOut)
         await guard.afterSignIn(io).catch(() => {
           return;
@@ -3234,6 +3251,7 @@ function register(on) {
       if (signedIn(auth))
         told = false;
     };
+    recheckAuth = checkAuth;
     await checkAuth().catch(() => {
       return;
     });
@@ -3252,8 +3270,8 @@ function register(on) {
             $.state.set(PULSE, null);
           }
         }
-        if (tick % AUTH_EVERY_TICKS === 0)
-          checkAuth().catch(() => {
+        if (tick % (authOut ? AUTH_OUT_EVERY_TICKS : AUTH_EVERY_TICKS) === 0)
+          recheckAuth().catch(() => {
             return;
           });
         if (tick % HEARTBEAT_EVERY_TICKS === 0)
@@ -3275,6 +3293,10 @@ function register(on) {
       });
     } };
     noteFor = e.text;
+    if (authOut)
+      recheckAuth().catch(() => {
+        return;
+      });
     promptNote = await guard.promptNote(io, e.text).catch(() => null);
     return next(promptNote === null ? e : { ...e, context: [...e.context ?? [], promptNote] });
   });
