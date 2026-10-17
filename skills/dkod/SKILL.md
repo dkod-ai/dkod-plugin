@@ -30,27 +30,33 @@ When the user says "push to prod" (or ship, deploy, go live), do all of these st
 
 1. Start a session (above).
 2. Send the code (below).
-3. Deploy (below). When `dkoder.deploy.questions` answers `none: true`, call `dkoder.deploy` with no `deploy_answers`. When the app needs no database, pass `no_database: true`.
-4. Follow the build with `dkoder.build.status` about every 30 seconds until its state is `delivered` or `failed`. Answer its own questions as Deploy step 6 says.
-5. Reply with the app's production URL: the build's `deploy.url`, or `delivery.cluster.live_url`. If the build failed, say which step failed and why.
+3. If the app's folder has a `.env` file, fill the app's secrets from it (Secrets, below). Do not ask first. Use `.env.production` when there is one. Look only at the file names (`ls -a`); never open the file.
+4. Deploy (below). When `dkoder.deploy.questions` answers `none: true`, call `dkoder.deploy` with no `deploy_answers`. When the app needs no database, pass `no_database: true`.
+5. Follow the build with `dkoder.build.status` about every 30 seconds until its state is `delivered` or `failed`. Answer its own questions as Deploy step 6 says.
+6. Reply with the app's production URL: the build's `deploy.url`, or `delivery.cluster.live_url`. If the build failed, say which step failed and why.
+
+A person who is not an admin (a Builder) can deploy, follow, answer, fill secrets for and remove only the apps whose code they sent with `dkoder.source.target`. When a tool answers `admin role required`, tell the user its `message`.
 
 ## Send the code
 
-DKOD builds the code you send it. Send it again after each change, before you deploy. The code goes straight to the organization's own storage; DKOD servers never read it, and DKOD's worker in the organization drops env files and secrets before it commits.
+DKOD builds the code you send it. Send it again after each change, before you deploy. No git is needed. The code goes straight to the organization's own storage; DKOD servers never read it, and DKOD's worker in the organization drops env files and secrets before it commits.
 
-1. If the folder is not a git repository, run `git init -q`. It is only for the file list. Never commit for DKOD, never add a remote, never push.
-2. Make the archive. Run this in the app's folder, as one command:
+The pack scripts are in the `scripts` folder next to this SKILL.md file. They all do the same thing. Use the first one this computer can run:
 
-   ```sh
-   d="$(mktemp -d)" && git ls-files -co --exclude-standard -z -- . ':(exclude,glob)**/.env*' | COPYFILE_DISABLE=1 tar -c --format ustar --no-recursion --null -T - -f "$d/src.tar" && shasum -a 256 "$d/src.tar" && wc -c < "$d/src.tar"
-   ```
+| Check | Script | Run it as |
+| --- | --- | --- |
+| `node -v` | `dkod-pack.mjs` | `node <scripts>/dkod-pack.mjs` |
+| `python3 -V` (Windows: `python -V`) | `dkod-pack.py` | `python3 <scripts>/dkod-pack.py` |
+| `pwsh -v` | `dkod-pack.ps1` | `pwsh -NoProfile -File <scripts>/dkod-pack.ps1` |
+| none of these | `dkod-pack.sh` | `sh <scripts>/dkod-pack.sh` |
 
-   It holds the files git would keep (`.gitignore` is honored) and never a `.env` file. It prints the SHA-256 and the archive's path (ending in `/src.tar`) on one line, then the size in bytes. Where there is no `shasum`, put `sha256sum` in its place.
-3. Call `dkoder.source.target` with `sessionId`, `appKey`, `sha256`, `bytes`, and the archive's path as `file`. Run the `command` it returns in the terminal, exactly as given. It sends the archive and then deletes it. It works once and expires in minutes; do not save it or show it.
+1. Pack: run `<run it as> pack <the app's folder>`. It prints one JSON line: `file` (the archive), `sha256`, `bytes` and `files`. It leaves out `.env` files, `.git`, dependencies (`node_modules`, `.venv`) and build output (`dist`, `build`, `.next`), and honors `.gitignore` in a git repository.
+2. Call `dkoder.source.target` with `sessionId`, `appKey`, `sha256` and `bytes`.
+3. Upload: run `<run it as> put <file> <put_args>`, with the `put_args` it returned pasted exactly as given. It sends the archive to the organization's storage, then deletes it. `put_args` works once and expires in minutes; do not save it or show it.
 4. Call `dkoder.source.done` with `sessionId`, `appKey`, the `slot` and `sha256`. When it answers `working`, call it again. When it answers `pushed`, the app is ready to deploy. When it refuses, tell the user why in one sentence.
-5. If you stop before the upload command ran, delete the archive's folder (the path without `/src.tar`) with `rm -r`.
+5. If you stop before the upload ran, delete the archive `file`.
 
-When `dkoder.source.target` answers `candidate_push_disabled`, your organization does not take app code yet. Tell the user that an admin turns it on in the DKOD dashboard: Settings, Data handling, "Push candidate source to GitHub". When it answers `app_key_taken`, a computer DKOD scans already has an app with that key: ask the user for another app key and start a new session with it.
+When `dkoder.source.target` answers `app_key_taken`, another app already has that key: ask the user for another app key and start a new session with it. For any other refusal, tell the user its `message`.
 
 ## Deploy
 
@@ -65,10 +71,17 @@ When `dkoder.source.target` answers `candidate_push_disabled`, your organization
 
 The app's secret values never go through you. DKOD never sees them either.
 
-- When the app needs secret values and the user has them in a `.env` file, call `secrets_from_env` (Dkoder's own tool, `mcp__dkod__secrets_from_env`) with the `appKey` and the file's path in `envFile`. Dkoder reads the file on this computer, seals each value for the apps cluster and sends only the sealed text. The answer has names and counts.
+- When the app needs secret values and the user has them in a `.env` file, and you have the tool `secrets_from_env` (Dkoder's own, `mcp__dkod__secrets_from_env`, in Claude Code): call it with the `appKey` and the file's path in `envFile`. Dkoder reads the file on this computer, seals each value for the apps cluster and sends only the sealed text. The answer has names and counts.
+- Without that tool (for example in Cursor), use `dkod-secrets.mjs` in the `scripts` folder next to this file. It needs Node (`node -v`).
+  1. Call `dkoder.secrets.target` with `sessionId` and `appKey`. Write its answer, as it is, to a new file in the system's temp folder, never in the app's folder. It holds names and a public certificate, no value.
+  2. Run `node <scripts>/dkod-secrets.mjs seal <the .env file> <that file>`. It reads the `.env` file and seals each value on this computer. It prints one JSON line: the names and `save`.
+  3. When `save` is not null, call `dkoder.secrets.save` with `sessionId`, `appKey`, and `certFingerprint` and `secrets` from `save`, copied exactly.
+  4. Delete the file from step 1.
+  5. When there is no Node, fill nothing: tell the user the names the app needs, and that they type the values in the dashboard: Launchpad, the app, Replace secrets.
+- When `dkoder.secrets.target` answers `app_no_target`, fill the secrets after the first `dkoder.deploy`, then deploy again.
 - Never read a `.env` file, never print one, and never put a secret value in a tool call, a file or a message. `dkoder.build.answer` is not for secret values.
 - Tell the user what the answer says: which names it filled, which are `missing`, and which it did not fill and why (`local` points at this computer, `reference` refers to another name). For those, the user types the production value in the dashboard: Launchpad, the app, Replace secrets.
-- It fills only the names the app's code reads. Pass `addOtherNames: true` only when the user asks for the other names too.
+- It fills only the names the app's code reads. Pass `addOtherNames: true` (the script: `--others`) only when the user asks for the other names too.
 - The values apply on the next deploy.
 
 ## Ship
