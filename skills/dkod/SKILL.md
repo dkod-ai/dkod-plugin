@@ -23,7 +23,7 @@ If a tool says the server needs sign-in, or the DKOD band above the prompt is ye
 
 ## Start a session
 
-1. Call `dkoder.session.start` with the app key. The app key is the app's short name in lowercase kebab-case, usually the app's repository or folder name. If there is no app yet, ask the user for the name.
+1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.10.1"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user to reload as it says, and go on. The app key is the app's short name in lowercase kebab-case, usually the app's repository or folder name. If there is no app yet, ask the user for the name.
 2. Call `dkoder.policy` and `dkoder.templates` with the `sessionId`. Follow what they return while you write code. When a template has `content: null`, DKOD could not read it now: work from its `name` and `description`, and do not look for the file anywhere else.
 
 ## Cursor: allow the dkod tools

@@ -1,6 +1,6 @@
 {
   "name": "dkod",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Build and deploy apps through your company's DKOD: policy, templates, Deploy questions and Deliver.",
   "author": {
     "name": "DKOD"
