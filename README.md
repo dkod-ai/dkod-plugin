@@ -46,11 +46,15 @@
 
 1. Add the marketplace:
 
+   <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/code-marketplace-dark.svg"><img src="assets/readme/code-marketplace-light.svg" width="100%" alt="Claude Code: /plugin marketplace add dkod-ai/dkod-plugin"></picture>
+
    ```
    /plugin marketplace add dkod-ai/dkod-plugin
    ```
 
 2. Install the plugin:
+
+   <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/code-install-dark.svg"><img src="assets/readme/code-install-light.svg" width="100%" alt="Claude Code: /plugin install dkod@dkod-ai"></picture>
 
    ```
    /plugin install dkod@dkod-ai
@@ -66,6 +70,8 @@ The same repository is a Cursor plugin. In Cursor you get the `dkod` MCP server 
 
 Your team admin can import `dkod-ai/dkod-plugin` as a team marketplace in the Cursor dashboard. To install it for yourself only:
 
+<picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/code-clone-dark.svg"><img src="assets/readme/code-clone-light.svg" width="100%" alt="sh: git clone https://github.com/dkod-ai/dkod-plugin ~/.cursor/plugins/local/dkod"></picture>
+
 ```
 git clone https://github.com/dkod-ai/dkod-plugin ~/.cursor/plugins/local/dkod
 ```
@@ -76,6 +82,8 @@ Restart Cursor. Then open **Settings → MCP**, find `DKOD` and choose **Connect
 <summary><b>Update the plugin</b></summary>
 
 Cursor does not update a plugin in `~/.cursor/plugins/local`. The DKOD server tells the agent when your copy is old, and the agent runs the update. To update by hand:
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/code-update-dark.svg"><img src="assets/readme/code-update-light.svg" width="100%" alt="sh: git -C ~/.cursor/plugins/local/dkod pull --ff-only"></picture>
 
 ```
 git -C ~/.cursor/plugins/local/dkod pull --ff-only
@@ -90,8 +98,12 @@ Then run **Developer: Reload Window** from the Command Palette. A team marketpla
 
 Cursor's Auto-review can stop each dkod tool call for approval. To allow the dkod tools, add them to `mcpAllowlist` in `~/.cursor/permissions.json`:
 
-```json
-{ "mcpAllowlist": ["plugin-dkod-dkod:*", "dkod:*"] }
+<picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/code-allowlist-dark.svg"><img src="assets/readme/code-allowlist-light.svg" width="100%" alt="json: { &quot;mcpAllowlist&quot;: [&quot;plugin-dkod-dkod:*&quot;, &quot;dkod:*&quot;] }"></picture>
+
+```
+{
+  "mcpAllowlist": ["plugin-dkod-dkod:*", "dkod:*"]
+}
 ```
 
 This list replaces the MCP allowlist in Cursor's settings, so copy those entries into the file too. Run Mode must be Auto-review, Allowlist or Run Everything. See [Cursor permissions](https://cursor.com/docs/reference/permissions).
@@ -103,6 +115,8 @@ This list replaces the MCP allowlist in Cursor's settings, so copy those entries
 Plugins do not load in a cloud session, so add the DKOD MCP server to the cloud itself. The server gives the agent the dkod skill and its scripts through the `dkoder.guide` tool.
 
 - **Claude Code on the web, or the Desktop app's Cloud:** on claude.ai open **Settings → Connectors**, add a custom connector with this URL and sign in:
+
+  <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/code-connector-dark.svg"><img src="assets/readme/code-connector-light.svg" width="100%" alt="url: https://dashboard.dkod.app/api/v1/dkoder/mcp"></picture>
 
   ```
   https://dashboard.dkod.app/api/v1/dkoder/mcp
