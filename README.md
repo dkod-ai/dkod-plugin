@@ -1,21 +1,46 @@
-# DKOD plugin for Claude Code
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/readme/hero-dark.svg">
+    <img src="assets/readme/hero-light.svg" width="100%" alt="DKOD plugin for Claude Code and Cursor. Keep your AI agent. Ship by your rules.">
+  </picture>
+</p>
 
-Build and deploy apps through your company's DKOD from Claude Code.
+<p align="center">Keep using the AI agent you prefer.<br>This plugin brings your company's DKOD into Claude Code and Cursor.</p>
 
-It adds three things:
+<p align="center">
+  <a href="#install"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/install-claude-code-dark.svg"><img src="assets/readme/install-claude-code-light.svg" height="76" alt="Install in Claude Code"></picture></a>
+  <a href="#cursor"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/install-cursor-dark.svg"><img src="assets/readme/install-cursor-light.svg" height="76" alt="Install in Cursor"></picture></a>
+  <a href="https://dkod.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/dkod-ai-dark.svg"><img src="assets/readme/dkod-ai-light.svg" height="76" alt="dkod.ai"></picture></a>
+</p>
+
+## What it adds
 
 - **MCP server** `dkod`: your org's policy, templates, Deploy questions, Deploy, build answers, Deliver and Remove.
 - **Skill** `dkod`: tells Claude how to use them, in the right order.
-- **Dkoder band and rules**: a band above the prompt shows whether you are signed in to DKOD. DKOD's floor checks every command and file write, and once you sign in, so do your organization's Guard rules.
+- **Dkoder band and rules**: a band above the prompt shows whether you are signed in to DKOD.<br>DKOD's floor checks every command and file write, and once you sign in, so do your organization's Guard&nbsp;rules.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/band-dark.svg">
+  <img src="assets/readme/band-light.svg" width="100%" alt="The Dkoder band above the Claude Code prompt. Before you sign in it is yellow and says: Sign in to DKOD for Deliver and your organization's Guard rules: type /mcp, pick dkod, then Authenticate. Signed in, it is cyan and says: on, Guard on, refund-admin, Deliver required.">
+</picture>
 
 ## Install
 
-```
-/plugin marketplace add dkod-ai/dkod-plugin
-/plugin install dkod@dkod-ai
-```
+1. Add the marketplace:
 
-Then run `/mcp`, pick `dkod` and choose **Authenticate**. You sign in with your company's own sign-in. DKOD never sees a password. Until you sign in, the band above the prompt is yellow.
+   ```
+   /plugin marketplace add dkod-ai/dkod-plugin
+   ```
+
+2. Install the plugin:
+
+   ```
+   /plugin install dkod@dkod-ai
+   ```
+
+3. Run `/mcp`, pick `dkod` and choose **Authenticate**. You sign in with your company's own sign-in.<br>DKOD never sees a password.
+
+Until you sign in, the band above the prompt is yellow.
 
 ## Cursor
 
@@ -29,6 +54,9 @@ git clone https://github.com/dkod-ai/dkod-plugin ~/.cursor/plugins/local/dkod
 
 Restart Cursor. Then open **Settings → MCP**, find `DKOD` and choose **Connect**. You sign in with your company's own sign-in.
 
+<details>
+<summary><b>Update the plugin</b></summary>
+
 Cursor does not update a plugin in `~/.cursor/plugins/local`. The DKOD server tells the agent when your copy is old, and the agent runs the update. To update by hand:
 
 ```
@@ -36,6 +64,11 @@ git -C ~/.cursor/plugins/local/dkod pull --ff-only
 ```
 
 Then run **Developer: Reload Window** from the Command Palette. A team marketplace with **Enable Auto Refresh** on updates by itself.
+
+</details>
+
+<details>
+<summary><b>Run the dkod tools without approval</b></summary>
 
 Cursor's Auto-review can stop each dkod tool call for approval. To allow the dkod tools, add them to `mcpAllowlist` in `~/.cursor/permissions.json`:
 
@@ -45,11 +78,19 @@ Cursor's Auto-review can stop each dkod tool call for approval. To allow the dko
 
 This list replaces the MCP allowlist in Cursor's settings, so copy those entries into the file too. Run Mode must be Auto-review, Allowlist or Run Everything. See [Cursor permissions](https://cursor.com/docs/reference/permissions).
 
+</details>
+
 ## Cloud sessions
 
 Plugins do not load in a cloud session, so add the DKOD MCP server to the cloud itself. The server gives the agent the dkod skill and its scripts through the `dkoder.guide` tool.
 
-- **Claude Code on the web, or the Desktop app's Cloud:** on claude.ai open **Settings → Connectors**, add a custom connector with `https://dashboard.dkod.app/api/v1/dkoder/mcp` and sign in. The default **Trusted** network reaches your organization's storage on AWS, Google Cloud and Cloudflare R2.
+- **Claude Code on the web, or the Desktop app's Cloud:** on claude.ai open **Settings → Connectors**, add a custom connector with this URL and sign in:
+
+  ```
+  https://dashboard.dkod.app/api/v1/dkoder/mcp
+  ```
+
+  The default **Trusted** network reaches your organization's storage on AWS, Google Cloud and Cloudflare R2.
 - **Cursor cloud agents:** add the same URL in the MCP list at [cursor.com/agents](https://cursor.com/agents). A team admin can add it for everyone under **Dashboard → Integrations & MCP**.
 
 ## Dkoder and Guard
@@ -74,18 +115,26 @@ Before you sign in, nothing names your org, so a repository with a remote is lef
 
 ## Limits
 
-The rules keep Claude on the Deliver path. They are not a security boundary against a person.
+> [!IMPORTANT]
+> The rules keep Claude on the Deliver path. They are not a security boundary against a person.
 
 To stop direct pushes for real, protect the app repository on GitHub (branch protection or rulesets). DKOD's Deliver does not need a person to push.
 
 ## Source
 
-This repository is generated from DKOD's source. Do not edit it here: changes are overwritten by the next release.
+> [!NOTE]
+> This repository is generated from DKOD's source. Do not edit it here: changes are overwritten by the next release.
 
 ## Docs
 
-https://dkod.ai/docs
+The docs are in the DKOD dashboard, for signed-in users: [dashboard.dkod.app/docs](https://dashboard.dkod.app/docs). You sign in with your company's own sign-in.
 
 ## License
 
-MIT
+[MIT](LICENSE)
+
+<br>
+
+<p align="center">
+  <a href="https://dkod.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/dkod-dark.svg"><img src="assets/readme/dkod-light.svg" height="34" alt="DKOD"></picture></a>
+</p>
