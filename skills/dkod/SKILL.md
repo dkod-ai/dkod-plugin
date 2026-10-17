@@ -23,8 +23,19 @@ If a tool says the server needs sign-in, or the DKOD band above the prompt is ye
 
 ## Start a session
 
-1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.10.2"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user to reload as it says, and go on. The app key is the app's short name in lowercase kebab-case, usually the app's repository or folder name. If there is no app yet, ask the user for the name.
+1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.11.0"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user to reload as it says, and go on. The app key is the app's short name in lowercase kebab-case, usually the app's repository or folder name. If there is no app yet, ask the user for the name.
 2. Call `dkoder.policy` and `dkoder.templates` with the `sessionId`. Follow what they return while you write code. When a template has `content: null`, DKOD could not read it now: work from its `name` and `description`, and do not look for the file anywhere else.
+
+## Policy checks
+
+The org's rules come with checks: `policy_pack` in the answer of `dkoder.policy`. Each check has a level. `block` must pass. `warn` is told to the user.
+
+- In Claude Code, Dkoder runs the checks on every file write and commit. It refuses one that breaks a `block` check and says the file, the line and the rule. Change the code so it follows the rule. Do not try another way around it.
+- Before you send the code, run every check on the app's folder. The code is read on this computer and is not sent.
+  - With the tool `policy_check` (Dkoder's own, `mcp__dkod__policy_check`, in Claude Code): call it with the app's folder in `path`.
+  - Without that tool (for example in Cursor), use `dkod-policy.mjs` in the `scripts` folder next to this file (or from `dkoder.guide`, as in "Send the code"). It needs Node (`node -v`). Write the answer of `dkoder.policy`, as it is, to a new file in the system's temp folder, never in the app's folder. Run `node <scripts>/dkod-policy.mjs check <that file> <the app's folder>`. It prints one JSON line. Delete the file after.
+- The answer lists `findings`: rule, file, line and what to change. Fix every `block` finding and run the check again until `blocked` is false. Then tell the user each `warn` finding in one line.
+- When there is no Node, tell the user the checks could not run on this computer.
 
 ## Cursor: allow the dkod tools
 
@@ -55,11 +66,12 @@ When the dkod tools are missing in a cloud session, tell the user these steps. W
 When the user says "push to prod" (or ship, deploy, go live), do all of these steps. Do not stop to ask between them, except for the questions DKOD asks.
 
 1. Start a session (above).
-2. Send the code (below).
-3. If the app's folder has a `.env` file, fill the app's secrets from it (Secrets, below). Do not ask first. Use `.env.production` when there is one. Look only at the file names (`ls -a`); never open the file.
-4. Deploy (below). When `dkoder.deploy.questions` answers `none: true`, call `dkoder.deploy` with no `deploy_answers`. When the app needs no database, pass `no_database: true`.
-5. Follow the build with `dkoder.build.status` about every 30 seconds until its state is `delivered` or `failed`. Answer its own questions as Deploy step 6 says.
-6. Reply with the app's production URL: the build's `deploy.url`, or `delivery.cluster.live_url`. If the build failed, say which step failed and why.
+2. Run the policy checks (above). Fix every `block` finding before you go on.
+3. Send the code (below).
+4. If the app's folder has a `.env` file, fill the app's secrets from it (Secrets, below). Do not ask first. Use `.env.production` when there is one. Look only at the file names (`ls -a`); never open the file.
+5. Deploy (below). When `dkoder.deploy.questions` answers `none: true`, call `dkoder.deploy` with no `deploy_answers`. When the app needs no database, pass `no_database: true`.
+6. Follow the build with `dkoder.build.status` about every 30 seconds until its state is `delivered` or `failed`. Answer its own questions as Deploy step 6 says.
+7. Reply with the app's production URL: the build's `deploy.url`, or `delivery.cluster.live_url`. If the build failed, say which step failed and why.
 
 A person who is not an admin (a Builder) can deploy, follow, answer, fill secrets for and remove only the apps whose code they sent with `dkoder.source.target`. When a tool answers `admin role required`, tell the user its `message`.
 

@@ -343,6 +343,29 @@ function parseCommands(line, depth = 0) {
   return out;
 }
 
+function literalMessage(word) {
+  if (!/[`$]/.test(word))
+    return word;
+  const t = word.trim();
+  const open = /^\$\(cat[ \t]*<<-?[ \t]*(?:'(\w+)'|"(\w+)"|(\w+))[ \t]*\n/.exec(t);
+  if (open !== null && t.endsWith(")")) {
+    const delim = open[1] ?? open[2] ?? open[3];
+    const lines = t.slice(open[0].length, -1).split(`
+`);
+    const end = lines.findIndex((l) => l.trim() === delim);
+    if (end >= 0 && lines.slice(end + 1).every((l) => l.trim() === "")) {
+      const body = lines.slice(0, end).join(`
+`);
+      return open[3] !== undefined && /[`$]/.test(body) ? null : body.replace(/\n+$/, "");
+    }
+    return null;
+  }
+  const printf = /^\$\(printf[ \t]+'%s\\n'((?:[ \t]+'[^']*')+)[ \t]*\)$/.exec(t);
+  if (printf !== null)
+    return [...printf[1].matchAll(/'([^']*)'/g)].map((m) => m[1]).join(`
+`).replace(/\n+$/, "");
+  return null;
+}
 var join = (a, b) => b === "" ? a : a === "" ? b : b.startsWith("/") || b.startsWith("~") ? b : `${a.replace(/\/$/, "")}/${b}`;
 var GIT_GLOBAL_VALUE = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env", "--super-prefix", "--list-cmds", "--attr-source"]);
 var GIT_GLOBAL_HARMLESS = new Set(["-C", "-P", "--no-pager", "--paginate", "-p", "--no-optional-locks", "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--no-replace-objects", "--no-lazy-fetch", "--no-advice", "--bare"]);
@@ -501,6 +524,8 @@ function gitActions(cmd, depth, made = new Map) {
   }
   if (sub === "commit") {
     let all = false;
+    const paragraphs = [];
+    let elsewhere = false;
     for (let j = 0;j < rest.length; j += 1) {
       const w = rest[j];
       if (w === "--no-verify") {
@@ -517,27 +542,42 @@ function gitActions(cmd, depth, made = new Map) {
         break;
       }
       if (/^-[A-Za-z]+$/.test(w)) {
-        for (const ch of w.slice(1)) {
+        for (let k = 1;k < w.length; k += 1) {
+          const ch = w[k];
           if (ch === "n")
             out.push({ kind: "hook-bypass", cmd, dir, how: "git commit -n" });
           if (ch === "a" || ch === "i" || ch === "o")
             all = true;
           if (COMMIT_VALUE.has(`-${ch}`)) {
-            if (w.endsWith(ch))
+            const value = k === w.length - 1 ? rest[j + 1] : w.slice(k + 1);
+            if (k === w.length - 1)
               j += 1;
+            if (ch === "m")
+              paragraphs.push(value === undefined ? null : literalMessage(value));
+            else if (ch === "F" || ch === "C" || ch === "c")
+              elsewhere = true;
             break;
           }
         }
         continue;
       }
       if (w.startsWith("-")) {
-        if (!w.includes("=") && COMMIT_VALUE.has(w))
+        const [flag, inline] = w.includes("=") ? [w.slice(0, w.indexOf("=")), w.slice(w.indexOf("=") + 1)] : [w, undefined];
+        const value = inline ?? (COMMIT_VALUE.has(flag) ? rest[j + 1] : undefined);
+        if (inline === undefined && COMMIT_VALUE.has(flag))
           j += 1;
+        if (flag === "--message")
+          paragraphs.push(value === undefined ? null : literalMessage(value));
+        else if (flag === "--file" || flag === "--reuse-message" || flag === "--reedit-message" || flag === "--fixup" || flag === "--squash")
+          elsewhere = true;
         continue;
       }
       all = true;
     }
-    out.push({ kind: "commit", cmd, dir, all });
+    const message = elsewhere || paragraphs.length === 0 || paragraphs.includes(null) ? null : paragraphs.join(`
+
+`);
+    out.push({ kind: "commit", cmd, dir, all, message });
     return out;
   }
   if (sub === "config") {
@@ -1678,6 +1718,25 @@ function withBelow(el, ours, below) {
     return ours;
   return h(el.Box, { key: "dkod-stack", flexDirection: "column" }, ours, below);
 }
+
+var POLICY_LEVELS = ["block", "warn", "off"];
+var CHECK_IDS = [
+  "dockerfile.from_digest",
+  "dockerfile.numeric_user",
+  "image.no_moving_tag",
+  "k8s.probes",
+  "k8s.resources",
+  "k8s.security_context",
+  "k8s.rbac_no_wildcards",
+  "k8s.labels",
+  "file.exists",
+  "content.forbid",
+  "content.require",
+  "secrets.none",
+  "tls.no_insecure",
+  "version.semver",
+  "commit.conventional"
+];
 var MAX_PATTERN_LENGTH = 200;
 var MAX_UNBOUNDED = 4;
 var MAX_LINE_LENGTH = 2000;
@@ -1825,6 +1884,7 @@ function matchGlob(glob, path) {
 function matchAny(globs, path) {
   return globs.some((g) => matchGlob(g, path));
 }
+var ALWAYS_SKIPPED = ["**/node_modules/**", "node_modules/**", ".git/**", "**/.git/**", "**/vendor/**", "vendor/**"];
 
 function yamlDocs(text) {
   const lines = text.split(/\r?\n/);
@@ -2383,7 +2443,85 @@ var CATALOG = {
     }
   }
 };
+var MAX_FINDINGS = 200;
 var MAX_FILE_BYTES = 512 * 1024;
+function finish(findings, checked) {
+  const capped = findings.slice(0, MAX_FINDINGS);
+  return { findings: capped, blocked: capped.some((f) => f.level === "block"), checked };
+}
+function toFinding(rule, check, level, message, title, hit) {
+  return { rule, check, level, path: hit.path, line: hit.line, message: message ? `${message} (${hit.detail})` : `${title}: ${hit.detail}` };
+}
+function scopeOf(check) {
+  const def = CATALOG[check.use];
+  return { paths: stringList(check.with, "paths") ?? def.paths, exclude: [...ALWAYS_SKIPPED, ...def.exclude, ...stringList(check.with, "exclude") ?? []] };
+}
+var cleanPath = (p) => p.replace(/^\.?\/+/, "");
+function evaluate(pack, files, opts) {
+  const usable = files.filter((f) => f.text.length <= MAX_FILE_BYTES).map((f) => ({ path: cleanPath(f.path), text: f.text }));
+  const findings = [];
+  let checked = 0;
+  for (const rule of pack.rules) {
+    for (const check of rule.checks) {
+      const level = check.level ?? rule.level;
+      if (level === "off")
+        continue;
+      const def = CATALOG[check.use];
+      if (def.scope === "commit")
+        continue;
+      if (def.scope === "tree" && opts.stage !== "build")
+        continue;
+      if (def.needsSecretScan && !opts.secretScan)
+        continue;
+      const { paths, exclude } = scopeOf(check);
+      const scoped = usable.filter((f) => matchAny(paths, f.path) && !matchAny(exclude, f.path));
+      checked += 1;
+      const hits = [];
+      if (def.scope === "tree" && def.runTree)
+        hits.push(...def.runTree(scoped, check.with));
+      if (def.scope === "file" && def.runFile) {
+        const runOpts = opts.secretScan ? { secretScan: opts.secretScan } : {};
+        for (const f of scoped)
+          hits.push(...def.runFile(f, check.with, runOpts));
+      }
+      for (const h2 of hits)
+        findings.push(toFinding(rule.name, check.use, level, check.message, def.title, h2));
+      if (findings.length >= MAX_FINDINGS)
+        return finish(findings, checked);
+    }
+  }
+  return finish(findings, checked);
+}
+function pathsToRead(pack, paths, opts) {
+  const scopes = pack.rules.flatMap((rule) => rule.checks.filter((c) => (c.level ?? rule.level) !== "off" && CATALOG[c.use].scope === "file" && (!CATALOG[c.use].needsSecretScan || opts.secretScan !== undefined)).map(scopeOf));
+  return new Set(paths.filter((p) => scopes.some((s) => matchAny(s.paths, cleanPath(p)) && !matchAny(s.exclude, cleanPath(p)))));
+}
+function evaluateCommit(pack, message) {
+  const findings = [];
+  let checked = 0;
+  for (const rule of pack.rules) {
+    for (const check of rule.checks) {
+      const level = check.level ?? rule.level;
+      const def = CATALOG[check.use];
+      if (level === "off" || def.scope !== "commit" || !def.runCommit)
+        continue;
+      checked += 1;
+      for (const h2 of def.runCommit(message, check.with))
+        findings.push(toFinding(rule.name, check.use, level, check.message, def.title, h2));
+    }
+  }
+  return finish(findings, checked);
+}
+function formatFindings(findings, max = 20) {
+  const shown = findings.slice(0, max).map((f) => {
+    const where = f.path === null ? "" : f.line === null ? `${f.path}: ` : `${f.path}:${f.line}: `;
+    return `- [${f.level}] ${f.rule}: ${where}${f.message}`;
+  });
+  if (findings.length > max)
+    shown.push(`- and ${findings.length - max} more`);
+  return shown.join(`
+`);
+}
 var K = new Uint32Array([
   1116352408,
   1899447441,
@@ -2450,6 +2588,93 @@ var K = new Uint32Array([
   3204031479,
   3329325298
 ]);
+
+var MAX_CHECKS_PER_RULE = 32;
+var MAX_RULES_PER_PACK = 200;
+var MAX_MESSAGE = 300;
+function isRecord(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function isLevel(v) {
+  return typeof v === "string" && POLICY_LEVELS.includes(v);
+}
+function genericPathProblems(params) {
+  const out = [];
+  for (const key of ["paths", "exclude"]) {
+    const v = params[key];
+    if (v === undefined)
+      continue;
+    if (!Array.isArray(v) || v.some((x) => typeof x !== "string" || x.length === 0 || x.length > 200) || v.length > 32)
+      out.push(`"${key}" must be a list of at most 32 globs`);
+  }
+  return out;
+}
+function checkProblems(raw, where) {
+  if (!isRecord(raw))
+    return [`${where} must be a mapping with "use"`];
+  const use = raw.use;
+  if (typeof use !== "string" || !CHECK_IDS.includes(use))
+    return [`${where}.use "${String(use)}" is not a known check`];
+  const params = raw.with === undefined || raw.with === null ? {} : raw.with;
+  if (!isRecord(params))
+    return [`${where}.with must be a mapping`];
+  const out = [...genericPathProblems(params), ...CATALOG[use].validate(params)].map((p) => `${where}.with: ${p}`);
+  if (raw.message !== undefined && raw.message !== null && (typeof raw.message !== "string" || raw.message.length > MAX_MESSAGE))
+    out.push(`${where}.message must be text of at most ${MAX_MESSAGE} characters`);
+  if (raw.level !== undefined && raw.level !== null && !isLevel(raw.level))
+    out.push(`${where}.level must be block, warn or off`);
+  return out;
+}
+function parseEnforce(raw) {
+  if (!isRecord(raw))
+    return { ok: false, errors: ["enforce must be a mapping"] };
+  const errors = [];
+  const level = raw.level === undefined ? "block" : raw.level;
+  if (!isLevel(level))
+    errors.push("enforce.level must be block, warn or off");
+  if (raw.source !== undefined && raw.source !== null && (typeof raw.source !== "string" || !/^sha256:[0-9a-f]{64}$/.test(raw.source)))
+    errors.push("enforce.source must be sha256:<64 hex>");
+  if (raw.translator !== undefined && typeof raw.translator !== "string")
+    errors.push("enforce.translator must be text");
+  const checksRaw = raw.checks === undefined || raw.checks === null ? [] : raw.checks;
+  if (!Array.isArray(checksRaw))
+    errors.push("enforce.checks must be a list");
+  else if (checksRaw.length > MAX_CHECKS_PER_RULE)
+    errors.push(`enforce.checks may hold at most ${MAX_CHECKS_PER_RULE} checks`);
+  else
+    checksRaw.forEach((c, i) => errors.push(...checkProblems(c, `enforce.checks[${i}]`)));
+  if (errors.length > 0)
+    return { ok: false, errors };
+  const checks = checksRaw.map((c) => ({
+    use: c.use,
+    with: isRecord(c.with) ? c.with : {},
+    message: typeof c.message === "string" && c.message.trim() !== "" ? c.message.trim() : null,
+    level: isLevel(c.level) ? c.level : null
+  }));
+  return {
+    ok: true,
+    enforce: {
+      level,
+      source: typeof raw.source === "string" ? raw.source : null,
+      translator: typeof raw.translator === "string" ? raw.translator : "manual",
+      checks
+    }
+  };
+}
+function readPack(raw) {
+  if (!isRecord(raw) || raw.version !== 1 || !Array.isArray(raw.rules))
+    return { version: 1, rules: [] };
+  const rules = [];
+  for (const r of raw.rules.slice(0, MAX_RULES_PER_PACK)) {
+    if (!isRecord(r) || typeof r.name !== "string" || typeof r.path !== "string")
+      continue;
+    const parsed = parseEnforce({ level: r.level, checks: r.checks });
+    if (!parsed.ok)
+      continue;
+    rules.push({ name: r.name, path: r.path, level: parsed.enforce.level, stale: r.stale === true, checks: parsed.enforce.checks });
+  }
+  return { version: 1, rules };
+}
 function check(use, params = {}, extra = {}) {
   return { use, with: params, message: extra.message ?? null, level: extra.level ?? null };
 }
@@ -3341,7 +3566,7 @@ function classifyRepo(repo, config) {
   return "protected";
 }
 function ruleLayer(rule) {
-  return rule === "blocked-command" || rule === "guardrails" ? "guard" : "floor";
+  return rule === "blocked-command" || rule === "guardrails" || rule === "policy" ? "guard" : "floor";
 }
 var DELIVER = "App code ships through Deliver (the dkoder.deliver tool), never a direct push or merge.";
 function governanceMessage(repo) {
@@ -3474,7 +3699,7 @@ async function decideBash(cmds, config, resolver, seen = []) {
   return null;
 }
 function commitTargets(cmds) {
-  return actionsOf(cmds).flatMap((a) => a.kind === "commit" ? [{ dir: a.dir, all: a.all }] : []);
+  return actionsOf(cmds).flatMap((a) => a.kind === "commit" ? [{ dir: a.dir, all: a.all, message: a.message }] : []);
 }
 var MAX_SCAN_CHARS = 8 * 1024 * 1024;
 function checkFile(path, content, config) {
@@ -3499,7 +3724,22 @@ function checkFile(path, content, config) {
       out.push({ rule: "no-secrets", line, message: `no-plaintext-secrets: ${path} line ${String(line)} matches your org's secret pattern ${p.name}. Put the NAME of a secret there and resolve it at run time.` });
     }
   }
+  if (config.policyPack !== undefined && config.policyPack.rules.length > 0) {
+    for (const f of evaluate(config.policyPack, [{ path, text }], { stage: "write" }).findings) {
+      if (f.level === "block")
+        out.push(policyRefusal(f));
+    }
+  }
   return out;
+}
+function policyRefusal(f) {
+  const where = f.path === null ? "" : f.line === null ? `${f.path}: ` : `${f.path} line ${String(f.line)}: `;
+  return { rule: "policy", check: f.check, message: `${f.rule}: ${where}${f.message}. Change the code so it follows the rule.`, ...f.line !== null ? { line: f.line } : {} };
+}
+function checkCommitMessage(message, config) {
+  if (message === null || config.policyPack === undefined || config.policyPack.rules.length === 0)
+    return [];
+  return evaluateCommit(config.policyPack, message).findings.filter((f) => f.level === "block").map(policyRefusal);
 }
 function newFindings(path, before, after, config) {
   const found = checkFile(path, after, config);
@@ -3507,8 +3747,9 @@ function newFindings(path, before, after, config) {
     return found;
   const lineText = (text, line) => line === undefined ? "" : text.split(`
 `)[line - 1] ?? "";
-  const old = new Set(checkFile(path, before, config).map((f) => `${f.rule}\x00${lineText(before, f.line)}`));
-  return found.filter((f) => !old.has(`${f.rule}\x00${lineText(after, f.line)}`));
+  const key = (f, text) => `${f.rule}\x00${f.check ?? ""}\x00${lineText(text, f.line)}`;
+  const old = new Set(checkFile(path, before, config).map((f) => key(f, before)));
+  return found.filter((f) => !old.has(key(f, after)));
 }
 var SHIP_VERB = /\b(?:git\s+push|gh\s+pr\s+merge|force[- ]?push(?:ed|ing)?|push(?:ed|ing)?|merg(?:e|ed|ing))\b/i;
 var SHIP_DIRECT = /\b(?:main|master|trunk|default\s+branch|directly|direct|straight|right\s+away|--admin|admin\s+merge|without\s+(?:a\s+)?(?:pr|pull\s+request|review|deliver))\b/i;
@@ -3519,6 +3760,97 @@ function asksDirectShip(text) {
   return SHIP_VERB.test(t) && SHIP_DIRECT.test(t);
 }
 
+var POLICY_CHECK_TOOL = "policy_check";
+var POLICY_CHECK_TOOL_FULL = `mcp__dkod__${POLICY_CHECK_TOOL}`;
+var POLICY_CHECK_SPEC = {
+  name: POLICY_CHECK_TOOL,
+  description: "Run your organization's policy checks on an app folder on this computer: every check of the org's rules, the ones that read one file and the ones that need the whole folder. The code stays here; only the findings come back (file, line, rule, what to change). Run it before dkoder.deploy or dkoder.deliver. Fix every block finding and run it again. Tell the person about each warn finding.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "The app's folder: absolute, or relative to the session's folder. Default: the session's folder." }
+    },
+    additionalProperties: false
+  },
+  isDeferred: false
+};
+var MAX_FOLDER_FILES = 5000;
+var MAX_READ_BYTES = 64 * 1024 * 1024;
+var MAX_SHOWN = 50;
+var refuse2 = (error, message) => ({ ok: false, error, message });
+function packSummary(pack) {
+  const lines = [];
+  for (const r of pack.rules) {
+    const titles = new Set;
+    for (const c of r.checks) {
+      const level = c.level ?? r.level;
+      if (level !== "off")
+        titles.add(`${CATALOG[c.use].title}${level === "warn" ? " (warn)" : ""}`);
+    }
+    if (titles.size > 0)
+      lines.push(`- ${r.name}: ${[...titles].join("; ")}`);
+  }
+  return lines.join(`
+`);
+}
+async function checkFolder(pack, dir, io) {
+  if (!pack || pack.rules.length === 0) {
+    return { ok: true, folder: dir, files: 0, skipped: 0, checked: 0, blocked: false, findings: [], summary: "", next: "Your organization's rules have no checks yet. Nothing to fix." };
+  }
+  const listed = await io.list(dir).catch(() => null);
+  if (listed === null)
+    return refuse2("cannot_list", "Dkoder could not list the files of that folder. Check the path, then try again.");
+  if (listed.length > MAX_FOLDER_FILES)
+    return refuse2("too_many_files", `That folder has more than ${String(MAX_FOLDER_FILES)} files. Run the check on the app's own folder.`);
+  const wanted = pathsToRead(pack, listed, { stage: "build" });
+  const base = dir.replace(/\/+$/, "");
+  let total = 0;
+  let skipped = 0;
+  const files = [];
+  for (const path of listed) {
+    if (!wanted.has(path)) {
+      files.push({ path, text: "" });
+      continue;
+    }
+    let text = null;
+    try {
+      text = total > MAX_READ_BYTES ? null : await io.read(`${base}/${path}`);
+    } catch {
+      text = null;
+    }
+    if (text === null || text.includes("\x00") || text.length > MAX_FILE_BYTES) {
+      skipped += 1;
+      files.push({ path, text: "" });
+      continue;
+    }
+    total += text.length;
+    files.push({ path, text });
+  }
+  const result = evaluate(pack, files, { stage: "build" });
+  const blocks = result.findings.filter((f) => f.level === "block").length;
+  const next = blocks > 0 ? `Fix the ${String(blocks)} block finding${blocks === 1 ? "" : "s"}, then run this check again before you deploy.` : result.findings.length > 0 ? "No block finding. Tell the person about each warn finding." : "Every check passed.";
+  return {
+    ok: true,
+    folder: dir,
+    files: listed.length,
+    skipped,
+    checked: result.checked,
+    blocked: result.blocked,
+    findings: result.findings.slice(0, MAX_SHOWN),
+    summary: formatFindings(result.findings, MAX_SHOWN),
+    next: skipped > 0 ? `${next} ${String(skipped)} file${skipped === 1 ? " was" : "s were"} not read (binary, over 512 KB, or past the read limit).` : next
+  };
+}
+async function listWithShell(run, dir) {
+  const git = await run(["git", "-C", dir, "ls-files", "-co", "--exclude-standard", "-z"], { timeoutMs: 20000 }).catch(() => null);
+  if (git !== null && git.exitCode === 0)
+    return git.stdout.split("\x00").filter(Boolean);
+  const find = await run(["find", ".", "(", "-name", "node_modules", "-o", "-name", ".git", "-o", "-name", "vendor", ")", "-prune", "-o", "-type", "f", "-print0"], { cwd: dir, timeoutMs: 20000 }).catch(() => null);
+  if (find !== null && find.exitCode === 0)
+    return find.stdout.split("\x00").filter(Boolean).map((p) => p.replace(/^\.\//, ""));
+  return null;
+}
+
 var EMPTY = { owners: [], governanceRepo: null, gitopsRepo: null, appRepos: [], guard: null };
 var strings = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
 var str = (v) => typeof v === "string" && v.length > 0 ? v : null;
@@ -3526,13 +3858,16 @@ function configFrom(v) {
   if (typeof v !== "object" || v === null)
     return EMPTY;
   const o = v;
+  const pack = o.policyPack === undefined || o.policyPack === null ? null : readPack(o.policyPack);
   return {
     owners: strings(o.owners),
     governanceRepo: str(o.governanceRepo),
     gitopsRepo: str(o.gitopsRepo),
     appRepos: strings(o.appRepos),
     guard: typeof o.guard === "object" && o.guard !== null ? o.guard : null,
-    ...typeof o.policyText === "string" ? { policyText: o.policyText } : {}
+    ...typeof o.policyText === "string" ? { policyText: o.policyText } : {},
+    ...pack !== null && pack.rules.length > 0 ? { policyPack: pack } : {},
+    ...typeof o.governanceSha === "string" && /^[0-9a-f]{40}$/.test(o.governanceSha) ? { governanceSha: o.governanceSha } : {}
   };
 }
 function mergeConfig(base, live, trusted = true) {
@@ -3551,7 +3886,9 @@ function mergeConfig(base, live, trusted = true) {
     gitopsRepo: live.gitopsRepo ?? base.gitopsRepo,
     appRepos: union(base.appRepos, live.appRepos),
     guard: live.guard ?? base.guard,
-    ...live.policyText ?? base.policyText ? { policyText: live.policyText ?? base.policyText } : {}
+    ...live.policyText ?? base.policyText ? { policyText: live.policyText ?? base.policyText } : {},
+    ...live.policyPack ?? base.policyPack ? { policyPack: live.policyPack ?? base.policyPack } : {},
+    ...live.governanceSha ?? base.governanceSha ? { governanceSha: live.governanceSha ?? base.governanceSha } : {}
   };
 }
 function rulesText(config) {
@@ -3567,6 +3904,9 @@ function rulesText(config) {
     lines.push(`- The governance repo ${config.governanceRepo} changes only through the DKOD dashboard, by an org admin. Never push, merge or write to it from here.`);
   if (config.policyText)
     lines.push("", "## Guard: your organization's policy", config.policyText);
+  if (config.policyPack) {
+    lines.push("", "## Guard: the checks of your organization's rules", "Dkoder runs these checks on every file write and commit, and refuses one that breaks a check at level block. Write code that passes them from the start.", `Before you deploy, run the tool ${POLICY_CHECK_TOOL_FULL} on the app's folder. Fix every block finding, then tell the person about each warn finding.`, packSummary(config.policyPack));
+  }
   return lines.join(`
 `);
 }
@@ -3704,7 +4044,8 @@ function createGuard(initial) {
     if (file.dashboardUrl && file.token) {
       device = "offline";
       try {
-        const r = await io.fetch(`${file.dashboardUrl.replace(/\/$/, "")}/api/v1/dkoder/config`, { headers: { authorization: `Bearer ${file.token}` } });
+        const id = typeof file.deviceId === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(file.deviceId) ? `?device=${encodeURIComponent(file.deviceId)}` : "";
+        const r = await io.fetch(`${file.dashboardUrl.replace(/\/$/, "")}/api/v1/dkoder/config${id}`, { headers: { authorization: `Bearer ${file.token}` } });
         if (r.status === 401 || r.status === 403)
           device = "refused";
         if (r.ok) {
@@ -3847,6 +4188,7 @@ Do not try another way to run it. Tell the person why, and offer the allowed way
       const root = top.trim();
       if (await outside(io, root, cfg))
         continue;
+      out.push(...checkCommitMessage(t.message, cfg));
       const staged = (await git(io, root, ["diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"]) ?? "").split("\x00").filter(Boolean);
       const seen = new Set;
       if (staged.length > MAX_COMMIT_FILES)
@@ -3938,7 +4280,29 @@ Do not try another way to run it. Tell the person why, and offer the allowed way
     await load(io);
     await sessionStart(io, await io.cwd());
   };
-  return { sessionStart, promptSection, promptNote, bash, write, load, checkWrite, checkCommit, resolver, deviceState, afterSignIn };
+  let seenVersion = null;
+  const refresh = async (io) => {
+    if (!loaded)
+      return;
+    let answer;
+    if (install.dashboardUrl && install.token) {
+      const r = await io.fetch(`${install.dashboardUrl.replace(/\/$/, "")}/api/v1/dkoder/config/version`, { headers: { authorization: `Bearer ${install.token}` } }).catch(() => null);
+      answer = r?.ok ? JSON.parse(r.text) : undefined;
+    } else if (io.mcpVersion)
+      answer = await io.mcpVersion().catch(() => {
+        return;
+      });
+    const sha = answer?.governanceSha;
+    if (typeof sha !== "string" || !/^[0-9a-f]{40}$/.test(sha) || sha === config.governanceSha || sha === seenVersion)
+      return;
+    seenVersion = sha;
+    const before = config;
+    loaded = false;
+    await load(io);
+    if (config.governanceSha !== sha)
+      config = before;
+  };
+  return { sessionStart, promptSection, promptNote, bash, write, load, checkWrite, checkCommit, resolver, deviceState, afterSignIn, refresh };
 }
 function refusedBy(found) {
   const layers = new Set(found.map((r) => ruleLayer(r.rule)));
@@ -3985,6 +4349,8 @@ var STATUS = { plugin: "dkod", key: "status" };
 var AUTH_EVERY_TICKS = Math.round(20000 / TICK_MS);
 var AUTH_OUT_EVERY_TICKS = Math.round(1000 / TICK_MS);
 var HEARTBEAT_EVERY_TICKS = Math.round(5000 / TICK_MS);
+var RULES_EVERY_MS = 10 * 60000;
+var RULES_EVERY_TICKS = Math.round(RULES_EVERY_MS / TICK_MS);
 function failedCheck(next) {
   const kind = next.error?.kind;
   return kind === "throw" || kind === "timeout";
@@ -4033,6 +4399,9 @@ function register(on) {
     return;
   };
   let authOut = false;
+  let refreshRules = async () => {
+    return;
+  };
   on("session.start", async ($, e, next) => {
     const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => {
       $.state.set(STATUS, t ?? "").catch(() => {
@@ -4061,6 +4430,13 @@ function register(on) {
       }), pluginVersion, agentVersion) });
       const text = out.isError ? undefined : out.content.find((c) => c.type === "text")?.text;
       return text === undefined ? undefined : JSON.parse(text);
+    }, mcpVersion: async () => {
+      const r = await $.mcp.connect("dkod");
+      if (!r.isConnected)
+        return;
+      const out = await $.mcp.call(r.server, "dkoder.guard.version", {});
+      const text = out.isError ? undefined : out.content.find((c) => c.type === "text")?.text;
+      return text === undefined ? undefined : JSON.parse(text);
     }, keepHookConfig: async (c) => {
       const h2 = await $.env.get("HOME");
       if (h2)
@@ -4081,6 +4457,9 @@ function register(on) {
     heartbeat = beat;
     await beat();
     await $.tool.register(ENV_SECRETS_SPEC).catch(() => {
+      return;
+    });
+    await $.tool.register(POLICY_CHECK_SPEC).catch(() => {
       return;
     });
     await guard.sessionStart(io, e.cwd);
@@ -4116,6 +4495,7 @@ function register(on) {
         told = false;
     };
     recheckAuth = checkAuth;
+    refreshRules = () => guard.refresh(io);
     await checkAuth().catch(() => {
       return;
     });
@@ -4140,6 +4520,10 @@ function register(on) {
           });
         if (tick % HEARTBEAT_EVERY_TICKS === 0)
           heartbeat();
+        if (tick % RULES_EVERY_TICKS === 0)
+          refreshRules().catch(() => {
+            return;
+          });
         if (tick >= CYCLE_TICKS * 1000)
           tick = 0;
       });
@@ -4225,6 +4609,17 @@ function register(on) {
     }, e).catch(() => ({ ok: false, error: "failed", message: "Dkoder could not fill the secrets from that file. Nothing was saved. Try again." }));
     return { result: JSON.stringify(answer) };
   }).catch(async () => ({ deny: "Dkoder could not fill the secrets from that file in time. Check in the dashboard what was saved (Launchpad, the app, Replace secrets), then try again." }));
+  on("tool.call", { tool: "mcp__dkod__policy_check" }, async ($, e) => {
+    const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME") };
+    const answer = await (async () => {
+      const cfg = await guard.load(io);
+      const cwd = await $.session.cwd();
+      const asked = typeof e.path === "string" && e.path.trim() !== "" ? e.path.trim() : null;
+      const dir = asked === null ? cwd : absolutePath(cwd, asked);
+      return checkFolder(cfg.policyPack, dir, { list: (d) => listWithShell((a, i) => $.process.run(a, i), d), read: (p) => $.fs.read(p) });
+    })().catch(() => ({ ok: false, error: "failed", message: "Dkoder could not run the policy checks. Try again." }));
+    return { result: JSON.stringify(answer) };
+  }).catch(async () => ({ deny: "Dkoder could not finish the policy checks in time. Run them on the app's own folder, or try again." }));
   on("tool.check", async ($, e, next) => {
     const r = await next(e);
     if (r.decision === "deny")
