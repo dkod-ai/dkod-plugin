@@ -13,7 +13,7 @@
   <a href="https://dkod.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/dkod-ai-dark.svg"><img src="assets/readme/dkod-ai-light.svg" height="76" alt="dkod.ai"></picture></a>
 </p>
 
-<h2 id="what-it-adds"><sub><picture><img src="assets/readme/dot-yellow.svg" width="10" height="10" alt=""></picture>&nbsp; What it adds</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-adds-dark.svg"><img src="assets/readme/h-adds-light.svg" alt="Three parts, one plugin."></picture></h2>
+<h2 id="what-it-adds"><sub><picture><img src="assets/readme/dot-yellow.svg" width="18" height="10" alt=""></picture>What it adds</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-adds-dark.svg"><img src="assets/readme/h-adds-light.svg" alt="Three parts, one plugin."></picture></h2>
 
 - **MCP server** `dkod`: your org's policy, templates, Deploy questions, Deploy, build answers, Deliver and Remove.
 - **Skill** `dkod`: tells Claude how to use them, in the right order.
@@ -24,7 +24,7 @@
   <img src="assets/readme/band-light.svg" width="100%" alt="The Dkoder band above the Claude Code prompt. Before you sign in it is yellow and says: Sign in to DKOD for Deliver and your organization's Guard rules: type /mcp, pick dkod, then Authenticate. Signed in, it is cyan and says: on, Guard on, refund-admin, Deliver required.">
 </picture>
 
-<h2 id="install"><sub><picture><img src="assets/readme/dot-cyan.svg" width="10" height="10" alt=""></picture>&nbsp; Install</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-install-dark.svg"><img src="assets/readme/h-install-light.svg" alt="Ready in three steps."></picture></h2>
+<h2 id="install"><sub><picture><img src="assets/readme/dot-cyan.svg" width="18" height="10" alt=""></picture>Install</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-install-dark.svg"><img src="assets/readme/h-install-light.svg" alt="Ready in three steps."></picture></h2>
 
 1. Add the marketplace:
 
@@ -42,7 +42,7 @@
 
 Until you sign in, the band above the prompt is yellow.
 
-<h2 id="cursor"><sub><picture><img src="assets/readme/dot-violet.svg" width="10" height="10" alt=""></picture>&nbsp; Cursor</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-cursor-dark.svg"><img src="assets/readme/h-cursor-light.svg" alt="One repository, two agents."></picture></h2>
+<h2 id="cursor"><sub><picture><img src="assets/readme/dot-violet.svg" width="18" height="10" alt=""></picture>Cursor</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-cursor-dark.svg"><img src="assets/readme/h-cursor-light.svg" alt="One repository, two agents."></picture></h2>
 
 The same repository is a Cursor plugin. In Cursor you get the `dkod` MCP server and the `dkod` skill. You do not get the band or the rules: those run only in Claude Code.
 
@@ -80,7 +80,7 @@ This list replaces the MCP allowlist in Cursor's settings, so copy those entries
 
 </details>
 
-<h2 id="cloud-sessions"><sub><picture><img src="assets/readme/dot-mint.svg" width="10" height="10" alt=""></picture>&nbsp; Cloud sessions</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-cloud-dark.svg"><img src="assets/readme/h-cloud-light.svg" alt="Add the server to the cloud."></picture></h2>
+<h2 id="cloud-sessions"><sub><picture><img src="assets/readme/dot-mint.svg" width="18" height="10" alt=""></picture>Cloud sessions</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-cloud-dark.svg"><img src="assets/readme/h-cloud-light.svg" alt="Add the server to the cloud."></picture></h2>
 
 Plugins do not load in a cloud session, so add the DKOD MCP server to the cloud itself. The server gives the agent the dkod skill and its scripts through the `dkoder.guide` tool.
 
@@ -93,7 +93,7 @@ Plugins do not load in a cloud session, so add the DKOD MCP server to the cloud 
   The default **Trusted** network reaches your organization's storage on AWS, Google Cloud and Cloudflare R2.
 - **Cursor cloud agents:** add the same URL in the MCP list at [cursor.com/agents](https://cursor.com/agents). A team admin can add it for everyone under **Dashboard → Integrations & MCP**.
 
-<h2 id="dkoder-and-guard"><sub><picture><img src="assets/readme/dot-orange.svg" width="10" height="10" alt=""></picture>&nbsp; Dkoder and Guard</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-guard-dark.svg"><img src="assets/readme/h-guard-light.svg" alt="The floor, plus your rules."></picture></h2>
+<h2 id="dkoder-and-guard"><sub><picture><img src="assets/readme/dot-orange.svg" width="18" height="10" alt=""></picture>Dkoder and Guard</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-guard-dark.svg"><img src="assets/readme/h-guard-light.svg" alt="The floor, plus your rules."></picture></h2>
 
 | | Dkoder | Guard |
 | -- | -- | -- |
@@ -101,7 +101,7 @@ Plugins do not load in a cloud session, so add the DKOD MCP server to the cloud 
 | Rules | The floor, the same for every organization | Your organization's own, from its governance repository |
 | Needs | Nothing. Works signed out; the band asks you to sign in | Sign-in through `/mcp`, or your company's device install |
 
-<h2 id="what-the-rules-check"><sub><picture><img src="assets/readme/dot-pink.svg" width="10" height="10" alt=""></picture>&nbsp; What the rules check</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-rules-dark.svg"><img src="assets/readme/h-rules-light.svg" alt="App code ships through Deliver."></picture></h2>
+<h2 id="what-the-rules-check"><sub><picture><img src="assets/readme/dot-pink.svg" width="18" height="10" alt=""></picture>What the rules check</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-rules-dark.svg"><img src="assets/readme/h-rules-light.svg" alt="App code ships through Deliver."></picture></h2>
 
 The rules need to know your org: which GitHub owners are yours, which repository is the governance repository, and the org's own blocked commands. Dkoder gets those facts from DKOD when you sign in through `/mcp`, if your organization turned Guard on. Your company can also install Dkoder on its devices from the DKOD dashboard; that copy cannot be turned off. Then, in the org's repositories, the floor refuses:
 
@@ -113,7 +113,7 @@ Guard adds your organization's own rules on top, such as blocked commands. A ref
 
 Before you sign in, nothing names your org, so a repository with a remote is left alone. A folder with no remote still gets the secret check. This plugin sends no events and needs no install file.
 
-<h2 id="limits"><sub><picture><img src="assets/readme/dot-coral.svg" width="10" height="10" alt=""></picture>&nbsp; Limits</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-limits-dark.svg"><img src="assets/readme/h-limits-light.svg" alt="Guide rails, not a lock."></picture></h2>
+<h2 id="limits"><sub><picture><img src="assets/readme/dot-coral.svg" width="18" height="10" alt=""></picture>Limits</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-limits-dark.svg"><img src="assets/readme/h-limits-light.svg" alt="Guide rails, not a lock."></picture></h2>
 
 > [!IMPORTANT]
 > The rules keep Claude on the Deliver path. They are not a security boundary against a person.
