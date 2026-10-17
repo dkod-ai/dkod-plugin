@@ -13,6 +13,24 @@
   <a href="https://dkod.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/dkod-ai-dark.svg"><img src="assets/readme/dkod-ai-light.svg" height="76" alt="dkod.ai"></picture></a>
 </p>
 
+<p align="center">
+  <a href="LICENSE"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/badge-license-dark.svg"><img src="assets/readme/badge-license-light.svg" alt="License: MIT"></picture></a>
+  <a href="https://github.com/dkod-ai/dkod-plugin/commits/main"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/badge-version-dark.svg"><img src="assets/readme/badge-version-light.svg" alt="Plugin version"></picture></a>
+  <a href="#install"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/badge-agents-dark.svg"><img src="assets/readme/badge-agents-light.svg" alt="Works in Claude Code and Cursor"></picture></a>
+  <a href="#what-the-rules-check"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/badge-events-dark.svg"><img src="assets/readme/badge-events-light.svg" alt="Events: none sent"></picture></a>
+  <a href="https://dashboard.dkod.app/docs"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/badge-docs-dark.svg"><img src="assets/readme/badge-docs-light.svg" alt="Docs: in the DKOD dashboard"></picture></a>
+</p>
+
+<p align="center">
+  <a href="#what-it-adds"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-adds-dark.svg"><img src="assets/readme/nav-adds-light.svg" alt="What it adds"></picture></a>
+  <a href="#install"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-install-dark.svg"><img src="assets/readme/nav-install-light.svg" alt="Install"></picture></a>
+  <a href="#cursor"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-cursor-dark.svg"><img src="assets/readme/nav-cursor-light.svg" alt="Cursor"></picture></a>
+  <a href="#cloud-sessions"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-cloud-dark.svg"><img src="assets/readme/nav-cloud-light.svg" alt="Cloud sessions"></picture></a>
+  <a href="#dkoder-and-guard"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-guard-dark.svg"><img src="assets/readme/nav-guard-light.svg" alt="Dkoder and Guard"></picture></a>
+  <a href="#what-the-rules-check"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-rules-dark.svg"><img src="assets/readme/nav-rules-light.svg" alt="What the rules check"></picture></a>
+  <a href="#limits"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-limits-dark.svg"><img src="assets/readme/nav-limits-light.svg" alt="Limits"></picture></a>
+</p>
+
 <h2 id="what-it-adds"><sub><picture><img src="assets/readme/dot-yellow.svg" width="18" height="10" alt=""></picture>What it adds</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-adds-dark.svg"><img src="assets/readme/h-adds-light.svg" alt="Three parts, one plugin."></picture></h2>
 
 - **MCP server** `dkod`: your org's policy, templates, Deploy questions, Deploy, build answers, Deliver and Remove.
