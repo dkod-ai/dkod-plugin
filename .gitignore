@@ -1,2 +1,4 @@
 tsconfig.json
 .claude-plugin/types/
+# graft local graph cache - regenerable, not committed (run `graft build`).
+/graft/
