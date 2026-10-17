@@ -17,7 +17,7 @@
 
 - **MCP server** `dkod`: your org's policy, templates, Deploy questions, Deploy, build answers, Deliver and Remove.
 - **Skill** `dkod`: tells Claude how to use them, in the right order.
-- **Dkoder band and rules**: a band above the prompt shows whether you are signed in to DKOD. DKOD's floor checks every command and file write, and once you sign in, so do your organization's Guard rules.
+- **Dkoder band and rules**: a band above the prompt shows whether you are signed in to DKOD.<br>DKOD's floor checks every command and file write, and once you sign in, so do your organization's Guard&nbsp;rules.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/readme/band-dark.svg">
@@ -26,14 +26,19 @@
 
 ## Install
 
-1. Add the marketplace and install the plugin:
+1. Add the marketplace:
 
    ```
    /plugin marketplace add dkod-ai/dkod-plugin
+   ```
+
+2. Install the plugin:
+
+   ```
    /plugin install dkod@dkod-ai
    ```
 
-2. Run `/mcp`, pick `dkod` and choose **Authenticate**. You sign in with your company's own sign-in. DKOD never sees a password.
+3. Run `/mcp`, pick `dkod` and choose **Authenticate**. You sign in with your company's own sign-in.<br>DKOD never sees a password.
 
 Until you sign in, the band above the prompt is yellow.
 
@@ -79,7 +84,13 @@ This list replaces the MCP allowlist in Cursor's settings, so copy those entries
 
 Plugins do not load in a cloud session, so add the DKOD MCP server to the cloud itself. The server gives the agent the dkod skill and its scripts through the `dkoder.guide` tool.
 
-- **Claude Code on the web, or the Desktop app's Cloud:** on claude.ai open **Settings → Connectors**, add a custom connector with `https://dashboard.dkod.app/api/v1/dkoder/mcp` and sign in. The default **Trusted** network reaches your organization's storage on AWS, Google Cloud and Cloudflare R2.
+- **Claude Code on the web, or the Desktop app's Cloud:** on claude.ai open **Settings → Connectors**, add a custom connector with this URL and sign in:
+
+  ```
+  https://dashboard.dkod.app/api/v1/dkoder/mcp
+  ```
+
+  The default **Trusted** network reaches your organization's storage on AWS, Google Cloud and Cloudflare R2.
 - **Cursor cloud agents:** add the same URL in the MCP list at [cursor.com/agents](https://cursor.com/agents). A team admin can add it for everyone under **Dashboard → Integrations & MCP**.
 
 ## Dkoder and Guard
@@ -120,7 +131,7 @@ The docs are in the DKOD dashboard, for signed-in users: [dashboard.dkod.app/doc
 
 ## License
 
-MIT
+[MIT](LICENSE)
 
 <br>
 
