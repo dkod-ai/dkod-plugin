@@ -141,7 +141,7 @@ To stop direct pushes for real, protect the app repository on GitHub (branch pro
 <br>
 
 <p align="center">
-  <a href="https://dkod.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/dkod-dark.svg"><img src="assets/readme/dkod-light.svg" height="34" alt="DKOD"></picture></a>
+  <a href="https://dkod.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/dkod-dark.svg"><img src="assets/readme/dkod-light.svg" height="30" alt="DKOD"></picture></a>
 </p>
 
 <p align="center"><a href="https://dkod.ai">dkod.ai</a> · <a href="https://dashboard.dkod.app/docs">Docs</a>, in the DKOD dashboard for signed-in users · <a href="LICENSE">MIT License</a></p>
