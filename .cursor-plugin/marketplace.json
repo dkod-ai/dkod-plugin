@@ -11,7 +11,7 @@
       "name": "dkod",
       "source": "./",
       "description": "Build and deploy apps through your company's DKOD: policy, templates, Deploy questions and Deliver.",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "category": "deployment",
       "tags": [
         "deploy",
