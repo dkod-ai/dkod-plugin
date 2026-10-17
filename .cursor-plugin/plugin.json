@@ -1,6 +1,7 @@
 {
   "name": "dkod",
-  "version": "0.10.1",
+  "displayName": "DKOD",
+  "version": "0.10.2",
   "description": "Build and deploy apps through your company's DKOD: policy, templates, Deploy questions and Deliver.",
   "author": {
     "name": "DKOD"
@@ -19,7 +20,7 @@
   "logo": "assets/logo.svg",
   "skills": "./skills/",
   "mcpServers": {
-    "DKOD": {
+    "dkod": {
       "url": "https://dashboard.dkod.app/api/v1/dkoder/mcp"
     }
   },

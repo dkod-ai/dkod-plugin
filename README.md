@@ -40,7 +40,7 @@ Then run **Developer: Reload Window** from the Command Palette. A team marketpla
 Cursor's Auto-review can stop each dkod tool call for approval. To allow the dkod tools, add them to `mcpAllowlist` in `~/.cursor/permissions.json`:
 
 ```json
-{ "mcpAllowlist": ["plugin-dkod-DKOD:*", "dkod:*"] }
+{ "mcpAllowlist": ["plugin-dkod-dkod:*", "dkod:*"] }
 ```
 
 This list replaces the MCP allowlist in Cursor's settings, so copy those entries into the file too. Run Mode must be Auto-review, Allowlist or Run Everything. See [Cursor permissions](https://cursor.com/docs/reference/permissions).
