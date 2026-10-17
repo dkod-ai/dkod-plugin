@@ -29,6 +29,14 @@ git clone https://github.com/dkod-ai/dkod-plugin ~/.cursor/plugins/local/dkod
 
 Restart Cursor. Then open **Settings → MCP**, find `DKOD` and choose **Connect**. You sign in with your company's own sign-in.
 
+Cursor does not update a plugin in `~/.cursor/plugins/local`. The DKOD server tells the agent when your copy is old, and the agent runs the update. To update by hand:
+
+```
+git -C ~/.cursor/plugins/local/dkod pull --ff-only
+```
+
+Then run **Developer: Reload Window** from the Command Palette. A team marketplace with **Enable Auto Refresh** on updates by itself.
+
 Cursor's Auto-review can stop each dkod tool call for approval. To allow the dkod tools, add them to `mcpAllowlist` in `~/.cursor/permissions.json`:
 
 ```json
