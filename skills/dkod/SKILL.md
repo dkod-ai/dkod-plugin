@@ -23,7 +23,7 @@ If a tool says the server needs sign-in, or the DKOD band above the prompt is ye
 
 ## Start a session
 
-1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.10.1"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user to reload as it says, and go on. The app key is the app's short name in lowercase kebab-case, usually the app's repository or folder name. If there is no app yet, ask the user for the name.
+1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.10.2"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user to reload as it says, and go on. The app key is the app's short name in lowercase kebab-case, usually the app's repository or folder name. If there is no app yet, ask the user for the name.
 2. Call `dkoder.policy` and `dkoder.templates` with the `sessionId`. Follow what they return while you write code. When a template has `content: null`, DKOD could not read it now: work from its `name` and `description`, and do not look for the file anywhere else.
 
 ## Cursor: allow the dkod tools
@@ -31,10 +31,10 @@ If a tool says the server needs sign-in, or the DKOD band above the prompt is ye
 In Cursor, Auto-review can stop each dkod tool call and wait for the user to approve it. The fix is Cursor's allowlist. When a dkod call waits for approval, tell the user this once. Write the file only when the user asks you to.
 
 - The file is `~/.cursor/permissions.json`. It applies to all projects.
-- Add the dkod server to `mcpAllowlist`. Cursor calls the plugin's server `plugin-dkod-DKOD`; a server added by hand has the name it was given, such as `dkod`:
+- Add the dkod server to `mcpAllowlist`. Cursor calls the plugin's server `plugin-dkod-dkod`; a server added by hand has the name it was given, such as `dkod`:
 
   ```json
-  { "mcpAllowlist": ["plugin-dkod-DKOD:*", "dkod:*"] }
+  { "mcpAllowlist": ["plugin-dkod-dkod:*", "dkod:*"] }
   ```
 
 - This list replaces the MCP allowlist in Cursor's settings. Copy the entries from there into the file too.
