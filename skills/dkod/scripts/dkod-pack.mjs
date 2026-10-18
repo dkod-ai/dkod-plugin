@@ -174,6 +174,8 @@ async function put(file, url, headerArgs) {
   } catch {
     fail("upload failed: could not connect");
   }
+  // A 403 from S3 means the presigned link no longer works: it expired, or it was used.
+  if (res.status === 403) fail("upload failed: the upload link expired or was already used. Call dkoder.source.target again for a new one, then run put with the new put_args.");
   if (res.status < 200 || res.status > 299) fail(`upload failed: HTTP ${res.status}`);
   unlinkSync(file);
   const dir = dirname(resolve(file));
