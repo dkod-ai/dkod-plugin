@@ -1,6 +1,6 @@
 ---
 name: dkod
-description: Use when the user wants to build, ship, deploy, "push to prod" or remove an app through their company's DKOD, asks what the org's policy or templates are, or wants to push or merge app code. Covers the dkoder MCP tools (session, policy, templates, sending the code, deploy questions, deploy, build answers, deliver, remove) and how Dkoder and the org's Guard rules treat pushes.
+description: Use for any request to build, create, change, fix, run, ship, deploy, "push to prod" or remove an app or code on this computer: it all goes through the company's DKOD, starting with a DKOD session. Also when the user asks what the org's policy or templates are, or wants to push or merge app code. Covers the dkoder MCP tools (session, policy, templates, sending the code, deploy questions, deploy, build answers, deliver, remove) and how Dkoder and the org's Guard rules treat pushes.
 ---
 
 # DKOD
@@ -20,10 +20,13 @@ If a tool says the server needs sign-in, or the DKOD band above the prompt is ye
 - Call `dkoder.remove` only when the user clearly asks to remove the app from production. Calling it is the yes.
 - Read the org's templates and policy only through the dkod tools (`dkoder.templates`, `dkoder.policy`). Each template comes with its text in `content`. Never search the disk, GitHub or the governance repository for them.
 - Push to prod needs no git and no `gh`. Do not check GitHub sign-in, git remotes or repositories.
+- Never run git for the app, not even `git init`: DKOD needs none.
 
 ## Start a session
 
-1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.11.0"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user to reload as it says, and go on. The app key is the app's short name in lowercase kebab-case, usually the app's repository or folder name. If there is no app yet, ask the user for the name.
+Start a session first, before you plan, ask questions, make a folder or write a file, for any code work, not only deploys. The org's templates and policy decide the stack and where things go. In Cursor, Dkoder refuses file writes and commands that change anything until the chat has a session.
+
+1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.12.0"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user to reload as it says, and go on. The app key is the app's short name in lowercase kebab-case, usually the app's repository or folder name. If there is no app yet, use the name the user gave; ask only when they gave none.
 2. Call `dkoder.policy` and `dkoder.templates` with the `sessionId`. Follow what they return while you write code. When a template has `content: null`, DKOD could not read it now: work from its `name` and `description`, and do not look for the file anywhere else.
 
 ## Policy checks
@@ -39,18 +42,22 @@ The org's rules come with checks: `policy_pack` in the answer of `dkoder.policy`
 
 ## Cursor: allow the dkod tools
 
-In Cursor, Auto-review can stop each dkod tool call and wait for the user to approve it. The fix is Cursor's allowlist. When a dkod call waits for approval, tell the user this once. Write the file only when the user asks you to.
+In Cursor, Auto-review can stop each dkod tool call and each DKOD script, and wait for the user to approve it. The fix is Cursor's allowlist. When a dkod call or script waits for approval, tell the user this once. Write the file only when the user asks you to.
 
-- The file is `~/.cursor/permissions.json`. It applies to all projects.
-- Add the dkod server to `mcpAllowlist`. Cursor calls the plugin's server `plugin-dkod-dkod`; a server added by hand has the name it was given, such as `dkod`:
+- The file is `~/.cursor/permissions.json`. It applies to all projects. Put these two lists in it:
 
   ```json
-  { "mcpAllowlist": ["plugin-dkod-dkod:*", "dkod:*"] }
+  {
+    "mcpAllowlist": ["dkod:*", "plugin-dkod-dkod:*"],
+    "terminalAllowlist": ["node <scripts>/dkod-"]
+  }
   ```
 
-- This list replaces the MCP allowlist in Cursor's settings. Copy the entries from there into the file too.
+- `plugin-dkod-dkod` is the plugin's server. `dkod` is a server the user added by hand.
+- In `terminalAllowlist`, write `<scripts>` as the full path of the `scripts` folder next to this file. Cursor then runs each DKOD script with no stop.
+- These lists replace the allowlists in Cursor's settings. Copy the entries from there into the file too.
 - Run Mode must be Auto-review, Allowlist or Run Everything. Cursor reads the file again by itself.
-- A Cursor team admin can allow it for the whole team in the team dashboard.
+- A Cursor team admin can set the same lists for everyone in the team dashboard.
 
 ## Cloud sessions
 
@@ -67,7 +74,7 @@ When the user says "push to prod" (or ship, deploy, go live), do all of these st
 
 1. Start a session (above).
 2. Run the policy checks (above). Fix every `block` finding before you go on.
-3. Send the code (below).
+3. Send the code (below). Run each DKOD script as one command on its own, exactly as `node <scripts>/dkod-pack.mjs ...`. Write `<scripts>` as a full path, with no quotes. Never chain it with another command by `&&` or `;`. Then Cursor's allowlist matches it. When `put` fails with "expired", call `dkoder.source.target` again, then run `put` with the new `put_args`.
 4. If the app's folder has a `.env` file, fill the app's secrets from it (Secrets, below). Do not ask first. Use `.env.production` when there is one. Look only at the file names (`ls -a`); never open the file.
 5. Deploy (below). When `dkoder.deploy.questions` answers `none: true`, call `dkoder.deploy` with no `deploy_answers`. When the app needs no database, pass `no_database: true`.
 6. Follow the build with `dkoder.build.status` about every 30 seconds until its state is `delivered` or `failed`. Answer its own questions as Deploy step 6 says.
@@ -90,7 +97,7 @@ The pack scripts are in the `scripts` folder next to this SKILL.md file. When th
 
 1. Pack: run `<run it as> pack <the app's folder>`. It prints one JSON line: `file` (the archive), `sha256`, `bytes` and `files`. It leaves out `.env` files, `.git`, dependencies (`node_modules`, `.venv`) and build output (`dist`, `build`, `.next`), and honors `.gitignore` in a git repository.
 2. Call `dkoder.source.target` with `sessionId`, `appKey`, `sha256` and `bytes`.
-3. Upload: run `<run it as> put <file> <put_args>`, with the `put_args` it returned pasted exactly as given. It sends the archive to the organization's storage, then deletes it. `put_args` works once and expires in minutes; do not save it or show it.
+3. Upload: run `<run it as> put <file> <put_args>`, with the `put_args` it returned pasted exactly as given. It sends the archive to the organization's storage, then deletes it. `put_args` works once and expires after an hour; do not save it or show it. When `put` fails with "expired", call `dkoder.source.target` again for a new `put_args`.
 4. Call `dkoder.source.done` with `sessionId`, `appKey`, the `slot` and `sha256`. When it answers `working`, call it again. When it answers `pushed`, the app is ready to deploy. When it refuses, tell the user why in one sentence.
 5. If you stop before the upload ran, delete the archive `file`.
 

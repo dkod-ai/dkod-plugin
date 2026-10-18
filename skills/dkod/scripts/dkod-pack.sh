@@ -218,6 +218,8 @@ put() {
   case "$code" in
     2??) ;;
     000) die "upload failed: could not connect" ;;
+    # A 403 from S3 means the presigned link no longer works: it expired, or it was used.
+    403) die "upload failed: the upload link expired or was already used. Call dkoder.source.target again for a new one, then run put with the new put_args." ;;
     *) die "upload failed: HTTP $code" ;;
   esac
   rm -f "$file"

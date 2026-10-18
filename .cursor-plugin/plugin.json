@@ -1,7 +1,7 @@
 {
   "name": "dkod",
   "displayName": "DKOD",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Build and deploy apps through your company's DKOD: policy, templates, Deploy questions and Deliver.",
   "author": {
     "name": "DKOD"
@@ -19,6 +19,7 @@
   ],
   "logo": "assets/logo.svg",
   "skills": "./skills/",
+  "rules": "./rules/",
   "mcpServers": {
     "dkod": {
       "url": "https://dashboard.dkod.app/api/v1/dkoder/mcp"
@@ -26,6 +27,48 @@
   },
   "hooks": {
     "version": 1,
-    "hooks": {}
+    "hooks": {
+      "sessionStart": [
+        {
+          "command": "node \"${CURSOR_PLUGIN_ROOT:-.}/hooks/cursor-guard.mjs\""
+        }
+      ],
+      "preToolUse": [
+        {
+          "command": "node \"${CURSOR_PLUGIN_ROOT:-.}/hooks/cursor-guard.mjs\""
+        }
+      ],
+      "beforeShellExecution": [
+        {
+          "command": "node \"${CURSOR_PLUGIN_ROOT:-.}/hooks/cursor-guard.mjs\""
+        }
+      ],
+      "beforeMCPExecution": [
+        {
+          "command": "node \"${CURSOR_PLUGIN_ROOT:-.}/hooks/cursor-guard.mjs\""
+        }
+      ],
+      "afterMCPExecution": [
+        {
+          "command": "node \"${CURSOR_PLUGIN_ROOT:-.}/hooks/cursor-guard.mjs\""
+        }
+      ],
+      "afterFileEdit": [
+        {
+          "command": "node \"${CURSOR_PLUGIN_ROOT:-.}/hooks/cursor-guard.mjs\""
+        }
+      ],
+      "afterShellExecution": [
+        {
+          "command": "node \"${CURSOR_PLUGIN_ROOT:-.}/hooks/cursor-guard.mjs\""
+        }
+      ],
+      "stop": [
+        {
+          "command": "node \"${CURSOR_PLUGIN_ROOT:-.}/hooks/cursor-guard.mjs\"",
+          "loop_limit": 1
+        }
+      ]
+    }
   }
 }

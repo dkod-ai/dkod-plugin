@@ -214,6 +214,9 @@ def put(file, url, header_args):
         raise Refusal("bad header argument")
     except (OSError, http.client.HTTPException):
         raise Refusal("upload failed: could not connect")
+    # A 403 from S3 means the presigned link no longer works: it expired, or it was used.
+    if status == 403:
+        raise Refusal("upload failed: the upload link expired or was already used. Call dkoder.source.target again for a new one, then run put with the new put_args.")
     if status < 200 or status > 299:
         raise Refusal("upload failed: HTTP %d" % status)
     os.remove(file)

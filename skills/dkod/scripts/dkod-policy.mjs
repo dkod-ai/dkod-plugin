@@ -1034,6 +1034,19 @@ var RECOGNISERS = [
     label: "Every service has an owner",
     test: (h) => has(h, "owner", "owning team", "ownership"),
     checks: [check("k8s.labels", { required: ["app.dkod.ai/owner"] }, { message: "Every deployed workload names its owner", level: "warn" })]
+  },
+  {
+    id: "package-manager",
+    label: "bun is the only package manager",
+    test: (h) => has(h, "bun") && has(h, "npm", "yarn", "pnpm", "package manager", "package step"),
+    checks: [
+      check("content.forbid", { pattern: "\\S", paths: ["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml"] }, { message: "Use bun: delete this lockfile; bun keeps bun.lock" }),
+      check("content.forbid", {
+        pattern: "(?:^|[\\s;&|(\"'`=])(?:npm|npx|yarn|pnpm)(?:\\s|$)",
+        paths: ["Dockerfile*", "*.Dockerfile", "Containerfile*", ".github/workflows/*.y*ml", ".gitlab-ci.y*ml", "package.json", "Makefile", "*.sh"]
+      }, { message: "Use bun, bunx and bun run here, not npm, npx, yarn or pnpm" }),
+      check("content.forbid", { pattern: "^\\s*FROM.*[\\s/]node[:@]", flags: "i", paths: ["Dockerfile*", "*.Dockerfile", "Containerfile*"] }, { message: "Build from the official oven/bun image, not node" })
+    ]
   }
 ];
 var POLICY_CHECK_TOOL = "policy_check";

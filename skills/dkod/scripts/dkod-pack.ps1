@@ -253,6 +253,8 @@ function Put([string]$file, [string]$url, [string[]]$headerArgs) {
     $stream.Dispose()
     $client.Dispose()
   }
+  # A 403 from S3 means the presigned link no longer works: it expired, or it was used.
+  if ($status -eq 403) { Fail 'upload failed: the upload link expired or was already used. Call dkoder.source.target again for a new one, then run put with the new put_args.' }
   if ($status -lt 200 -or $status -gt 299) { Fail "upload failed: HTTP $status" }
   [System.IO.File]::Delete($full)
   $dir = [System.IO.Path]::GetDirectoryName($full)
