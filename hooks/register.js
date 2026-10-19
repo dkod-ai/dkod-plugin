@@ -2774,7 +2774,7 @@ var RECOGNISERS = [
     checks: [
       check("content.forbid", { pattern: "\\S", paths: ["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml"] }, { message: "Use bun: delete this lockfile; bun keeps bun.lock" }),
       check("content.forbid", {
-        pattern: "(?:^|[\\s;&|(\"'`=])(?:npm|npx|yarn|pnpm)(?:\\s|$)",
+        pattern: "^[^#]*(?:^|[\\s;&|(\"'`=])(?:npm|npx|yarn|pnpm)(?:\\s|$)",
         paths: ["Dockerfile*", "*.Dockerfile", "Containerfile*", ".github/workflows/*.y*ml", ".gitlab-ci.y*ml", "package.json", "Makefile", "*.sh"]
       }, { message: "Use bun, bunx and bun run here, not npm, npx, yarn or pnpm" }),
       check("content.forbid", { pattern: "^\\s*FROM.*[\\s/]node[:@]", flags: "i", paths: ["Dockerfile*", "*.Dockerfile", "Containerfile*"] }, { message: "Build from the official oven/bun image, not node" })
@@ -3864,6 +3864,43 @@ async function listWithShell(run, dir) {
   return null;
 }
 
+var STUBS = new Set(["git", "python3"]);
+async function which(host, dirs, name) {
+  for (const dir of dirs)
+    if (await host.exists(`${dir}/${name}`).catch(() => false))
+      return dir;
+  return null;
+}
+async function realTool(host, tool) {
+  if (!STUBS.has(tool) || host.path === undefined)
+    return true;
+  const path = await host.path().catch(() => {
+    return;
+  }) ?? "";
+  const dirs = path.split(":").filter((d) => d !== "").map((d) => d.replace(/\/+$/, "") || "/");
+  if (await which(host, dirs, tool) !== "/usr/bin")
+    return true;
+  const select = await which(host, dirs, "xcode-select");
+  if (select === null)
+    return true;
+  const r = await host.run([`${select}/xcode-select`, "-p"], { timeoutMs: 5000 }).catch(() => null);
+  if (r === null)
+    return true;
+  const developer = r.exitCode === 0 ? r.stdout.trim() : "";
+  return developer !== "" && await host.exists(`${developer}/usr/bin/${tool}`).catch(() => false);
+}
+async function runReal(host, argv, init, known) {
+  const tool = argv[0] ?? "";
+  if (STUBS.has(tool)) {
+    let real = known.get(tool);
+    if (real === undefined)
+      known.set(tool, real = realTool(host, tool));
+    if (!await real)
+      return { exitCode: 127, stdout: "", stderr: `${tool}: only the macOS stub is installed, so it did not run` };
+  }
+  return host.run(argv, init);
+}
+
 var EMPTY = { owners: [], governanceRepo: null, gitopsRepo: null, appRepos: [], guard: null };
 var strings = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
 var str = (v) => typeof v === "string" && v.length > 0 ? v : null;
@@ -3967,9 +4004,11 @@ function createGuard(initial) {
   let install = initial?.install ?? {};
   let loaded = initial?.config !== undefined;
   let device = "none";
+  const tools = new Map;
+  const run = (io, argv, init) => runReal(io, argv, init, tools);
   const git = async (io, cwd, args) => {
     try {
-      const r = await io.run(["git", "-C", cwd, ...args], { timeoutMs: 1e4 });
+      const r = await run(io, ["git", "-C", cwd, ...args], { timeoutMs: 1e4 });
       return r.exitCode === 0 ? r.stdout : null;
     } catch {
       return null;
@@ -3992,7 +4031,7 @@ function createGuard(initial) {
       try {
         const cwd = await absolute(io, dir);
         if (tool === "git") {
-          const r = await io.run(["git", "-C", cwd, "config", "--get", `alias.${name}`], { timeoutMs: 1e4 });
+          const r = await run(io, ["git", "-C", cwd, "config", "--get", `alias.${name}`], { timeoutMs: 1e4 });
           if (r.exitCode === 1 && r.stdout === "")
             return null;
           return r.exitCode === 0 ? r.stdout.replace(/\n$/, "") : undefined;
@@ -4315,7 +4354,7 @@ Do not try another way to run it. Tell the person why, and offer the allowed way
     if (config.governanceSha !== sha)
       config = before;
   };
-  return { sessionStart, promptSection, promptNote, bash, write, load, checkWrite, checkCommit, resolver, deviceState, afterSignIn, refresh };
+  return { sessionStart, promptSection, promptNote, bash, write, load, checkWrite, checkCommit, resolver, deviceState, afterSignIn, refresh, run };
 }
 function refusedBy(found) {
   const layers = new Set(found.map((r) => ruleLayer(r.rule)));
@@ -4420,7 +4459,7 @@ function register(on) {
       $.state.set(STATUS, t ?? "").catch(() => {
         return;
       });
-    }, cwd: () => $.session.cwd(), home: () => $.env.get("HOME"), mcpConfig: async () => {
+    }, cwd: () => $.session.cwd(), home: () => $.env.get("HOME"), path: () => $.env.get("PATH"), mcpConfig: async () => {
       const r = await $.mcp.connect("dkod");
       if (!r.isConnected)
         return;
@@ -4544,7 +4583,7 @@ function register(on) {
     return next(e);
   });
   on("prompt.submit", async ($, e, next) => {
-    const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME"), pulse: (decision, text) => {
+    const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME"), path: () => $.env.get("PATH"), pulse: (decision, text) => {
       pulseAt = tick;
       $.clock.now().then((at) => $.state.set(PULSE, { decision, text, at })).catch(() => {
         return;
@@ -4562,7 +4601,7 @@ function register(on) {
     return next(promptNote === null ? e : { ...e, context: [...e.context ?? [], promptNote] });
   });
   on("prompt.compose", async ($, e, next) => {
-    const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME") };
+    const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME"), path: () => $.env.get("PATH") };
     const typed = [...await $.session.messages().catch(() => [])].reverse().find((m) => m.role === "user" && (m.toolResults?.length ?? 0) === 0 && m.text.trim() !== "")?.text ?? null;
     if (typed !== null && typed !== noteFor) {
       noteFor = typed;
@@ -4578,7 +4617,7 @@ function register(on) {
     if (touchesDkoderFiles(e))
       return { deny: DKODER_FILES_DENY };
     try {
-      const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME"), pulse: (decision, text) => {
+      const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME"), path: () => $.env.get("PATH"), pulse: (decision, text) => {
         pulseAt = tick;
         $.clock.now().then((at) => $.state.set(PULSE, { decision, text, at })).catch(() => {
           return;
@@ -4623,13 +4662,13 @@ function register(on) {
     return { result: JSON.stringify(answer) };
   }).catch(async () => ({ deny: "Dkoder could not fill the secrets from that file in time. Check in the dashboard what was saved (Launchpad, the app, Replace secrets), then try again." }));
   on("tool.call", { tool: "mcp__dkod__policy_check" }, async ($, e) => {
-    const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME") };
+    const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME"), path: () => $.env.get("PATH") };
     const answer = await (async () => {
       const cfg = await guard.load(io);
       const cwd = await $.session.cwd();
       const asked = typeof e.path === "string" && e.path.trim() !== "" ? e.path.trim() : null;
       const dir = asked === null ? cwd : absolutePath(cwd, asked);
-      return checkFolder(cfg.policyPack, dir, { list: (d) => listWithShell((a, i) => $.process.run(a, i), d), read: (p) => $.fs.read(p) });
+      return checkFolder(cfg.policyPack, dir, { list: (d) => listWithShell((a, i) => guard.run(io, a, i), d), read: (p) => $.fs.read(p) });
     })().catch(() => ({ ok: false, error: "failed", message: "Dkoder could not run the policy checks. Try again." }));
     return { result: JSON.stringify(answer) };
   }).catch(async () => ({ deny: "Dkoder could not finish the policy checks in time. Run them on the app's own folder, or try again." }));
@@ -4645,7 +4684,7 @@ function register(on) {
     if (passed.seen(call))
       return r;
     try {
-      const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME"), pulse: (decision, text) => {
+      const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME"), path: () => $.env.get("PATH"), pulse: (decision, text) => {
         pulseAt = tick;
         $.clock.now().then((at) => $.state.set(PULSE, { decision, text, at })).catch(() => {
           return;

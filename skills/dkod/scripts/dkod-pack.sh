@@ -69,9 +69,22 @@ octal() {
   while [ "${#O}" -lt "$2" ]; do O=0$O; done
 }
 
+# False for the macOS stub git: the first git on PATH is /usr/bin/git and xcode-select names no
+# developer folder with a git in it. With no Apple developer tools, running the stub opens Apple's
+# install window. No xcode-select on PATH: not a Mac, and git is real.
+real_git() {
+  g=$(command -v git 2>/dev/null) || return 1
+  case "$g" in
+    /usr/bin/git|/usr/bin//git) ;;
+    *) return 0 ;;
+  esac
+  command -v xcode-select >/dev/null 2>&1 || return 0
+  d=$(xcode-select -p 2>/dev/null) && [ -n "$d" ] && [ -x "$d/usr/bin/git" ]
+}
+
 # Candidate paths, one per line, relative with forward slashes, into $1.
 candidates() {
-  if command -v git >/dev/null 2>&1 && [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; then
+  if real_git && [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; then
     nl=$(git ls-files -co --exclude-standard -z | tr -cd '\n' | wc -c)
     [ "$nl" -eq 0 ] || die "path not allowed: a git path holds a line break"
     git ls-files -co --exclude-standard -z | tr '\0' '\n' | grep -v '/$' > "$1" || :

@@ -1,7 +1,44 @@
 // Built by packages/dkoder-plugin/scripts/build-policy.ts from dkod-app. Do not edit: run `bun run --cwd packages/dkoder-plugin build:policy`.
 import { spawnSync } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+
+var STUBS = new Set(["git", "python3"]);
+async function which(host, dirs, name) {
+  for (const dir of dirs)
+    if (await host.exists(`${dir}/${name}`).catch(() => false))
+      return dir;
+  return null;
+}
+async function realTool(host, tool) {
+  if (!STUBS.has(tool) || host.path === undefined)
+    return true;
+  const path = await host.path().catch(() => {
+    return;
+  }) ?? "";
+  const dirs = path.split(":").filter((d) => d !== "").map((d) => d.replace(/\/+$/, "") || "/");
+  if (await which(host, dirs, tool) !== "/usr/bin")
+    return true;
+  const select = await which(host, dirs, "xcode-select");
+  if (select === null)
+    return true;
+  const r = await host.run([`${select}/xcode-select`, "-p"], { timeoutMs: 5000 }).catch(() => null);
+  if (r === null)
+    return true;
+  const developer = r.exitCode === 0 ? r.stdout.trim() : "";
+  return developer !== "" && await host.exists(`${developer}/usr/bin/${tool}`).catch(() => false);
+}
+async function runReal(host, argv, init, known) {
+  const tool = argv[0] ?? "";
+  if (STUBS.has(tool)) {
+    let real = known.get(tool);
+    if (real === undefined)
+      known.set(tool, real = realTool(host, tool));
+    if (!await real)
+      return { exitCode: 127, stdout: "", stderr: `${tool}: only the macOS stub is installed, so it did not run` };
+  }
+  return host.run(argv, init);
+}
 
 var POLICY_LEVELS = ["block", "warn", "off"];
 var CHECK_IDS = [
@@ -1042,7 +1079,7 @@ var RECOGNISERS = [
     checks: [
       check("content.forbid", { pattern: "\\S", paths: ["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml"] }, { message: "Use bun: delete this lockfile; bun keeps bun.lock" }),
       check("content.forbid", {
-        pattern: "(?:^|[\\s;&|(\"'`=])(?:npm|npx|yarn|pnpm)(?:\\s|$)",
+        pattern: "^[^#]*(?:^|[\\s;&|(\"'`=])(?:npm|npx|yarn|pnpm)(?:\\s|$)",
         paths: ["Dockerfile*", "*.Dockerfile", "Containerfile*", ".github/workflows/*.y*ml", ".gitlab-ci.y*ml", "package.json", "Makefile", "*.sh"]
       }, { message: "Use bun, bunx and bun run here, not npm, npx, yarn or pnpm" }),
       check("content.forbid", { pattern: "^\\s*FROM.*[\\s/]node[:@]", flags: "i", paths: ["Dockerfile*", "*.Dockerfile", "Containerfile*"] }, { message: "Build from the official oven/bun image, not node" })
@@ -1161,10 +1198,16 @@ function walk(dir) {
     return null;
   }
 }
-var run = async (argv, init) => {
-  const r = spawnSync(argv[0], argv.slice(1), { cwd: init?.cwd, encoding: "utf8", timeout: init?.timeoutMs, maxBuffer: 64 * 1024 * 1024 });
-  return { exitCode: r.status ?? 1, stdout: r.stdout ?? "" };
+var host = {
+  exists: async (path) => existsSync(path),
+  run: async (argv, init) => {
+    const r = spawnSync(argv[0], argv.slice(1), { cwd: init?.cwd, encoding: "utf8", timeout: init?.timeoutMs, maxBuffer: 64 * 1024 * 1024 });
+    return { exitCode: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  },
+  path: async () => process.platform === "win32" ? undefined : process.env.PATH
 };
+var known = new Map;
+var run = (argv, init) => runReal(host, argv, init, known);
 process.exitCode = await runPolicyCli(process.argv.slice(2), {
   read: (path) => readFileSync(path, "utf8"),
   list: async (dir) => await listWithShell(run, dir) ?? walk(dir),

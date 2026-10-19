@@ -64,43 +64,35 @@ Until you sign in, the band above the prompt is yellow.
 
 The same repository is a Cursor plugin. In Cursor you get the `dkod` MCP server and the `dkod` skill. You do not get the band or the rules: those run only in Claude Code.
 
-Your team admin can import `dkod-ai/dkod-plugin` as a team marketplace in the Cursor dashboard. To install it for yourself only:
+Your team admin can import `dkod-ai/dkod-plugin` as a team marketplace in the Cursor dashboard. To install it for yourself only, on macOS or Linux:
 
 ```sh
-git clone https://github.com/dkod-ai/dkod-plugin ~/.cursor/plugins/local/dkod
+mkdir -p ~/.cursor/plugins/local/dkod
+curl -fsSL https://github.com/dkod-ai/dkod-plugin/archive/refs/heads/main.tar.gz | tar -xz --strip-components 1 -C ~/.cursor/plugins/local/dkod
 ```
+
+On Windows, in PowerShell:
+
+```powershell
+curl.exe -fsSLo "$env:TEMP\dkod-plugin.tar.gz" https://github.com/dkod-ai/dkod-plugin/archive/refs/heads/main.tar.gz
+mkdir -Force "$env:USERPROFILE\.cursor\plugins\local\dkod"
+tar.exe -xzf "$env:TEMP\dkod-plugin.tar.gz" --strip-components 1 -C "$env:USERPROFILE\.cursor\plugins\local\dkod"
+```
+
+It needs no git, so a Mac without Apple's developer tools asks nothing. Do not run it with `sudo`: then root owns the folder, and the update cannot write to it.
 
 Restart Cursor. Then open **Settings → MCP**, find `DKOD` and choose **Connect**. You sign in with your company's own sign-in.
-
-Do not run `git clone` with `sudo`. Then root owns the folder, and the update cannot write to it.
-
-<details>
-<summary><b>If the clone fails</b></summary>
-
-If macOS asks you to agree to the Xcode license, agree once, then run the clone again without `sudo`:
-
-```sh
-sudo xcodebuild -license accept
-```
-
-If git says `destination path ... already exists and is not an empty directory`, an earlier try left the folder there. Remove it, then run the clone again:
-
-```sh
-sudo rm -rf ~/.cursor/plugins/local/dkod
-```
-
-</details>
 
 <details>
 <summary><b>Update the plugin</b></summary>
 
-Cursor does not update a plugin in `~/.cursor/plugins/local`. The DKOD server tells the agent when your copy is old, and the agent runs the update. To update by hand:
+Cursor does not update a plugin in `~/.cursor/plugins/local`. The DKOD server tells the agent when your copy is old, and the agent runs the update. It needs no git: your DKOD dashboard serves the plugin, and the update script writes it over the folder. To update by hand:
 
 ```sh
-git -C ~/.cursor/plugins/local/dkod pull --ff-only
+node ~/.cursor/plugins/local/dkod/skills/dkod/scripts/dkod-update.mjs ~/.cursor/plugins/local/dkod https://<your DKOD dashboard>/api/v1/dkoder/bundle/cursor.json
 ```
 
-Then run **Developer: Reload Window** from the Command Palette. A team marketplace with **Enable Auto Refresh** on updates by itself.
+With Python and no Node, run `dkod-update.py` from the same folder with `python3` and the same two arguments. Cursor loads the new plugin by itself. A team marketplace with **Enable Auto Refresh** on updates by itself.
 
 </details>
 
