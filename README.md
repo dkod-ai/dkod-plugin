@@ -72,6 +72,25 @@ git clone https://github.com/dkod-ai/dkod-plugin ~/.cursor/plugins/local/dkod
 
 Restart Cursor. Then open **Settings → MCP**, find `DKOD` and choose **Connect**. You sign in with your company's own sign-in.
 
+Do not run `git clone` with `sudo`. Then root owns the folder, and the update cannot write to it.
+
+<details>
+<summary><b>If the clone fails</b></summary>
+
+If macOS asks you to agree to the Xcode license, agree once, then run the clone again without `sudo`:
+
+```sh
+sudo xcodebuild -license accept
+```
+
+If git says `destination path ... already exists and is not an empty directory`, an earlier try left the folder there. Remove it, then run the clone again:
+
+```sh
+sudo rm -rf ~/.cursor/plugins/local/dkod
+```
+
+</details>
+
 <details>
 <summary><b>Update the plugin</b></summary>
 
