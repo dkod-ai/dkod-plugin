@@ -26,8 +26,29 @@ If a tool says the server needs sign-in, or the DKOD band above the prompt is ye
 
 Start a session first, before you plan, ask questions, make a folder or write a file, for any code work, not only deploys. The org's templates and policy decide the stack and where things go. In Cursor, Dkoder refuses file writes and commands that change anything until the chat has a session.
 
-1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.12.0"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user to reload as it says, and go on. The app key is the app's short name in lowercase kebab-case, usually the app's repository or folder name. If there is no app yet, use the name the user gave; ask only when they gave none.
+1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.14.7"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user in one line that the plugin is updated, and go on. In Cursor that is `dkod-update.mjs` in the `scripts` folder next to this file: it needs no git. Never update the plugin with git. The app key is the app's short name in lowercase kebab-case, usually the app's repository or folder name. If there is no app yet, use the name the user gave; ask only when they gave none.
 2. Call `dkoder.policy` and `dkoder.templates` with the `sessionId`. Follow what they return while you write code. When a template has `content: null`, DKOD could not read it now: work from its `name` and `description`, and do not look for the file anywhere else.
+3. When the user asks for a new app (there is no code for it yet), run the wizard (below) before you plan or write any code.
+
+## New app: the wizard
+
+The wizard asks the org's own questions for a new app, writes a PRD (the plan) for the user to approve, and then you build and test the app on this computer. Skip it when the app already has code, or when the user asks only for a change.
+
+1. Call `dkoder.wizard.questions` with the `sessionId`. Ask the questions only in this chat. Never open a web page or a browser for them.
+2. The answer has the next `questions`, at most 4. Ask them with the client's question tool (in Cursor the question tool, in Claude Code `AskUserQuestion`), all in one turn:
+   - Show each question's `why` under it.
+   - A `choice` takes one option, a `multi` one or more. Put the `recommended` option first and mark it "(Recommended)".
+   - A `text` question takes the user's own words. Show its `example`.
+   - When the chosen option has `asks_emails`, ask for the email addresses too.
+   - Never answer a question for the user, and never skip one.
+3. Call `dkoder.wizard.answer` with the `sessionId` and `answers` by question `id`: `{ "option": "<id>" }`, `{ "options": ["<id>", ...] }`, or `{ "text": "..." }`, with `emails` where an option asks them. It returns the next questions. When it refuses an answer, ask the user that question again. Repeat until it answers `done: true`.
+4. Call `dkoder.wizard.prd` with the `sessionId`. Show the PRD's summary in a few lines. Then ask with the client's question tool, one question with two options: "Approve" and "Change an answer". The user clicks; they never have to type.
+   - On "Approve", call `dkoder.wizard.approve` with the `sessionId` and the `prd_at` exactly as given. It answers `approved` with the `template`, the `required_checks` and `deploy_answers`.
+   - On "Change an answer", ask which answer and the new one, send it with `dkoder.wizard.answer`, call `dkoder.wizard.prd` again and ask again.
+   - Never call `dkoder.wizard.approve` unless the user clicked "Approve". Write no code before it answers `approved`.
+5. Build the app in its local folder from the template the PRD names (its text is in `dkoder.templates`). Copy the template's check scripts into `package.json`. Never write a scanner or checker of your own.
+6. Test it on this computer. Install the dependencies (`bun install` for a bun template). Run every script in the PRD's "Required checks" (`bun run <name>`) and the policy checks (Policy checks, below). For a web app, start it and open it in a browser (Cursor's browser, or the browser tools you have), and check each page the PRD lists. For a service, start it and call its health endpoint. Fix what fails and run all of it again until everything passes.
+7. Tell the user the app is ready and what passed. Keep the `deploy_answers` (from `dkoder.wizard.prd`): "Push to prod" uses them.
 
 ## Policy checks
 
@@ -57,6 +78,7 @@ In Cursor, Auto-review can stop each dkod tool call and each DKOD script, and wa
 - In `terminalAllowlist`, write `<scripts>` as the full path of the `scripts` folder next to this file. Cursor then runs each DKOD script with no stop.
 - These lists replace the allowlists in Cursor's settings. Copy the entries from there into the file too.
 - Run Mode must be Auto-review, Allowlist or Run Everything. Cursor reads the file again by itself.
+- "Allowlist (with Sandbox)" runs even the allowed DKOD scripts in Cursor's sandbox. The sandbox does not let a command write in `~/.cursor`, so `dkod-update.mjs` cannot update the plugin there. When a DKOD script says "Cursor's sandbox", tell the user: Cursor Settings, Agents, Run Mode: choose "Allowlist". Then run the script again. Cursor can ask once to approve the update; the user clicks Run.
 - A Cursor team admin can set the same lists for everyone in the team dashboard.
 
 ## Cloud sessions
@@ -73,12 +95,14 @@ When the dkod tools are missing in a cloud session, tell the user these steps. W
 When the user says "push to prod" (or ship, deploy, go live), do all of these steps. Do not stop to ask between them, except for the questions DKOD asks.
 
 1. Start a session (above).
-2. Run the policy checks (above). Fix every `block` finding before you go on.
+2. Check the code again, every time, even when it passed before: run every required check script (the PRD's "Required checks", or `policy.required_checks` from `dkoder.policy`) and the policy checks (above). When anything fails, stop: fix it and run all of it again. Ship nothing that fails.
 3. Send the code (below). Run each DKOD script as one command on its own, exactly as `node <scripts>/dkod-pack.mjs ...`. Write `<scripts>` as a full path, with no quotes. Never chain it with another command by `&&` or `;`. Then Cursor's allowlist matches it. When `put` fails with "expired", call `dkoder.source.target` again, then run `put` with the new `put_args`.
 4. If the app's folder has a `.env` file, fill the app's secrets from it (Secrets, below). Do not ask first. Use `.env.production` when there is one. Look only at the file names (`ls -a`); never open the file.
-5. Deploy (below). When `dkoder.deploy.questions` answers `none: true`, call `dkoder.deploy` with no `deploy_answers`. When the app needs no database, pass `no_database: true`.
+5. Deploy (below). When this app went through the wizard, pass the `deploy_answers` from `dkoder.wizard.prd` as they are, and do not ask the Deploy questions again. When `dkoder.deploy.questions` answers `none: true`, call `dkoder.deploy` with no `deploy_answers`. When the app needs no database, pass `no_database: true`.
 6. Follow the build with `dkoder.build.status` about every 30 seconds until its state is `delivered` or `failed`. Answer its own questions as Deploy step 6 says.
-7. Reply with the app's production URL: the build's `deploy.url`, or `delivery.cluster.live_url`. If the build failed, say which step failed and why.
+7. Reply with the app's production URL: the build's `deploy.url`, or `delivery.cluster.live_url`, and whether it is up yet. If the build failed, say which step failed and why, in plain words.
+
+Git and GitHub are DKOD's work, not the user's. When you report, never name repositories, commits, pull requests, branches, GitOps or GitHub access, and never ask the user to do anything on GitHub. A setup problem only an admin can fix goes to the org's admins by itself.
 
 A person who is not an admin (a Builder) can deploy, follow, answer, fill secrets for and remove only the apps whose code they sent with `dkoder.source.target`. When a tool answers `admin role required`, tell the user its `message`.
 
@@ -95,6 +119,8 @@ The pack scripts are in the `scripts` folder next to this SKILL.md file. When th
 | `pwsh -v` | `dkod-pack.ps1` | `pwsh -NoProfile -File <scripts>/dkod-pack.ps1` |
 | none of these | `dkod-pack.sh` | `sh <scripts>/dkod-pack.sh` |
 
+On a Mac, `/usr/bin/python3` can be Apple's installer and not Python: running it opens a window that asks to install the developer tools. So on a Mac, when `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails, do not run `python3 -V`: skip that row.
+
 1. Pack: run `<run it as> pack <the app's folder>`. It prints one JSON line: `file` (the archive), `sha256`, `bytes` and `files`. It leaves out `.env` files, `.git`, dependencies (`node_modules`, `.venv`) and build output (`dist`, `build`, `.next`), and honors `.gitignore` in a git repository.
 2. Call `dkoder.source.target` with `sessionId`, `appKey`, `sha256` and `bytes`.
 3. Upload: run `<run it as> put <file> <put_args>`, with the `put_args` it returned pasted exactly as given. It sends the archive to the organization's storage, then deletes it. `put_args` works once and expires after an hour; do not save it or show it. When `put` fails with "expired", call `dkoder.source.target` again for a new `put_args`.
@@ -105,7 +131,7 @@ When `dkoder.source.target` answers `app_key_taken`, another app already has tha
 
 ## Deploy
 
-1. Call `dkoder.deploy.questions`. Ask the user each question. Use the question keys as `deploy_answers`. When it answers `none: true`, the org asks none: send no `deploy_answers`.
+1. When you have `deploy_answers` from `dkoder.wizard.prd`, use them and skip this step. Otherwise call `dkoder.deploy.questions`. Ask the user each question. Use the question keys as `deploy_answers`. When it answers `none: true`, the org asks none: send no `deploy_answers`. When `dkoder.deploy` refuses the wizard's answers (the org changed its questions), call `dkoder.wizard.questions` and ask only what it returns.
 2. Call `dkoder.deploy.business_metrics` with the `app_key`. If it returns rows, show them and ask which to add.
 3. Call `dkoder.deploy.database` with the `app_key`. Show its `summary` and its `notice`. If `change.kind` is not `none`, make that change on the laptop as `change.steps` say, test it against a local Postgres (PGlite is enough), and send the code again before you deploy. If `worker.state` is `queued`, call it again in a minute. Never ask for, read or send a database password: DKOD makes it.
 4. Call `dkoder.deploy` with `app_key`, `deploy_answers`, and `business_metrics` (`"all"`, `"none"` or a list of ids). Pass `no_database: true` when the app needs no database from DKOD.

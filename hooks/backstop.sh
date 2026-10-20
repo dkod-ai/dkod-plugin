@@ -94,9 +94,28 @@ if [ -r "$conf" ]; then
   [ -n "$trusted" ] && governance=$(tr '\n' ' ' < "$conf" | sed -n 's/.*"governanceRepo"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z')
 fi
 
+# macOS ships /usr/bin/git as a stub: with no Apple developer tools, running it opens Apple's
+# install window. git counts only when it is real (src/dev-tools.ts makes the same check).
+real_git=
+git_is_real() {
+  if [ -z "$real_git" ]; then
+    real_git=yes
+    p=$(command -v git 2>/dev/null) || real_git=no
+    case "$p" in
+      /usr/bin/git|/usr/bin//git)
+        if command -v xcode-select >/dev/null 2>&1; then
+          d=$(xcode-select -p 2>/dev/null) && [ -n "$d" ] && [ -x "$d/usr/bin/git" ] || real_git=no
+        fi
+        ;;
+    esac
+  fi
+  [ "$real_git" = yes ]
+}
+
 # The owner/name of every remote of the repo at $1, lower case, one per line.
 remotes() {
   [ -d "$1" ] || return 0
+  git_is_real || return 0
   git -C "$1" remote -v 2>/dev/null | awk '{print $2}' | sed -E 's#\.git$##; s#/$##' | sed -E 's#^.*[:/]([^/:]+/[^/:]+)$#\1#' | tr 'A-Z' 'a-z' | sort -u
 }
 

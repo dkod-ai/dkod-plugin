@@ -34,8 +34,26 @@ class Refusal(Exception):
     pass
 
 
+def real_git(path):
+    """False for the macOS stub git: the first git on PATH is /usr/bin/git and xcode-select names
+    no developer folder with a git in it. With no Apple developer tools, running the stub opens
+    Apple's install window. No xcode-select on PATH: not a Mac, and git is real."""
+    if WINDOWS or os.path.dirname(os.path.normpath(path)) != "/usr/bin":
+        return True
+    select = shutil.which("xcode-select")
+    if select is None:
+        return True
+    try:
+        r = subprocess.run([select, "-p"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return True
+    developer = r.stdout.decode("utf-8", "replace").strip() if r.returncode == 0 else ""
+    return developer != "" and os.path.exists(os.path.join(developer, "usr", "bin", "git"))
+
+
 def in_git_tree(root):
-    if shutil.which("git") is None:
+    git = shutil.which("git")
+    if git is None or not real_git(git):
         return False
     try:
         r = subprocess.run(["git", "-C", root, "rev-parse", "--is-inside-work-tree"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)

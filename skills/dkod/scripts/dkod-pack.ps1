@@ -63,8 +63,34 @@ function RunGit([string]$cwd, [string[]]$gitArgs) {
   return @{ Code = $p.ExitCode; Out = $out }
 }
 
+# False for the macOS stub git: the first git on PATH is /usr/bin/git and xcode-select names no
+# developer folder with a git in it. With no Apple developer tools, running the stub opens Apple's
+# install window. No xcode-select on PATH: not a Mac, and git is real.
+function RealGit([string]$path) {
+  if ($OnWindows -or ([System.IO.Path]::GetDirectoryName($path) -ne '/usr/bin')) { return $true }
+  $select = Get-Command xcode-select -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $select) { return $true }
+  try {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $select.Source
+    $psi.Arguments = '-p'
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $errTask = $p.StandardError.ReadToEndAsync()
+    $dev = $p.StandardOutput.ReadToEnd().Trim()
+    $p.WaitForExit()
+    [void]$errTask.Result
+  } catch { return $true }
+  if ($p.ExitCode -ne 0 -or $dev -eq '') { return $false }
+  return Test-Path -LiteralPath (Join-Path $dev 'usr/bin/git')
+}
+
 function InGitTree([string]$root) {
-  if (-not (Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) { return $false }
+  $git = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $git) { return $false }
+  if (-not (RealGit $git.Source)) { return $false }
   try { $r = RunGit $root @('rev-parse', '--is-inside-work-tree') } catch { return $false }
   return ($r.Code -eq 0) -and ($r.Out.Trim() -eq 'true')
 }

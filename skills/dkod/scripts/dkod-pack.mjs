@@ -10,9 +10,16 @@
 // same folder always gives the same sha256. The upload URL is a signed credential: never printed.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, lstatSync, mkdtempSync, openSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdtempSync, openSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+
+// Cursor's sandbox reaches the network only through the proxy it puts in HTTPS_PROXY. Node's fetch
+// uses that proxy only with NODE_USE_ENV_PROXY=1 (Node 22.21+, 24.5+), so `put` runs itself again with it.
+if (process.argv[2] === "put" && (process.env.HTTPS_PROXY || process.env.https_proxy) && !process.env.NODE_USE_ENV_PROXY) {
+  const again = spawnSync(process.execPath, process.argv.slice(1), { stdio: "inherit", env: { ...process.env, NODE_USE_ENV_PROXY: "1" } });
+  process.exit(again.status ?? 1);
+}
 
 const MAX_FILES = 20000;
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
@@ -25,8 +32,26 @@ const fail = (message) => { throw new Refusal(message); };
 
 const jsonString = (s) => JSON.stringify(s);
 
-/** Whether a git work tree holds this folder and git is installed. */
+/**
+ * False for the macOS stub git: the first git on PATH is /usr/bin/git and xcode-select names no
+ * developer folder with a git in it. With no Apple developer tools, running the stub opens Apple's
+ * install window. No xcode-select on PATH: not a Mac, and git is real.
+ */
+function realGit() {
+  if (WINDOWS) return true;
+  const dirs = (process.env.PATH ?? "").split(":").filter((d) => d !== "").map((d) => d.replace(/\/+$/, "") || "/");
+  const which = (name) => dirs.find((d) => existsSync(`${d}/${name}`));
+  if (which("git") !== "/usr/bin") return true;
+  const select = which("xcode-select");
+  if (select === undefined) return true;
+  const r = spawnSync(`${select}/xcode-select`, ["-p"], { encoding: "utf8" });
+  const developer = r.status === 0 ? (r.stdout ?? "").trim() : "";
+  return developer !== "" && existsSync(`${developer}/usr/bin/git`);
+}
+
+/** Whether a git work tree holds this folder and a real git is installed. */
 function inGitTree(root) {
+  if (!realGit()) return false;
   const r = spawnSync("git", ["-C", root, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8" });
   return r.status === 0 && r.stdout.trim() === "true";
 }
