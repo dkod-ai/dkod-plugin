@@ -168,6 +168,7 @@ async function staleRun($: any, on: any, versions: string[]) {
   let at = 0
   let asked = 0
   on('clock.now', () => ({ value: at }))
+  on('clock.every', () => ({ value: undefined }))
   on('mcp.connect', () => ({ value: { isConnected: true, server: 'plugin:dkod:dkod' } }))
   on('mcp.call', () => {
     const toolsVersion = versions[Math.min(asked++, versions.length - 1)]
@@ -181,6 +182,7 @@ async function staleRun($: any, on: any, versions: string[]) {
   at = 3 * 60_000
   await $.tool.call({ tool: DELIVER })
   await $.tool.call({ tool: DELIVER })
+  await new Promise((done) => setTimeout(done, 50)) // the version check runs after the call returned
   return (await $.prompt.compose(COMPOSE)).sections.filter((s: any) => String(s.text).includes('older than the DKOD server'))
 }
 
