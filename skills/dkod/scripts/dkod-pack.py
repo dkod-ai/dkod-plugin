@@ -3,7 +3,7 @@
 # For builders who do not use git. Python 3.8+, stdlib only. dkod-pack.mjs, .ps1 and .sh do the
 # same thing byte for byte (same files, same headers, same sha256); keep the four in step.
 #
-#   python3 dkod-pack.py pack [<folder>]                    -> {"file","sha256","bytes","files"}
+#   python3 dkod-pack.py pack [<folder>]                    -> {"file","sha256","bytes","files"[,"git"]}
 #   python3 dkod-pack.py put <file> <url> ["Name: value"...] -> {"ok":true,"status":200}
 #
 # The headers are written by hand rather than with tarfile: tarfile's device fields and name split
@@ -60,6 +60,33 @@ def in_git_tree(root):
     except OSError:
         return False
     return r.returncode == 0 and r.stdout.strip() == b"true"
+
+
+def git_facts(root):
+    """DKO-1095: folder name, branch, short commit, commit time and uncommitted count, for the
+    preflight line. None outside git or before the first commit. Never a remote."""
+    if not in_git_tree(root):
+        return None
+
+    def run(*args):
+        try:
+            r = subprocess.run(["git", "-C", root] + list(args), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        except OSError:
+            return None
+        return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
+
+    head = run("rev-parse", "--short", "HEAD")
+    at = run("log", "-1", "--format=%ct")
+    status = run("status", "--porcelain", "--", ".")
+    if head is None or at is None or status is None:
+        return None
+    branch = (run("rev-parse", "--abbrev-ref", "HEAD") or "HEAD").strip()
+    head = head.strip()
+    if not re.fullmatch(r"[0-9a-f]{7,40}", head) or not re.fullmatch(r"[0-9]+", at.strip()):
+        return None
+    dirty = len([l for l in status.split("\n") if l != ""])
+    return '{"folder":%s,"branch":%s,"head":"%s","head_at":%d,"dirty":%d}' % (
+        json.dumps(os.path.basename(root)), json.dumps(branch), head, int(at.strip()), dirty)
 
 
 def candidates(root):
@@ -180,7 +207,9 @@ def pack(folder):
     except BaseException:
         shutil.rmtree(d, ignore_errors=True)
         raise
-    return '{"file":%s,"sha256":"%s","bytes":%d,"files":%d}' % (json.dumps(out), digest.hexdigest(), count[0], len(files))
+    git = git_facts(root)
+    return '{"file":%s,"sha256":"%s","bytes":%d,"files":%d%s}' % (
+        json.dumps(out), digest.hexdigest(), count[0], len(files), "" if git is None else ',"git":' + git)
 
 
 def put(file, url, header_args):

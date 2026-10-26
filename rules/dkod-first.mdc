@@ -11,4 +11,4 @@ This computer builds software through the company's DKOD. Any request to build, 
 2. Call `dkoder_policy` and `dkoder_templates` with its `sessionId`. Build from the org's templates and follow every rule and check they return. Do not ask the user where to put the app or which stack to use when a template answers it.
 3. Follow the `dkod` skill for the policy checks, sending the code, secrets and deploy.
 
-Until the chat has a DKOD session, Dkoder refuses file writes and commands that change anything. If a DKOD tool says it needs sign-in, tell the user: Cursor Settings, MCP, dkod, Connect.
+Until the chat has a DKOD session, Dkoder refuses file writes and commands that change anything. If a DKOD tool says it needs sign-in, tell the user: Sign in to DKOD at <your DKOD dashboard>/auth/org/start, then connect dkod: in Cursor, Settings, MCP, dkod, Connect; in Claude Code, type /mcp, pick dkod, Authenticate.

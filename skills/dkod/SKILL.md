@@ -7,18 +7,20 @@ description: Use for any request to build, create, change, fix, run, ship, deplo
 
 DKOD is the company's platform. It holds the org's policy, its app templates and its Deploy rules. The `dkod` MCP server that comes with Dkoder gives you its tools; their names end in `dkoder_<name>` (for example `dkoder.deliver`).
 
-If a tool says the server needs sign-in, or the DKOD band above the prompt is yellow, tell the user to type `/mcp`, pick `dkod` and choose Authenticate. They sign in with their company's own sign-in.
+If a tool says the server needs sign-in, or the DKOD band above the prompt is yellow, tell the user: Sign in to DKOD at <your DKOD dashboard>/auth/org/start, then connect dkod: in Cursor, Settings, MCP, dkod, Connect; in Claude Code, type /mcp, pick dkod, Authenticate. They sign in with their company's own sign-in.
 
 ## The rules
 
 - App code ships through Deliver (`dkoder.deliver`). Dkoder refuses `git push`, `gh pr merge` and GitHub API writes to the org's app repositories. Guard adds the org's own rules from its governance repo once the person signs in. When Dkoder or Guard refuses a call, tell the user why in one or two sentences and offer Deliver. Do not try another way around it.
 - Pushes to the governance repository are allowed.
+- When a dkod tool returns an error, stop. Do not retry it. Tell the user the one line it gives, and nothing more.
 - Never write a secret value into a file. Put the name of the secret there and resolve it at run time.
 - The app lives in the customer's GitHub org. Never use `dkod-ai/` as the app destination.
 - Never `git push` the app, add a git remote for it, or make a GitHub repository for it. DKOD makes the app's repository on the first Deliver. To give DKOD the code, follow "Push to prod".
 - Never invent a Deploy answer. Ask the user every question you cannot answer from what they told you.
 - Call `dkoder.remove` only when the user clearly asks to remove the app from production. Calling it is the yes.
 - Read the org's templates and policy only through the dkod tools (`dkoder.templates`, `dkoder.policy`). Each template comes with its text in `content`. Never search the disk, GitHub or the governance repository for them.
+- The template is DKOD's choice. Never ask the Builder which template to use, and never ask whether to continue with DKOD's pick. If the pick looks wrong, say so in the result and go on.
 - Push to prod needs no git and no `gh`. Do not check GitHub sign-in, git remotes or repositories.
 - Never run git for the app, not even `git init`: DKOD needs none.
 
@@ -26,7 +28,7 @@ If a tool says the server needs sign-in, or the DKOD band above the prompt is ye
 
 Start a session first, before you plan, ask questions, make a folder or write a file, for any code work, not only deploys. The org's templates and policy decide the stack and where things go. In Cursor, Dkoder refuses file writes and commands that change anything until the chat has a session.
 
-1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.14.7"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user in one line that the plugin is updated, and go on. In Cursor that is `dkod-update.mjs` in the `scripts` folder next to this file: it needs no git. Never update the plugin with git. The app key is the app's short name in lowercase kebab-case, usually the app's repository or folder name. If there is no app yet, use the name the user gave; ask only when they gave none.
+1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.16.0"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user in one line that the plugin is updated, and go on. In Cursor that is `dkod-update.mjs` in the `scripts` folder next to this file: it needs no git. Never update the plugin with git. The app key is the app's short name in lowercase kebab-case, usually the app's repository or folder name. If there is no app yet, use the name the user gave; ask only when they gave none.
 2. Call `dkoder.policy` and `dkoder.templates` with the `sessionId`. Follow what they return while you write code. When a template has `content: null`, DKOD could not read it now: work from its `name` and `description`, and do not look for the file anywhere else.
 3. When the user asks for a new app (there is no code for it yet), run the wizard (below) before you plan or write any code.
 
@@ -95,6 +97,7 @@ When the dkod tools are missing in a cloud session, tell the user these steps. W
 When the user says "push to prod" (or ship, deploy, go live), do all of these steps. Do not stop to ask between them, except for the questions DKOD asks.
 
 1. Start a session (above).
+   - When the app is one DKOD did not build (its code was not made by the wizard or by a DKOD template), or when `dkoder.session.start` answered with a `migration`, do not deploy it: run the `dkod-migrate` skill's steps first. That skill sits next to this one; when it is not on disk, call `dkoder.guide` with `skill: "dkod-migrate"`.
 2. Check the code again, every time, even when it passed before: run every required check script (the PRD's "Required checks", or `policy.required_checks` from `dkoder.policy`) and the policy checks (above). When anything fails, stop: fix it and run all of it again. Ship nothing that fails.
 3. Send the code (below). Run each DKOD script as one command on its own, exactly as `node <scripts>/dkod-pack.mjs ...`. Write `<scripts>` as a full path, with no quotes. Never chain it with another command by `&&` or `;`. Then Cursor's allowlist matches it. When `put` fails with "expired", call `dkoder.source.target` again, then run `put` with the new `put_args`.
 4. If the app's folder has a `.env` file, fill the app's secrets from it (Secrets, below). Do not ask first. Use `.env.production` when there is one. Look only at the file names (`ls -a`); never open the file.
@@ -102,7 +105,7 @@ When the user says "push to prod" (or ship, deploy, go live), do all of these st
 6. Follow the build with `dkoder.build.status` about every 30 seconds until its state is `delivered` or `failed`. Answer its own questions as Deploy step 6 says.
 7. Reply with the app's production URL: the build's `deploy.url`, or `delivery.cluster.live_url`, and whether it is up yet. If the build failed, say which step failed and why, in plain words.
 
-Git and GitHub are DKOD's work, not the user's. When you report, never name repositories, commits, pull requests, branches, GitOps or GitHub access, and never ask the user to do anything on GitHub. A setup problem only an admin can fix goes to the org's admins by itself.
+Git and GitHub are DKOD's work, not the user's. When you report, never name repositories, commits, pull requests, branches, GitOps or GitHub access (the one `preflight` line of `dkoder.source.target`, which names the local folder, branch and commit, is the only exception), and never ask the user to do anything on GitHub. A setup problem only an admin can fix goes to the org's admins by itself.
 
 A person who is not an admin (a Builder) can deploy, follow, answer, fill secrets for and remove only the apps whose code they sent with `dkoder.source.target`. When a tool answers `admin role required`, tell the user its `message`.
 
@@ -121,8 +124,8 @@ The pack scripts are in the `scripts` folder next to this SKILL.md file. When th
 
 On a Mac, `/usr/bin/python3` can be Apple's installer and not Python: running it opens a window that asks to install the developer tools. So on a Mac, when `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails, do not run `python3 -V`: skip that row.
 
-1. Pack: run `<run it as> pack <the app's folder>`. It prints one JSON line: `file` (the archive), `sha256`, `bytes` and `files`. It leaves out `.env` files, `.git`, dependencies (`node_modules`, `.venv`) and build output (`dist`, `build`, `.next`), and honors `.gitignore` in a git repository.
-2. Call `dkoder.source.target` with `sessionId`, `appKey`, `sha256` and `bytes`.
+1. Pack: run `<run it as> pack <the app's folder>`. It prints one JSON line: `file` (the archive), `sha256`, `bytes`, `files` and, in a git folder with a commit, `git` (`folder`, `branch`, `head`, `head_at`, `dirty`). It leaves out `.env` files, `.git`, dependencies (`node_modules`, `.venv`) and build output (`dist`, `build`, `.next`), and honors `.gitignore` in a git repository.
+2. Call `dkoder.source.target` with `sessionId`, `appKey`, `sha256` and `bytes`, and `git` as the pack script printed it when it printed one. When the answer has `preflight`, tell the user that one line first (folder, branch, commit, uncommitted files). When it has `warnings`, show each `message` and ask the user once whether to send this code anyway. Run `put` only after they say yes. With no warning, go on without asking.
 3. Upload: run `<run it as> put <file> <put_args>`, with the `put_args` it returned pasted exactly as given. It sends the archive to the organization's storage, then deletes it. `put_args` works once and expires after an hour; do not save it or show it. When `put` fails with "expired", call `dkoder.source.target` again for a new `put_args`.
 4. Call `dkoder.source.done` with `sessionId`, `appKey`, the `slot` and `sha256`. When it answers `working`, call it again. When it answers `pushed`, the app is ready to deploy. When it refuses, tell the user why in one sentence.
 5. If you stop before the upload ran, delete the archive `file`.
@@ -154,6 +157,27 @@ The app's secret values never go through you. DKOD never sees them either.
 - Tell the user what the answer says: which names it filled, which are `missing`, and which it did not fill and why (`local` points at this computer, `reference` refers to another name). For those, the user types the production value in the dashboard: Launchpad, the app, Replace secrets.
 - It fills only the names the app's code reads. Pass `addOtherNames: true` (the script: `--others`) only when the user asks for the other names too.
 - The values apply on the next deploy.
+- When a deploy is held because the app reads values it does not have, call `dkoder.secrets.target`: those names are in `unset`. Ask the user about each one. A name with a value: fill it as above. A name the app does not need (the code has a default, or the feature is off, for example an old sign-in provider): call `dkoder.secrets.skip` with `sessionId`, `appKey` and `skip`, the names the user said are not needed. Never mark a name not needed without asking. Then deploy again.
+
+## Dev database
+
+First call `dkoder.devdb.status` with the app's key. Owner or admin only.
+
+- `missing`: ask the person in the chat whether the app keeps data. If yes, call `dkoder.devdb.make` with `confirm: true`; without it the tool only says what it would make.
+- `making`: DKOD made it and nobody has opened it yet. Start the helper now, below: the token it is handed is what turns Making into Ready.
+- `ready`: the helper was handed a token before. Start it, below.
+- `kept`: the app had one and it was dropped. Ask the person before you make it again.
+- `no_dev_instance`, `off`, `no_app_databases`, `no_cloud_environment`: the organization's Dev instance is not made yet. Tell the person, and that an admin finishes it in Setup: Dev database.
+
+When the plan's `change.kind` is not `none`, do the steps `dkoder.deploy.database` gives, including the `0001_baseline` migration, then run `node "<scripts>/dkod-db.mjs" migrate`. Dev and Prod then start from the same schema.
+
+When the app has a Dev database, start the helper at the start of work, as a BACKGROUND command: `node "<scripts>/dkod-db.mjs" up --app <app key>` (in Claude Code, Bash with `run_in_background`; it stops when the session ends). `<scripts>` is the `scripts` folder next to this file. It needs Node (`node -v`) and this computer's Dkoder device token.
+
+- It opens Postgres on `127.0.0.1:6543` and writes `DATABASE_URL` into the app's `.env.local`. The URL has no password: there is none. Never ask the user for a database password, and never put one in a file.
+- It prints one ready line. If it exits with a sentence (not a member, no default domain, port busy), tell the user that sentence.
+- After you add a migration, run `node "<scripts>/dkod-db.mjs" migrate` in the app's folder. It runs Drizzle or Alembic against the Dev database and prints a short summary.
+- If `.env.local` is not in `.gitignore`, the helper warns. Add it to `.gitignore`.
+- Never put a password, a token or a row in a message, a file or a tool call. `dkoder.devdb.status` and `dkoder.devdb.make` answer names and a state only.
 
 ## Ship
 

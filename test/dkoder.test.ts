@@ -159,3 +159,39 @@ test('signed in with no device install: the org Guard config comes from dkoder.g
   const r = await $.tool.call({ tool: 'Bash', command: 'git push origin HEAD:main' })
   expect(r.deny ?? r.text ?? '').toContain('Dkoder refused this')
 })
+
+// DKO-1009: the agent reads the dkod tool list once. When the server's version moved, one
+// STALE_TOOLS_NOTE reaches the agent through the system prompt after a dkod tool call.
+const DELIVER = 'mcp__plugin_dkod_dkod__dkoder_deliver'
+async function staleRun($: any, on: any, versions: string[]) {
+  host(on, 'git@github.com:dkod-demo/rc-news-app.git')
+  let at = 0
+  let asked = 0
+  on('clock.now', () => ({ value: at }))
+  on('clock.every', () => ({ value: undefined }))
+  on('mcp.connect', () => ({ value: { isConnected: true, server: 'plugin:dkod:dkod' } }))
+  on('mcp.call', ($: any, e: any) => {
+    // only the version probes advance the version; the full config fetch does not
+    const probe = e.args?.only === 'tools_version'
+    const toolsVersion = versions[Math.min(probe ? asked++ : asked, versions.length - 1)]
+    return { value: { content: [{ type: 'text', text: JSON.stringify({ enabled: true, ...CONFIG, toolsVersion }) }] } }
+  })
+  on('session.start', ($: any, e: any) => ({ cwd: e.cwd }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.compose', () => ({ sections: [] }))
+  await $.session.start({ cwd: '/w/app', surface: 'terminal', isInteractive: true })
+  at = 3 * 60_000
+  await $.tool.call({ tool: DELIVER })
+  await $.tool.call({ tool: DELIVER })
+  await new Promise((done) => setTimeout(done, 50)) // the version check runs after the call returned
+  return (await $.prompt.compose(COMPOSE)).sections.filter((s: any) => String(s.text).includes('older than the DKOD server'))
+}
+
+test('a dkod tool call after the server moved on gives one stale-tools note', async ($: any, on: any) => {
+  expect((await staleRun($, on, ['aaaaaaaaaaaa', 'bbbbbbbbbbbb'])).length).toBe(1)
+})
+
+test('the same tool list version gives no stale-tools note', async ($: any, on: any) => {
+  expect((await staleRun($, on, ['aaaaaaaaaaaa'])).length).toBe(0)
+})

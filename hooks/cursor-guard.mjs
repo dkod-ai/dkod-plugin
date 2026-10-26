@@ -38,13 +38,18 @@ const VERSION = (() => {
   }
 })();
 
+// DKO-1186: the sign-in step first, the /mcp and Connect steps after it, instead of hunting for the MCP
+// settings page. /auth/org/start is the org-aware door and needs no fixed host: it ships from each org's
+// own dashboard, and with no email it lands on that dashboard's sign-in page (DKO-1014).
+const SIGNIN = "Sign in to DKOD at <your DKOD dashboard>/auth/org/start, then connect dkod: in Cursor, Settings, MCP, dkod, Connect; in Claude Code, type /mcp, pick dkod, Authenticate.";
+
 const STEPS = [
   "1. Call the DKOD tool dkoder_session_start (server plugin-dkod-dkod) with appKey, the app's short name in lowercase kebab-case",
   "(the name the user gave, else this folder's name)" + (VERSION ? `, and pluginVersion "${VERSION}".` : "."),
   "2. Call dkoder_policy and dkoder_templates with its sessionId. Build from the org's templates and follow every rule and check they return;",
   "do not ask the user where to put the app or which stack to use when a template answers it.",
   `3. Read the dkod skill (${SKILL}) and follow it for the policy checks, sending the code, secrets and deploy.`,
-  "If a DKOD tool says it needs sign-in, tell the user: Cursor Settings, MCP, dkod, Connect.",
+  "If a DKOD tool says it needs sign-in, tell the user: " + SIGNIN,
 ].join(" ");
 
 const FIRST_CONTEXT = [
@@ -182,6 +187,119 @@ function readOnly(command) {
 const WRITES = /^(write|edit|strreplace|str_replace|multiedit|multi_edit|delete|delete_file|apply_patch|applypatch|editnotebook|notebookedit|edit_file|search_replace|write_file|create_file)$/i;
 const SHELL = /^(shell|bash|terminal|run_terminal_cmd|run_terminal_command)$/i;
 
+/** DKO-1175: the original app's folder when a migration is open in `dir`, else null. */
+function migrationOriginal(dir) {
+  if (!dir) return null;
+  try {
+    const rec = JSON.parse(readFileSync(join(String(dir), ".dkod", "migration.json"), "utf8"));
+    const original = typeof rec?.original === "string" ? rec.original.replace(/\/+$/, "") : "";
+    return original || null;
+  } catch {
+    return null;
+  }
+}
+
+/** DKO-1177: the parity suite's folder when `dkod-migrate.mjs freeze` froze it in `dir`, else null. */
+function frozenSuite(dir) {
+  if (!dir) return null;
+  try {
+    readFileSync(join(String(dir), ".dkod", "parity", "freeze.json"), "utf8");
+    return join(String(dir), "tests", "parity");
+  } catch {
+    return null;
+  }
+}
+
+const parityDeny = () =>
+  "The parity suite (tests/parity/) is frozen: its sha256 was reported with the run on the original, and a changed suite would not match it. To change it, run dkod-migrate.mjs unfreeze <folder> and start the attempt again (dkoder.migrate.start).";
+
+/** A posix path with `.`, `..` and duplicate slashes collapsed: the folder the OS writes in. */
+function norm(p) {
+  const parts = [];
+  for (const part of String(p).split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      if (parts.length > 0 && parts[parts.length - 1] !== "..") parts.pop();
+      // A root-relative path cannot climb above `/`: the OS clamps there, so `/../w/x` is `/w/x`.
+      else if (!String(p).startsWith("/")) parts.push("..");
+    } else parts.push(part);
+  }
+  return (String(p).startsWith("/") ? "/" : "") + parts.join("/");
+}
+
+const inside = (folder, p) => {
+  if (typeof p !== "string") return false;
+  const dir = norm(folder) || "/";
+  const path = norm(p);
+  return dir === "/" ? path.startsWith("/") : path === dir || path.startsWith(dir + "/");
+};
+
+const migrationDeny = (original) =>
+  [
+    `The original app at ${original} is read only while a migration is open: you read it, you never change it or its data.`,
+    "Build in the dk- app's folder; to run the original's own tests, start it with the snapshot (dkod-migrate.mjs snapshot).",
+  ].join(" ");
+
+const recordDeny = () =>
+  "The migration record (.dkod/migration.json) is what keeps the original app read only: leave it as it is. Run dkod-migrate.mjs clean <folder> after the shipped step to close the migration.";
+
+/** The folder the event works in. */
+function workDir(input) {
+  const cwd = input.cwd ?? (Array.isArray(input.workspace_roots) ? input.workspace_roots[0] : null);
+  return typeof cwd === "string" ? cwd : "";
+}
+
+const at = (dir, w) => (w.startsWith("/") ? w : join(dir, w));
+
+/** Programs whose arguments name files they change, and the words that make an installer write. */
+const WRITERS = new Set(["cp", "mv", "tee", "touch", "mkdir", "rm", "rmdir", "ln", "install", "rsync", "truncate", "chmod", "chown", "dd", "sed", "unzip", "tar", "ditto"]);
+const INSTALLERS = new Set(["npm", "yarn", "pnpm", "bun", "pip", "pip3", "poetry", "cargo", "go", "composer"]);
+const INSTALL_WORDS = new Set(["install", "i", "add", "ci", "update", "upgrade", "up", "link", "uninstall", "un", "remove", "rm", "prune", "dedupe", "rebuild", "get"]);
+
+/**
+ * Does a changing part of the command name the original app's folder? A `cd` carries to the parts
+ * after it, so `cd <original> && rm db` counts as `rm <original>/db`.
+ */
+function touchesOriginal(original, dir, command) {
+  if (inside(original, dir)) return true;
+  const segs = parts(command);
+  // A redirection: the line is not split into commands. shortcut: only absolute words are joined,
+  // so `cd <original> && echo x > dev.db` passes; upgrade when a Cursor leak needs it.
+  if (segs === null) return words(command).some((w) => inside(original, at(dir, w)));
+  let here = dir;
+  return segs.some((seg) => {
+    const w = noEnv(words(seg));
+    if (w[0] === "cd") {
+      if (typeof w[1] === "string") here = at(here, w[1]);
+      return false;
+    }
+    if (w.length === 0 || readOnly(seg)) return false;
+    // In the original's folder only a program that changes files counts, so its own test suite
+    // still runs there.
+    if (inside(original, here)) {
+      const sub = w.find((x) => !x.startsWith("-") && x !== w[0]);
+      return WRITERS.has(w[0]) || (INSTALLERS.has(w[0]) && INSTALL_WORDS.has(sub ?? ""));
+    }
+    return w.some((x) => inside(original, at(here, x)));
+  });
+}
+
+/** DKO-1177: does a changing part of the command write in the frozen suite? Reading and running it is free. */
+function touchesSuite(suite, dir, command) {
+  const segs = parts(command);
+  if (segs === null) return words(command).some((w) => inside(suite, at(dir, w)));
+  let here = dir;
+  return segs.some((seg) => {
+    const w = noEnv(words(seg));
+    if (w[0] === "cd") {
+      if (typeof w[1] === "string") here = at(here, w[1]);
+      return false;
+    }
+    if (w.length === 0 || !WRITERS.has(w[0])) return false;
+    return inside(suite, here) || w.slice(1).some((x) => inside(suite, at(here, x)));
+  });
+}
+
 let input = {};
 try {
   input = JSON.parse(readFileSync(0, "utf8") || "{}");
@@ -198,12 +316,40 @@ if (event === "preToolUse") {
   if (!isDkodChat(chat) && !gateOff() && WRITES.test(tool)) {
     out({ permission: "deny", user_message: "DKOD: start a DKOD session first. The agent is told how.", agent_message: FIRST_DENY });
   }
-  // The shell tool: the same gate, in case this Cursor sends no beforeShellExecution.
-  if (!isDkodChat(chat) && !gateOff() && SHELL.test(tool)) {
-    let args = input.tool_input;
-    if (typeof args === "string") { try { args = JSON.parse(args); } catch { args = null; } }
+  // DKO-1175: while a migration is open, the original app's folder is read only, and so is its record.
+  let args = input.tool_input;
+  if (typeof args === "string") { try { args = JSON.parse(args); } catch { args = null; } }
+  const dir = workDir(input);
+  const original = migrationOriginal(dir);
+  const suite = frozenSuite(dir);
+  if (suite !== null && WRITES.test(tool)) {
+    for (const key of ["file_path", "notebook_path", "path", "filePath", "filename", "target_file"]) {
+      const value = args?.[key];
+      if (typeof value === "string" && value !== "" && inside(suite, at(dir, value))) {
+        out({ permission: "deny", user_message: "DKOD: the parity suite is frozen.", agent_message: parityDeny() });
+      }
+    }
+  }
+  if (original !== null && WRITES.test(tool)) {
+    for (const key of ["file_path", "notebook_path", "path", "filePath", "filename", "target_file"]) {
+      const value = args?.[key];
+      if (typeof value !== "string" || value === "") continue;
+      const target = at(dir, value);
+      // The record's whole folder: `rm -rf .dkod` would take the record with it.
+      const deny = inside(original, target) ? migrationDeny(original) : inside(at(dir, ".dkod"), target) ? recordDeny() : null;
+      if (deny !== null) out({ permission: "deny", user_message: "DKOD: the original app is read only while a migration is open.", agent_message: deny });
+    }
+  }
+  // The shell tool: the same two checks, in case this Cursor sends no beforeShellExecution.
+  if (SHELL.test(tool)) {
     const command = String(args?.command ?? "");
-    if (!readOnly(command)) out({ permission: "deny", user_message: "DKOD: start a DKOD session first. The agent is told how.", agent_message: FIRST_DENY });
+    if (suite !== null && !readOnly(command) && touchesSuite(suite, dir, command)) {
+      out({ permission: "deny", user_message: "DKOD: the parity suite is frozen.", agent_message: parityDeny() });
+    }
+    if (original !== null && !readOnly(command) && touchesOriginal(original, dir, command)) {
+      out({ permission: "deny", user_message: "DKOD: the original app is read only while a migration is open.", agent_message: migrationDeny(original) });
+    }
+    if (!isDkodChat(chat) && !gateOff() && !readOnly(command)) out({ permission: "deny", user_message: "DKOD: start a DKOD session first. The agent is told how.", agent_message: FIRST_DENY });
   }
   out({});
 }
@@ -257,6 +403,22 @@ if (event === "beforeMCPExecution" || (event === "" && "tool_name" in input)) {
 
 if (event === "beforeShellExecution" || (event === "" && "command" in input)) {
   const command = String(input.command ?? "");
+  // DKO-1175: while a migration is open, a command that changes the original app, or its data, is denied.
+  const dir = workDir(input);
+  const original = migrationOriginal(dir);
+  const suite = frozenSuite(dir);
+  if (suite !== null && !readOnly(command) && touchesSuite(suite, dir, command)) {
+    out({ permission: "deny", user_message: "DKOD: the parity suite is frozen.", agent_message: parityDeny() });
+  }
+  if (original !== null && !readOnly(command)) {
+    if (touchesOriginal(original, dir, command)) {
+      out({ permission: "deny", user_message: "DKOD: the original app is read only while a migration is open.", agent_message: migrationDeny(original) });
+    }
+    // The record is the switch that keeps the original read only: removing it, or its folder, is denied too.
+    if (touchesOriginal(join(dir, ".dkod"), dir, command)) {
+      out({ permission: "deny", user_message: "DKOD: the original app is read only while a migration is open.", agent_message: recordDeny() });
+    }
+  }
   if (isDkodChat(chat)) {
     if (gitSetup(command)) out({ permission: "deny", user_message: "DKOD blocked git setup for this app: DKOD makes the repository itself.", agent_message: NO_GIT });
     out({});

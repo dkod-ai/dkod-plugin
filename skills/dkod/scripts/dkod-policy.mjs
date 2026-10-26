@@ -56,7 +56,8 @@ var CHECK_IDS = [
   "secrets.none",
   "tls.no_insecure",
   "version.semver",
-  "commit.conventional"
+  "commit.conventional",
+  "migration.stack"
 ];
 var MAX_PATTERN_LENGTH = 200;
 var MAX_UNBOUNDED = 4;
@@ -319,14 +320,15 @@ function stringList(params, key) {
     return null;
   return v.filter((x) => typeof x === "string");
 }
+var MAX_LIST_ENTRIES = 32;
 function listProblems(params, key, opts = {}) {
   const v = params[key];
   if (v === undefined)
     return opts.required ? [`"${key}" is required`] : [];
   if (!Array.isArray(v) || v.some((x) => typeof x !== "string" || x.length === 0 || x.length > 200))
     return [`"${key}" must be a list of short strings`];
-  if (v.length > (opts.max ?? 32))
-    return [`"${key}" may hold at most ${opts.max ?? 32} entries`];
+  if (v.length > (opts.max ?? MAX_LIST_ENTRIES))
+    return [`"${key}" may hold at most ${opts.max ?? MAX_LIST_ENTRIES} entries`];
   if (opts.required && v.length === 0)
     return [`"${key}" must not be empty`];
   return [];
@@ -347,6 +349,56 @@ function workloadDocs(file, kinds) {
   return yamlDocs(file.text).filter((d) => d.kind !== null && kinds.has(d.kind));
 }
 var DEFAULT_MOVING_TAGS = ["latest", "main", "master", "stable", "edge", "nightly"];
+var MIGRATION_STACK_DEFAULTS = {
+  folderPrefix: "dk-",
+  denyDependencies: ["express", "sqlite3", "better-sqlite3", "mongoose", "mysql2", "prisma", "npm"],
+  packageManager: "bun",
+  databaseEngine: "postgres"
+};
+var DRIVER_ENGINE = {
+  pg: "postgres",
+  postgres: "postgres",
+  sqlite3: "sqlite",
+  "better-sqlite3": "sqlite",
+  "@libsql/client": "sqlite",
+  mysql: "mysql",
+  mysql2: "mysql",
+  mariadb: "mysql",
+  mongodb: "mongodb",
+  mongoose: "mongodb",
+  mssql: "mssql",
+  oracledb: "oracle"
+};
+var ENGINE_ALIAS = { postgresql: "postgres", mongo: "mongodb", sqlite3: "sqlite" };
+var DEPENDENCY_FIELDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
+var LOCKFILE_BY_MANAGER = {
+  npm: ["package-lock.json", "npm-shrinkwrap.json"],
+  yarn: ["yarn.lock"],
+  pnpm: ["pnpm-lock.yaml"],
+  bun: ["bun.lock", "bun.lockb"]
+};
+var ALL_LOCKFILES = [...new Set(Object.values(LOCKFILE_BY_MANAGER).flat())];
+var FILE_DATABASE = /\.(?:db|sqlite)$/;
+function stackFiles(dir) {
+  return [`${dir}/package.json`, `${dir}/{${ALL_LOCKFILES.join(",")}}`, `${dir}/*.db`, `${dir}/*.sqlite`];
+}
+function stackGlobs(folderPrefix) {
+  return stackFiles(`**/${folderPrefix}*/**`);
+}
+var STACK_FOLDER_PATHS = stackFiles("**");
+function migrationStackParams(m) {
+  return {
+    folder_prefix: m.folderPrefix,
+    paths: stackGlobs(m.folderPrefix),
+    deny_dependencies: m.denyDependencies.slice(0, MAX_LIST_ENTRIES),
+    database_engine: m.databaseEngine,
+    package_manager: m.packageManager
+  };
+}
+function textProblem(params, key) {
+  const v = params[key];
+  return typeof v === "string" && v.length > 0 && v.length <= 200 ? [] : [`"${key}" must be a short string`];
+}
 var CATALOG = {
   "dockerfile.from_digest": {
     id: "dockerfile.from_digest",
@@ -739,6 +791,70 @@ var CATALOG = {
       return semver.test(v) ? [] : [{ path: file.path, line: at + 1, detail: `version "${v}" is not MAJOR.MINOR.PATCH` }];
     }
   },
+  "migration.stack": {
+    id: "migration.stack",
+    scope: "file",
+    title: "A dk- app uses only the stack in migration.yaml",
+    summary: "Inside a dk- folder: no denied dependency, the stack's package manager and database only, and no file database.",
+    paths: stackGlobs(MIGRATION_STACK_DEFAULTS.folderPrefix),
+    folderPaths: STACK_FOLDER_PATHS,
+    pathsFor: (params) => stackGlobs(typeof params.folder_prefix === "string" && params.folder_prefix !== "" ? params.folder_prefix : MIGRATION_STACK_DEFAULTS.folderPrefix),
+    byName: true,
+    textPaths: ["**/package.json"],
+    exclude: [],
+    params: [
+      { name: "folder_prefix", kind: "string", hint: "The prefix of a migration app folder, from migration.yaml." },
+      { name: "deny_dependencies", kind: "strings", hint: "Package names the stack refuses, from migration.yaml." },
+      { name: "database_engine", kind: "string", hint: "The database engine the stack uses, for example postgres." },
+      { name: "package_manager", kind: "string", hint: "The one package manager the stack uses, for example bun." }
+    ],
+    validate: (p) => [
+      ...p.folder_prefix === undefined ? [] : textProblem(p, "folder_prefix"),
+      ...listProblems(p, "deny_dependencies"),
+      ...textProblem(p, "database_engine"),
+      ...textProblem(p, "package_manager")
+    ],
+    runFile(file, params) {
+      const base = file.path.split("/").pop() ?? file.path;
+      const deny = new Set(stringList(params, "deny_dependencies") ?? []);
+      const engine = typeof params.database_engine === "string" ? params.database_engine.trim().toLowerCase() : "";
+      const stack = ENGINE_ALIAS[engine] ?? engine;
+      const manager = typeof params.package_manager === "string" ? params.package_manager.trim().toLowerCase() : "";
+      if (ALL_LOCKFILES.includes(base) && !(LOCKFILE_BY_MANAGER[manager] ?? []).includes(base))
+        return [{ path: file.path, line: null, detail: `${base} belongs to a package manager other than ${manager}` }];
+      if (FILE_DATABASE.test(base))
+        return [{ path: file.path, line: null, detail: `${base} is a file database; the stack uses ${engine}` }];
+      if (base !== "package.json")
+        return [];
+      let doc;
+      try {
+        doc = JSON.parse(file.text);
+      } catch {
+        return [];
+      }
+      const root = typeof doc === "object" && doc !== null && !Array.isArray(doc) ? doc : {};
+      const lineOf = (key, from = 0) => {
+        const at = file.text.indexOf(`"${key}"`, from);
+        return at === -1 ? null : file.text.slice(0, at).split(/\r?\n/).length;
+      };
+      const hits = [];
+      for (const field of DEPENDENCY_FIELDS) {
+        const deps = root[field];
+        if (typeof deps !== "object" || deps === null || Array.isArray(deps))
+          continue;
+        const fieldAt = Math.max(0, file.text.indexOf(`"${field}"`));
+        for (const name of Object.keys(deps)) {
+          const driver = DRIVER_ENGINE[name];
+          if (deny.has(name) || driver !== undefined && driver !== stack)
+            hits.push({ path: file.path, line: lineOf(name, fieldAt), detail: `${name} is not in the stack` });
+        }
+      }
+      const pm = typeof root.packageManager === "string" ? root.packageManager : "";
+      if (pm !== "" && manager !== "" && pm.replace(/@.*$/, "").toLowerCase() !== manager)
+        hits.push({ path: file.path, line: lineOf("packageManager"), detail: `packageManager is not ${manager}` });
+      return hits;
+    }
+  },
   "commit.conventional": {
     id: "commit.conventional",
     scope: "commit",
@@ -773,13 +889,28 @@ function finish(findings, checked) {
 function toFinding(rule, check, level, message, title, hit) {
   return { rule, check, level, path: hit.path, line: hit.line, message: message ? `${message} (${hit.detail})` : `${title}: ${hit.detail}` };
 }
-function scopeOf(check) {
+function tails(path) {
+  const parts = path.replace(/[\\/]+$/, "").split(/[\\/]+/).filter((p) => p !== "");
+  return parts.map((_, i) => parts.slice(i).join("/"));
+}
+function exemptFolder(exclude, opts) {
+  const names = [opts.folder, ...opts.folderPath === undefined ? [] : tails(opts.folderPath)].filter((n) => n !== undefined && n !== "");
+  return names.some((name) => matchAny(exclude, name) || matchAny(exclude, `${name}/`));
+}
+function scopeOf(check, opts) {
   const def = CATALOG[check.use];
-  return { paths: stringList(check.with, "paths") ?? def.paths, exclude: [...ALWAYS_SKIPPED, ...def.exclude, ...stringList(check.with, "exclude") ?? []] };
+  const paths = stringList(check.with, "paths") ?? def.paths;
+  const prefix = typeof check.with.folder_prefix === "string" ? check.with.folder_prefix : "";
+  const exclude = [...ALWAYS_SKIPPED, ...def.exclude, ...stringList(check.with, "exclude") ?? []];
+  const folder = opts.folder;
+  const defaults = def.pathsFor?.(check.with) ?? def.paths;
+  const narrowed = check.with.paths !== undefined && JSON.stringify(check.with.paths) !== JSON.stringify(defaults);
+  const own = def.folderPaths !== undefined && prefix !== "" && folder !== undefined && folder.startsWith(prefix) && !narrowed && !exemptFolder(exclude, opts) ? def.folderPaths : null;
+  return { paths: own === null ? paths : [...paths, ...own], exclude, ...def.textPaths === undefined ? {} : { text: def.textPaths } };
 }
 var cleanPath = (p) => p.replace(/^\.?\/+/, "");
 function evaluate(pack, files, opts) {
-  const usable = files.filter((f) => f.text.length <= MAX_FILE_BYTES).map((f) => ({ path: cleanPath(f.path), text: f.text }));
+  const usable = files.map((f) => ({ path: cleanPath(f.path), text: f.text.length <= MAX_FILE_BYTES ? f.text : "", big: f.text.length > MAX_FILE_BYTES }));
   const findings = [];
   let checked = 0;
   for (const rule of pack.rules) {
@@ -794,8 +925,8 @@ function evaluate(pack, files, opts) {
         continue;
       if (def.needsSecretScan && !opts.secretScan)
         continue;
-      const { paths, exclude } = scopeOf(check);
-      const scoped = usable.filter((f) => matchAny(paths, f.path) && !matchAny(exclude, f.path));
+      const { paths, exclude } = scopeOf(check, opts);
+      const scoped = usable.filter((f) => (def.byName === true || !f.big) && matchAny(paths, f.path) && !matchAny(exclude, f.path));
       checked += 1;
       const hits = [];
       if (def.scope === "tree" && def.runTree)
@@ -814,8 +945,8 @@ function evaluate(pack, files, opts) {
   return finish(findings, checked);
 }
 function pathsToRead(pack, paths, opts) {
-  const scopes = pack.rules.flatMap((rule) => rule.checks.filter((c) => (c.level ?? rule.level) !== "off" && CATALOG[c.use].scope === "file" && (!CATALOG[c.use].needsSecretScan || opts.secretScan !== undefined)).map(scopeOf));
-  return new Set(paths.filter((p) => scopes.some((s) => matchAny(s.paths, cleanPath(p)) && !matchAny(s.exclude, cleanPath(p)))));
+  const scopes = pack.rules.flatMap((rule) => rule.checks.filter((c) => (c.level ?? rule.level) !== "off" && CATALOG[c.use].scope === "file" && (!CATALOG[c.use].needsSecretScan || opts.secretScan !== undefined)).map((c) => scopeOf(c, opts)));
+  return new Set(paths.filter((p) => scopes.some((s) => matchAny(s.paths, cleanPath(p)) && !matchAny(s.exclude, cleanPath(p)) && (s.text === undefined || matchAny(s.text, cleanPath(p))))));
 }
 function formatFindings(findings, max = 20) {
   const shown = findings.slice(0, max).map((f) => {
@@ -1084,6 +1215,16 @@ var RECOGNISERS = [
       }, { message: "Use bun, bunx and bun run here, not npm, npx, yarn or pnpm" }),
       check("content.forbid", { pattern: "^\\s*FROM.*[\\s/]node[:@]", flags: "i", paths: ["Dockerfile*", "*.Dockerfile", "Containerfile*"] }, { message: "Build from the official oven/bun image, not node" })
     ]
+  },
+  {
+    id: "migration-stack",
+    label: "A dk- app uses only the stack in migration.yaml",
+    test: (h) => has(h, "dk-") && has(h, "stack", "migration.yaml"),
+    checks: [
+      check("migration.stack", migrationStackParams(MIGRATION_STACK_DEFAULTS), {
+        message: "Use only the stack in migration.yaml: no denied dependency, the stack's database and package manager, no file database"
+      })
+    ]
   }
 ];
 var POLICY_CHECK_TOOL = "policy_check";
@@ -1106,8 +1247,9 @@ async function checkFolder(pack, dir, io) {
     return refuse("cannot_list", "Dkoder could not list the files of that folder. Check the path, then try again.");
   if (listed.length > MAX_FOLDER_FILES)
     return refuse("too_many_files", `That folder has more than ${String(MAX_FOLDER_FILES)} files. Run the check on the app's own folder.`);
-  const wanted = pathsToRead(pack, listed, { stage: "build" });
-  const base = dir.replace(/\/+$/, "");
+  const base = dir.replace(/[\\/]+$/, "").replace(/[\\/]\.$/, "");
+  const folder = base.split(/[\\/]/).pop() ?? "";
+  const wanted = pathsToRead(pack, listed, { stage: "build", folder, folderPath: base });
   let total = 0;
   let skipped = 0;
   const files = [];
@@ -1130,7 +1272,7 @@ async function checkFolder(pack, dir, io) {
     total += text.length;
     files.push({ path, text });
   }
-  const result = evaluate(pack, files, { stage: "build" });
+  const result = evaluate(pack, files, { stage: "build", folder, folderPath: base });
   const blocks = result.findings.filter((f) => f.level === "block").length;
   const next = blocks > 0 ? `Fix the ${String(blocks)} block finding${blocks === 1 ? "" : "s"}, then run this check again before you deploy.` : result.findings.length > 0 ? "No block finding. Tell the person about each warn finding." : "Every check passed.";
   return {
@@ -1170,7 +1312,7 @@ async function runPolicyCli(argv, io) {
     io.print(JSON.stringify({ ok: false, error: "policy_unreadable", message: "The policy file is not the JSON answer of dkoder.policy. Call dkoder.policy, save its answer as it is, and try again." }));
     return 1;
   }
-  const dir = absolutePath(io.cwd(), folder ?? ".").replace(/[\\/]\.$/, "");
+  const dir = absolutePath(io.cwd(), folder ?? ".").replace(/[\\/]+$/, "").replace(/[\\/]\.$/, "");
   const result = await checkFolder(packFromAnswer(raw), dir, { list: (d) => io.list(d), read: async (p) => io.read(p) });
   io.print(JSON.stringify(result));
   return result.ok ? 0 : 1;
