@@ -3,7 +3,7 @@
 // For builders who do not use git. Node 18+ or Bun, no dependencies. dkod-pack.py, .ps1 and .sh do
 // the same thing byte for byte (same files, same headers, same sha256); keep the four in step.
 //
-//   node dkod-pack.mjs pack [<folder>]                 -> {"file","sha256","bytes","files"}
+//   node dkod-pack.mjs pack [<folder>]                 -> {"file","sha256","bytes","files"[,"git"]}
 //   node dkod-pack.mjs put <file> <url> ["Name: value"...] -> {"ok":true,"status":200}
 //
 // The archive holds regular files only, sorted by UTF-8 bytes, with mtime 0 and uid/gid 0, so the
@@ -54,6 +54,27 @@ function inGitTree(root) {
   if (!realGit()) return false;
   const r = spawnSync("git", ["-C", root, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8" });
   return r.status === 0 && r.stdout.trim() === "true";
+}
+
+/**
+ * DKO-1095: what the Builder is about to send, for the preflight line: folder name, branch, short
+ * commit, commit time, uncommitted count. Null outside git or before the first commit. Never a remote.
+ */
+function gitFacts(root) {
+  if (!inGitTree(root)) return null;
+  const run = (args) => {
+    const r = spawnSync("git", ["-C", root, ...args], { encoding: "utf8", maxBuffer: 1 << 28 });
+    return r.status === 0 ? r.stdout : null;
+  };
+  const head = run(["rev-parse", "--short", "HEAD"]);
+  const at = run(["log", "-1", "--format=%ct"]);
+  const status = run(["status", "--porcelain", "--", "."]);
+  if (head === null || at === null || status === null) return null;
+  const branch = (run(["rev-parse", "--abbrev-ref", "HEAD"]) ?? "HEAD").trim();
+  const headAt = Number.parseInt(at.trim(), 10);
+  if (!/^[0-9a-f]{7,40}$/.test(head.trim()) || !Number.isInteger(headAt)) return null;
+  const dirty = status.split("\n").filter((l) => l !== "").length;
+  return `{"folder":${jsonString(basename(root))},"branch":${jsonString(branch)},"head":"${head.trim()}","head_at":${headAt},"dirty":${dirty}}`;
 }
 
 /** Candidate paths, relative to root with forward slashes, before the common filters. */
@@ -167,7 +188,8 @@ function pack(folder) {
     rmSync(dir, { recursive: true, force: true });
     throw err;
   }
-  return `{"file":${jsonString(out)},"sha256":"${hash.digest("hex")}","bytes":${bytes},"files":${files.length}}`;
+  const git = gitFacts(root);
+  return `{"file":${jsonString(out)},"sha256":"${hash.digest("hex")}","bytes":${bytes},"files":${files.length}${git === null ? "" : `,"git":${git}`}}`;
 }
 
 /** Only https, or plain http to this machine (tests). */

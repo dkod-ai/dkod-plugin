@@ -1735,7 +1735,8 @@ var CHECK_IDS = [
   "secrets.none",
   "tls.no_insecure",
   "version.semver",
-  "commit.conventional"
+  "commit.conventional",
+  "migration.stack"
 ];
 var MAX_PATTERN_LENGTH = 200;
 var MAX_UNBOUNDED = 4;
@@ -1998,14 +1999,15 @@ function stringList(params, key) {
     return null;
   return v.filter((x) => typeof x === "string");
 }
+var MAX_LIST_ENTRIES = 32;
 function listProblems(params, key, opts = {}) {
   const v = params[key];
   if (v === undefined)
     return opts.required ? [`"${key}" is required`] : [];
   if (!Array.isArray(v) || v.some((x) => typeof x !== "string" || x.length === 0 || x.length > 200))
     return [`"${key}" must be a list of short strings`];
-  if (v.length > (opts.max ?? 32))
-    return [`"${key}" may hold at most ${opts.max ?? 32} entries`];
+  if (v.length > (opts.max ?? MAX_LIST_ENTRIES))
+    return [`"${key}" may hold at most ${opts.max ?? MAX_LIST_ENTRIES} entries`];
   if (opts.required && v.length === 0)
     return [`"${key}" must not be empty`];
   return [];
@@ -2026,6 +2028,56 @@ function workloadDocs(file, kinds) {
   return yamlDocs(file.text).filter((d) => d.kind !== null && kinds.has(d.kind));
 }
 var DEFAULT_MOVING_TAGS = ["latest", "main", "master", "stable", "edge", "nightly"];
+var MIGRATION_STACK_DEFAULTS = {
+  folderPrefix: "dk-",
+  denyDependencies: ["express", "sqlite3", "better-sqlite3", "mongoose", "mysql2", "prisma", "npm"],
+  packageManager: "bun",
+  databaseEngine: "postgres"
+};
+var DRIVER_ENGINE = {
+  pg: "postgres",
+  postgres: "postgres",
+  sqlite3: "sqlite",
+  "better-sqlite3": "sqlite",
+  "@libsql/client": "sqlite",
+  mysql: "mysql",
+  mysql2: "mysql",
+  mariadb: "mysql",
+  mongodb: "mongodb",
+  mongoose: "mongodb",
+  mssql: "mssql",
+  oracledb: "oracle"
+};
+var ENGINE_ALIAS = { postgresql: "postgres", mongo: "mongodb", sqlite3: "sqlite" };
+var DEPENDENCY_FIELDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
+var LOCKFILE_BY_MANAGER = {
+  npm: ["package-lock.json", "npm-shrinkwrap.json"],
+  yarn: ["yarn.lock"],
+  pnpm: ["pnpm-lock.yaml"],
+  bun: ["bun.lock", "bun.lockb"]
+};
+var ALL_LOCKFILES = [...new Set(Object.values(LOCKFILE_BY_MANAGER).flat())];
+var FILE_DATABASE = /\.(?:db|sqlite)$/;
+function stackFiles(dir) {
+  return [`${dir}/package.json`, `${dir}/{${ALL_LOCKFILES.join(",")}}`, `${dir}/*.db`, `${dir}/*.sqlite`];
+}
+function stackGlobs(folderPrefix) {
+  return stackFiles(`**/${folderPrefix}*/**`);
+}
+var STACK_FOLDER_PATHS = stackFiles("**");
+function migrationStackParams(m) {
+  return {
+    folder_prefix: m.folderPrefix,
+    paths: stackGlobs(m.folderPrefix),
+    deny_dependencies: m.denyDependencies.slice(0, MAX_LIST_ENTRIES),
+    database_engine: m.databaseEngine,
+    package_manager: m.packageManager
+  };
+}
+function textProblem(params, key) {
+  const v = params[key];
+  return typeof v === "string" && v.length > 0 && v.length <= 200 ? [] : [`"${key}" must be a short string`];
+}
 var CATALOG = {
   "dockerfile.from_digest": {
     id: "dockerfile.from_digest",
@@ -2418,6 +2470,70 @@ var CATALOG = {
       return semver.test(v) ? [] : [{ path: file.path, line: at + 1, detail: `version "${v}" is not MAJOR.MINOR.PATCH` }];
     }
   },
+  "migration.stack": {
+    id: "migration.stack",
+    scope: "file",
+    title: "A dk- app uses only the stack in migration.yaml",
+    summary: "Inside a dk- folder: no denied dependency, the stack's package manager and database only, and no file database.",
+    paths: stackGlobs(MIGRATION_STACK_DEFAULTS.folderPrefix),
+    folderPaths: STACK_FOLDER_PATHS,
+    pathsFor: (params) => stackGlobs(typeof params.folder_prefix === "string" && params.folder_prefix !== "" ? params.folder_prefix : MIGRATION_STACK_DEFAULTS.folderPrefix),
+    byName: true,
+    textPaths: ["**/package.json"],
+    exclude: [],
+    params: [
+      { name: "folder_prefix", kind: "string", hint: "The prefix of a migration app folder, from migration.yaml." },
+      { name: "deny_dependencies", kind: "strings", hint: "Package names the stack refuses, from migration.yaml." },
+      { name: "database_engine", kind: "string", hint: "The database engine the stack uses, for example postgres." },
+      { name: "package_manager", kind: "string", hint: "The one package manager the stack uses, for example bun." }
+    ],
+    validate: (p) => [
+      ...p.folder_prefix === undefined ? [] : textProblem(p, "folder_prefix"),
+      ...listProblems(p, "deny_dependencies"),
+      ...textProblem(p, "database_engine"),
+      ...textProblem(p, "package_manager")
+    ],
+    runFile(file, params) {
+      const base = file.path.split("/").pop() ?? file.path;
+      const deny = new Set(stringList(params, "deny_dependencies") ?? []);
+      const engine = typeof params.database_engine === "string" ? params.database_engine.trim().toLowerCase() : "";
+      const stack = ENGINE_ALIAS[engine] ?? engine;
+      const manager = typeof params.package_manager === "string" ? params.package_manager.trim().toLowerCase() : "";
+      if (ALL_LOCKFILES.includes(base) && !(LOCKFILE_BY_MANAGER[manager] ?? []).includes(base))
+        return [{ path: file.path, line: null, detail: `${base} belongs to a package manager other than ${manager}` }];
+      if (FILE_DATABASE.test(base))
+        return [{ path: file.path, line: null, detail: `${base} is a file database; the stack uses ${engine}` }];
+      if (base !== "package.json")
+        return [];
+      let doc;
+      try {
+        doc = JSON.parse(file.text);
+      } catch {
+        return [];
+      }
+      const root = typeof doc === "object" && doc !== null && !Array.isArray(doc) ? doc : {};
+      const lineOf = (key, from = 0) => {
+        const at = file.text.indexOf(`"${key}"`, from);
+        return at === -1 ? null : file.text.slice(0, at).split(/\r?\n/).length;
+      };
+      const hits = [];
+      for (const field of DEPENDENCY_FIELDS) {
+        const deps = root[field];
+        if (typeof deps !== "object" || deps === null || Array.isArray(deps))
+          continue;
+        const fieldAt = Math.max(0, file.text.indexOf(`"${field}"`));
+        for (const name of Object.keys(deps)) {
+          const driver = DRIVER_ENGINE[name];
+          if (deny.has(name) || driver !== undefined && driver !== stack)
+            hits.push({ path: file.path, line: lineOf(name, fieldAt), detail: `${name} is not in the stack` });
+        }
+      }
+      const pm = typeof root.packageManager === "string" ? root.packageManager : "";
+      if (pm !== "" && manager !== "" && pm.replace(/@.*$/, "").toLowerCase() !== manager)
+        hits.push({ path: file.path, line: lineOf("packageManager"), detail: `packageManager is not ${manager}` });
+      return hits;
+    }
+  },
   "commit.conventional": {
     id: "commit.conventional",
     scope: "commit",
@@ -2452,13 +2568,28 @@ function finish(findings, checked) {
 function toFinding(rule, check, level, message, title, hit) {
   return { rule, check, level, path: hit.path, line: hit.line, message: message ? `${message} (${hit.detail})` : `${title}: ${hit.detail}` };
 }
-function scopeOf(check) {
+function tails(path) {
+  const parts = path.replace(/[\\/]+$/, "").split(/[\\/]+/).filter((p) => p !== "");
+  return parts.map((_, i) => parts.slice(i).join("/"));
+}
+function exemptFolder(exclude, opts) {
+  const names = [opts.folder, ...opts.folderPath === undefined ? [] : tails(opts.folderPath)].filter((n) => n !== undefined && n !== "");
+  return names.some((name) => matchAny(exclude, name) || matchAny(exclude, `${name}/`));
+}
+function scopeOf(check, opts) {
   const def = CATALOG[check.use];
-  return { paths: stringList(check.with, "paths") ?? def.paths, exclude: [...ALWAYS_SKIPPED, ...def.exclude, ...stringList(check.with, "exclude") ?? []] };
+  const paths = stringList(check.with, "paths") ?? def.paths;
+  const prefix = typeof check.with.folder_prefix === "string" ? check.with.folder_prefix : "";
+  const exclude = [...ALWAYS_SKIPPED, ...def.exclude, ...stringList(check.with, "exclude") ?? []];
+  const folder = opts.folder;
+  const defaults = def.pathsFor?.(check.with) ?? def.paths;
+  const narrowed = check.with.paths !== undefined && JSON.stringify(check.with.paths) !== JSON.stringify(defaults);
+  const own = def.folderPaths !== undefined && prefix !== "" && folder !== undefined && folder.startsWith(prefix) && !narrowed && !exemptFolder(exclude, opts) ? def.folderPaths : null;
+  return { paths: own === null ? paths : [...paths, ...own], exclude, ...def.textPaths === undefined ? {} : { text: def.textPaths } };
 }
 var cleanPath = (p) => p.replace(/^\.?\/+/, "");
 function evaluate(pack, files, opts) {
-  const usable = files.filter((f) => f.text.length <= MAX_FILE_BYTES).map((f) => ({ path: cleanPath(f.path), text: f.text }));
+  const usable = files.map((f) => ({ path: cleanPath(f.path), text: f.text.length <= MAX_FILE_BYTES ? f.text : "", big: f.text.length > MAX_FILE_BYTES }));
   const findings = [];
   let checked = 0;
   for (const rule of pack.rules) {
@@ -2473,8 +2604,8 @@ function evaluate(pack, files, opts) {
         continue;
       if (def.needsSecretScan && !opts.secretScan)
         continue;
-      const { paths, exclude } = scopeOf(check);
-      const scoped = usable.filter((f) => matchAny(paths, f.path) && !matchAny(exclude, f.path));
+      const { paths, exclude } = scopeOf(check, opts);
+      const scoped = usable.filter((f) => (def.byName === true || !f.big) && matchAny(paths, f.path) && !matchAny(exclude, f.path));
       checked += 1;
       const hits = [];
       if (def.scope === "tree" && def.runTree)
@@ -2493,8 +2624,8 @@ function evaluate(pack, files, opts) {
   return finish(findings, checked);
 }
 function pathsToRead(pack, paths, opts) {
-  const scopes = pack.rules.flatMap((rule) => rule.checks.filter((c) => (c.level ?? rule.level) !== "off" && CATALOG[c.use].scope === "file" && (!CATALOG[c.use].needsSecretScan || opts.secretScan !== undefined)).map(scopeOf));
-  return new Set(paths.filter((p) => scopes.some((s) => matchAny(s.paths, cleanPath(p)) && !matchAny(s.exclude, cleanPath(p)))));
+  const scopes = pack.rules.flatMap((rule) => rule.checks.filter((c) => (c.level ?? rule.level) !== "off" && CATALOG[c.use].scope === "file" && (!CATALOG[c.use].needsSecretScan || opts.secretScan !== undefined)).map((c) => scopeOf(c, opts)));
+  return new Set(paths.filter((p) => scopes.some((s) => matchAny(s.paths, cleanPath(p)) && !matchAny(s.exclude, cleanPath(p)) && (s.text === undefined || matchAny(s.text, cleanPath(p))))));
 }
 function evaluateCommit(pack, message) {
   const findings = [];
@@ -2779,6 +2910,16 @@ var RECOGNISERS = [
       }, { message: "Use bun, bunx and bun run here, not npm, npx, yarn or pnpm" }),
       check("content.forbid", { pattern: "^\\s*FROM.*[\\s/]node[:@]", flags: "i", paths: ["Dockerfile*", "*.Dockerfile", "Containerfile*"] }, { message: "Build from the official oven/bun image, not node" })
     ]
+  },
+  {
+    id: "migration-stack",
+    label: "A dk- app uses only the stack in migration.yaml",
+    test: (h2) => has(h2, "dk-") && has(h2, "stack", "migration.yaml"),
+    checks: [
+      check("migration.stack", migrationStackParams(MIGRATION_STACK_DEFAULTS), {
+        message: "Use only the stack in migration.yaml: no denied dependency, the stack's database and package manager, no file database"
+      })
+    ]
   }
 ];
 var IGNORED_BASENAMES = new Set(["readme.md", "license", "license.md", "licence", "licence.md"]);
@@ -2893,6 +3034,8 @@ function secretNameKind(name) {
     return null;
   if (words.join("_").endsWith("key_name"))
     return null;
+  if (words.length === 1 && last === "pass")
+    return "secret";
   if (PASSWORD_WORDS.has(last))
     return "password";
   if (SECRET_LAST_WORDS.has(last))
@@ -2944,7 +3087,9 @@ function notSecretShape(value) {
   return TIER_B_PLACEHOLDER.test(value);
 }
 var IDENTIFIER_PART = "(?:[a-z]+(?:[0-9]+[a-z]*)?|[0-9]+[a-z]*)";
-var IDENTIFIER_VALUE = new RegExp(`^${IDENTIFIER_PART}(?:[._-]${IDENTIFIER_PART})*$`);
+var CAMEL_PART = "[a-z]+[0-9]*(?:[A-Z][a-z]+[0-9]*)*";
+var DOTTED_CAMEL_KEY = new RegExp(`^${CAMEL_PART}(?:\\.${CAMEL_PART})+$`);
+var IDENTIFIER_VALUE = new RegExp(`^${IDENTIFIER_PART}(?:[._/-]${IDENTIFIER_PART})*$`);
 function looksLikeSecretLiteral(value, kind) {
   const password = kind === "password";
   if (value.length < (password ? 8 : 16) || /\s/.test(value))
@@ -2954,6 +3099,8 @@ function looksLikeSecretLiteral(value, kind) {
   if (password)
     return !DEFAULT_PASSWORD.test(value);
   if (/^[A-Z][A-Z0-9_]+$/.test(value))
+    return false;
+  if (kind === "any_key" && DOTTED_CAMEL_KEY.test(value))
     return false;
   if (IDENTIFIER_VALUE.test(value))
     return false;
@@ -3138,8 +3285,7 @@ function detectSecrets(path, content) {
   const tierB = !isTestOrDocPath(path);
   for (let i = 0;i < lines.length; i += 1) {
     const line = lines[i].slice(0, ASSIGNMENT_LINE_CAP).replace(/\r$/, "");
-    if (/^\s*(#|\/\/)/.test(line))
-      continue;
+    const isComment = /^\s*(#|\/\/|\/\*|\*)/.test(line);
     INLINE_ASSIGNMENT_RE.lastIndex = 0;
     for (let m = INLINE_ASSIGNMENT_RE.exec(line);m; m = INLINE_ASSIGNMENT_RE.exec(line)) {
       const name = m[1];
@@ -3155,12 +3301,12 @@ function detectSecrets(path, content) {
         raw.push({ rule: "aws_secret_access_key", name: isSecretName(name) ? name : null, ...span });
         continue;
       }
-      const kind = tierB ? secretNameKind(name) : null;
+      const kind = tierB && !isComment ? secretNameKind(name) : null;
       if (kind === null || !looksLikeSecretLiteral(literal.value, kind))
         continue;
       raw.push({ rule: "secret_assignment", name, ...span });
     }
-    if (!tierB)
+    if (!tierB || isComment)
       continue;
     BEARER_RE.lastIndex = 0;
     for (let m = BEARER_RE.exec(line);m; m = BEARER_RE.exec(line)) {
@@ -3581,6 +3727,60 @@ function classifyRepo(repo, config) {
 function ruleLayer(rule) {
   return rule === "blocked-command" || rule === "guardrails" || rule === "policy" ? "guard" : "floor";
 }
+function migrationRecord(text) {
+  if (text === null)
+    return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null)
+    return null;
+  const { original, appKey } = parsed;
+  if (typeof original !== "string" || original.trim() === "")
+    return null;
+  return { original: normalizePath(original) || "/", appKey: typeof appKey === "string" ? appKey : null };
+}
+function normalizePath(path) {
+  const parts = [];
+  for (const part of path.split("/")) {
+    if (part === "" || part === ".")
+      continue;
+    if (part === "..") {
+      if (parts.length > 0 && parts[parts.length - 1] !== "..")
+        parts.pop();
+      else if (!path.startsWith("/"))
+        parts.push("..");
+    } else
+      parts.push(part);
+  }
+  return `${path.startsWith("/") ? "/" : ""}${parts.join("/")}`;
+}
+function insideFolder(folder, path) {
+  const dir = normalizePath(folder) || "/";
+  const p = normalizePath(path);
+  return dir === "/" ? p.startsWith("/") : p === dir || p.startsWith(`${dir}/`);
+}
+function recordRefusal() {
+  return {
+    rule: "original-read-only",
+    message: "The migration record (.dkod/migration.json) is what keeps the original app read only: leave it as it is. Run dkod-migrate.mjs clean <folder> after the shipped step to close the migration."
+  };
+}
+function originalRefusal(original) {
+  return {
+    rule: "original-read-only",
+    message: `The original app at ${original} is read only while a migration is open: you read it, you never change it or its data. Build in the dk- app's folder; to run the original's own tests, start it with the snapshot (dkod-migrate.mjs snapshot).`
+  };
+}
+function parityRefusal() {
+  return {
+    rule: "parity-frozen",
+    message: "The parity suite (tests/parity/) is frozen: its sha256 was reported with the run on the original, and a changed suite would not match it. To change it, run dkod-migrate.mjs unfreeze <folder> and start the attempt again (dkoder.migrate.start)."
+  };
+}
 var DELIVER = "App code ships through Deliver (the dkoder.deliver tool), never a direct push or merge.";
 function governanceMessage(repo) {
   return `${repo} is your org's governance repo. It changes only through the DKOD dashboard, by an org admin. Dkoder does not push, merge or write to it.`;
@@ -3747,7 +3947,13 @@ function checkFile(path, content, config) {
 }
 function policyRefusal(f) {
   const where = f.path === null ? "" : f.line === null ? `${f.path}: ` : `${f.path} line ${String(f.line)}: `;
-  return { rule: "policy", check: f.check, message: `${f.rule}: ${where}${f.message}. Change the code so it follows the rule.`, ...f.line !== null ? { line: f.line } : {} };
+  return {
+    rule: "policy",
+    check: f.check,
+    message: `${f.rule}: ${where}${f.message}. Change the code so it follows the rule.`,
+    ...f.line !== null ? { line: f.line } : {},
+    ...CATALOG[f.check].byName === true && f.line === null ? { wholeFile: true } : {}
+  };
 }
 function checkCommitMessage(message, config) {
   if (message === null || config.policyPack === undefined || config.policyPack.rules.length === 0)
@@ -3762,7 +3968,7 @@ function newFindings(path, before, after, config) {
 `)[line - 1] ?? "";
   const key = (f, text) => `${f.rule}\x00${f.check ?? ""}\x00${lineText(text, f.line)}`;
   const old = new Set(checkFile(path, before, config).map((f) => key(f, before)));
-  return found.filter((f) => !old.has(key(f, after)));
+  return found.filter((f) => f.wholeFile === true || !old.has(key(f, after)));
 }
 var SHIP_VERB = /\b(?:git\s+push|gh\s+pr\s+merge|force[- ]?push(?:ed|ing)?|push(?:ed|ing)?|merg(?:e|ed|ing))\b/i;
 var SHIP_DIRECT = /\b(?:main|master|trunk|default\s+branch|directly|direct|straight|right\s+away|--admin|admin\s+merge|without\s+(?:a\s+)?(?:pr|pull\s+request|review|deliver))\b/i;
@@ -3815,8 +4021,9 @@ async function checkFolder(pack, dir, io) {
     return refuse2("cannot_list", "Dkoder could not list the files of that folder. Check the path, then try again.");
   if (listed.length > MAX_FOLDER_FILES)
     return refuse2("too_many_files", `That folder has more than ${String(MAX_FOLDER_FILES)} files. Run the check on the app's own folder.`);
-  const wanted = pathsToRead(pack, listed, { stage: "build" });
-  const base = dir.replace(/\/+$/, "");
+  const base = dir.replace(/[\\/]+$/, "").replace(/[\\/]\.$/, "");
+  const folder = base.split(/[\\/]/).pop() ?? "";
+  const wanted = pathsToRead(pack, listed, { stage: "build", folder, folderPath: base });
   let total = 0;
   let skipped = 0;
   const files = [];
@@ -3839,7 +4046,7 @@ async function checkFolder(pack, dir, io) {
     total += text.length;
     files.push({ path, text });
   }
-  const result = evaluate(pack, files, { stage: "build" });
+  const result = evaluate(pack, files, { stage: "build", folder, folderPath: base });
   const blocks = result.findings.filter((f) => f.level === "block").length;
   const next = blocks > 0 ? `Fix the ${String(blocks)} block finding${blocks === 1 ? "" : "s"}, then run this check again before you deploy.` : result.findings.length > 0 ? "No block finding. Tell the person about each warn finding." : "Every check passed.";
   return {
@@ -4194,16 +4401,49 @@ Do not try another way to run it. Tell the person why, and offer the allowed way
       return null;
     }
   };
+  const recordFile = async (io) => `${(await io.cwd()).replace(/\/$/, "")}/.dkod/migration.json`;
+  const migration = async (io) => {
+    return migrationRecord(await readOrNull(io, await recordFile(io)));
+  };
+  const frozenSuite = async (io) => {
+    const cwd = (await io.cwd()).replace(/\/$/, "");
+    return await readOrNull(io, `${cwd}/.dkod/parity/freeze.json`) === null ? null : `${cwd}/tests/parity`;
+  };
   const checkWrite = async (io, e, seen = []) => {
     const shape = writeShape(e);
-    if (shape === null)
-      return [];
+    if (shape === null) {
+      const named = PATH_KEYS.map((k) => e[k]).find((v) => typeof v === "string");
+      if (named === undefined)
+        return [];
+      const path = named.startsWith("/") ? named : await absolute(io, named);
+      const suite = await frozenSuite(io);
+      if (suite !== null && insideFolder(suite, path))
+        return [parityRefusal()];
+      if (await migration(io) === null)
+        return [];
+      return insideFolder(dirname(await recordFile(io)), path) ? [recordRefusal()] : [];
+    }
     const { target, content, edits, cell } = shape;
     const cfg = await load(io);
     if (target === null)
       return newFindings(`${e.tool}.txt`, null, content ?? edits.map((ed) => ed.new_string).join(`
 `), cfg);
     const path = target.startsWith("/") ? target : await absolute(io, target);
+    const suite = await frozenSuite(io);
+    if (suite !== null && insideFolder(suite, path))
+      return [parityRefusal()];
+    const record = await migration(io);
+    if (record !== null && insideFolder(record.original, path))
+      return [originalRefusal(record.original)];
+    if (record !== null) {
+      const file = await recordFile(io);
+      if (normalizePath(path) === normalizePath(file)) {
+        const next = content === null ? null : migrationRecord(content);
+        if (next === null || next.original !== record.original)
+          return [recordRefusal()];
+      } else if (insideFolder(dirname(file), path))
+        return [recordRefusal()];
+    }
     const root = await rootOf(io, path);
     const remotes = root === null ? [] : await resolver(io).repoRemotes(root);
     if (remotes.length > 0 && remotes.every((r) => classifyRepo(r, cfg) === "outside"))
@@ -4303,8 +4543,21 @@ Do not try another way to run it. Tell the person why, and offer the allowed way
   const bash = (io, command) => failClosed("Bash", () => bashCheck(io, command));
   const bashCheck = async (io, command) => {
     const cfg = await load(io);
+    const cmds = parseCommands(command);
+    const suite = await frozenSuite(io);
+    if (suite !== null && changesOriginal(suite, await io.cwd(), await io.home() ?? "", cmds))
+      return refuse(io, "Bash", [parityRefusal()], "write");
+    const record = await migration(io);
+    if (record !== null) {
+      const base = await io.cwd();
+      const home = await io.home() ?? "";
+      if (changesOriginal(record.original, base, home, cmds))
+        return refuse(io, "Bash", [originalRefusal(record.original)], "write");
+      if (changesOriginal(dirname(await recordFile(io)), base, home, cmds))
+        return refuse(io, "Bash", [recordRefusal()], "write");
+    }
     const seen = [];
-    const blocked = await decideBash(parseCommands(command), cfg, resolver(io), seen);
+    const blocked = await decideBash(cmds, cfg, resolver(io), seen);
     if (blocked !== null)
       return refuse(io, "Bash", [blocked], seen[seen.length - 1]?.action ?? "command");
     const secrets = await checkCommit(io, command);
@@ -4393,6 +4646,44 @@ function touchesDkoderFiles(e) {
   }
   return false;
 }
+var INSTALLERS = new Set(["npm", "yarn", "pnpm", "bun", "pip", "pip3", "poetry", "cargo", "go", "composer"]);
+var INSTALL_WORDS = new Set(["install", "i", "add", "ci", "update", "upgrade", "up", "link", "uninstall", "un", "remove", "rm", "prune", "dedupe", "rebuild", "get"]);
+var GIT_LOOK = new Set(["status", "log", "diff", "show", "rev-parse", "ls-files"]);
+function changesOriginal(original, base, home, cmds) {
+  const inside = (path) => insideFolder(original, path);
+  const full = (cd, word) => {
+    const here = cd === "" ? base : cd.startsWith("/") ? cd : cd.startsWith("~") ? `${home}${cd.slice(1)}` : `${base.replace(/\/$/, "")}/${cd}`;
+    if (word.startsWith("/"))
+      return word;
+    if (word.startsWith("~"))
+      return `${home}${word.slice(1)}`;
+    return `${here.replace(/\/$/, "")}/${word}`;
+  };
+  for (const cmd of cmds) {
+    const program = programName(cmd.argv[0] ?? "");
+    const args = cmd.argv.slice(1);
+    if ((cmd.writes ?? []).some((w) => inside(full(cmd.cd, w))))
+      return true;
+    const here = full(cmd.cd, ".");
+    if (WRITERS.has(program) && (inside(here) || args.some((a) => inside(full(cmd.cd, a)))))
+      return true;
+    if (program === "git") {
+      let i = 0;
+      let dir = here;
+      while (i < args.length && (args[i] === "-C" || args[i] === "-c")) {
+        if (args[i] === "-C" && args[i + 1] !== undefined)
+          dir = full(cmd.cd, args[i + 1]);
+        i += 2;
+      }
+      if (inside(dir) && !GIT_LOOK.has(args[i] ?? ""))
+        return true;
+    }
+    const sub = args.find((a) => !a.startsWith("-"));
+    if (INSTALLERS.has(program) && sub !== undefined && INSTALL_WORDS.has(sub) && inside(here))
+      return true;
+  }
+  return false;
+}
 var AUTH = { plugin: "dkod", key: "auth" };
 var FRAME = { plugin: "dkod", key: "frame" };
 var PULSE = { plugin: "dkod", key: "pulse" };
@@ -4414,6 +4705,7 @@ function deviceFacts(id, home, pluginVersion, agentVersion) {
   return { id, os, pluginVersion: short(pluginVersion), agentVersion: short(agentVersion) };
 }
 var NOTE_SECTION = "dkod-request";
+var STALE_SECTION = "dkod-stale-tools";
 function callShape(e) {
   const sorted = (v) => Array.isArray(v) ? v.map(sorted) : typeof v === "object" && v !== null ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sorted(v[k])])) : v;
   const { tool_use_id: _id, consent: _consent, ...rest } = e;
@@ -4436,11 +4728,49 @@ function passedCalls(size = 64) {
     }
   };
 }
+var DKOD_MCP_TOOL = /^mcp__(?:plugin_dkod_)?dkod__dkoder_/;
+var STALE_TOOLS_NOTE = "Your dkod tool list is older than the DKOD server: a tool or a field may be missing or changed. Ask the person to type /mcp, pick dkod, then Reconnect. If they reconnected already, go on.";
+var TOOLS_CHECK_MS = 2 * 60000;
+function toolsWatch() {
+  let seen;
+  let checkedAt = Number.NEGATIVE_INFINITY;
+  return {
+    start(version, now) {
+      if (seen === undefined)
+        seen = version;
+      if (checkedAt === Number.NEGATIVE_INFINITY)
+        checkedAt = now;
+    },
+    async after(tool, now, versionNow) {
+      if (!DKOD_MCP_TOOL.test(tool) || now - checkedAt < TOOLS_CHECK_MS)
+        return null;
+      checkedAt = now;
+      const current = await versionNow();
+      if (current === undefined)
+        return null;
+      const moved = seen !== undefined && current !== seen;
+      seen = current;
+      return moved ? STALE_TOOLS_NOTE : null;
+    }
+  };
+}
+function toolsVersionIn(out) {
+  if (out.isError === true)
+    return;
+  try {
+    const v = JSON.parse(out.content.find((c) => c.type === "text")?.text ?? "null")?.toolsVersion;
+    return typeof v === "string" && /^[0-9a-f]{12}$/.test(v) ? v : undefined;
+  } catch {
+    return;
+  }
+}
 function register(on) {
   const guard = createGuard();
   const passed = passedCalls();
+  const tools = toolsWatch();
   let promptNote = null;
   let noteFor = null;
+  let staleNote = null;
   let tick = 0;
   let pulseAt = -1;
   let timer = null;
@@ -4551,6 +4881,15 @@ function register(on) {
     await checkAuth().catch(() => {
       return;
     });
+    await (async () => {
+      const r = await $.mcp.connect("dkod");
+      if (!r.isConnected)
+        return;
+      const out = await $.mcp.call(r.server, "dkoder.guard.config", { only: "tools_version" });
+      tools.start(toolsVersionIn(out), await $.clock.now());
+    })().catch(() => {
+      return;
+    });
     if (timer === null) {
       timer = $.clock.every(TICK_MS, () => {
         tick += 1;
@@ -4598,7 +4937,9 @@ function register(on) {
         return;
       });
     promptNote = await guard.promptNote(io, e.text).catch(() => null);
-    return next(promptNote === null ? e : { ...e, context: [...e.context ?? [], promptNote] });
+    const notes = [promptNote, staleNote].filter((n) => n !== null);
+    staleNote = null;
+    return next(notes.length === 0 ? e : { ...e, context: [...e.context ?? [], ...notes] });
   });
   on("prompt.compose", async ($, e, next) => {
     const io = { root: $.plugin.root, read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), run: (a, i) => $.process.run(a, i), keptConfig: () => $.store.get("dkoder.config"), keepConfig: (v) => $.store.set("dkoder.config", v), fetch: (u, i) => $.http.fetch(u, i), status: (t) => $.ui.status(t), cwd: () => $.session.cwd(), home: () => $.env.get("HOME"), path: () => $.env.get("PATH") };
@@ -4608,10 +4949,26 @@ function register(on) {
       promptNote = await guard.promptNote(io, typed).catch(() => null);
     }
     const r = await next(e);
-    const ours = (s) => s.id === "dkod" || s.id === NOTE_SECTION;
-    return { sections: [...r.sections.filter((s) => !ours(s)), await guard.promptSection(io), ...promptNote === null ? [] : [{ id: NOTE_SECTION, text: promptNote, scope: "session" }]] };
+    const ours = (s) => s.id === "dkod" || s.id === NOTE_SECTION || s.id === STALE_SECTION;
+    return { sections: [...r.sections.filter((s) => !ours(s)), await guard.promptSection(io), ...promptNote === null ? [] : [{ id: NOTE_SECTION, text: promptNote, scope: "session" }], ...staleNote === null ? [] : [{ id: STALE_SECTION, text: staleNote, scope: "session" }]] };
   });
   on("tool.call", async ($, e, next) => {
+    if (DKOD_MCP_TOOL.test(e.tool)) {
+      const ran = await next(e);
+      (async () => {
+        const note = await tools.after(e.tool, await $.clock.now(), async () => {
+          const r = await $.mcp.connect("dkod");
+          if (!r.isConnected)
+            return;
+          return toolsVersionIn(await $.mcp.call(r.server, "dkoder.guard.config", { only: "tools_version" }));
+        });
+        if (note !== null)
+          staleNote = note;
+      })().catch(() => {
+        return;
+      });
+      return ran;
+    }
     if (typeof e.command !== "string" && writeShape(e) === null)
       return next(e);
     if (touchesDkoderFiles(e))

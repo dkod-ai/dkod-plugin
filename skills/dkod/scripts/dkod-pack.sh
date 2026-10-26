@@ -4,7 +4,7 @@
 # shasum or openssl. dkod-pack.mjs, .py and .ps1 do the same thing byte for byte (same files, same
 # headers, same sha256); keep the four in step.
 #
-#   sh dkod-pack.sh pack [<folder>]                    -> {"file","sha256","bytes","files"}
+#   sh dkod-pack.sh pack [<folder>]                    -> {"file","sha256","bytes","files"[,"git"]}
 #   sh dkod-pack.sh put <file> <url> ["Name: value"...] -> {"ok":true,"status":200}
 #
 # The headers are written here with printf rather than by the system tar: GNU tar and bsdtar
@@ -96,6 +96,21 @@ candidates() {
   fi
 }
 
+# DKO-1095: folder name, branch, short commit, commit time and uncommitted count, for the preflight
+# line, into GIT as a JSON member. Empty outside git or before the first commit. Never a remote.
+git_facts() {
+  GIT=
+  real_git && [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" = true ] || return 0
+  gh=$(git rev-parse --short HEAD 2>/dev/null) || return 0
+  gt=$(git log -1 --format=%ct 2>/dev/null) || return 0
+  gs=$(git status --porcelain -- . 2>/dev/null) || return 0
+  gb=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || gb=HEAD
+  case "$gh" in ''|*[!0-9a-f]*) return 0 ;; esac
+  case "$gt" in ''|*[!0-9]*) return 0 ;; esac
+  if [ -z "$gs" ]; then gd=0; else gd=$(printf '%s\n' "$gs" | wc -l | tr -d ' '); fi
+  GIT=$(printf ',"git":{"folder":%s,"branch":%s,"head":"%s","head_at":%s,"dirty":%s}' "$(json_str "${root##*/}")" "$(json_str "$gb")" "$gh" "$gt" "$gd")
+}
+
 pack() {
   case "$1" in /*) dir=$1 ;; *) dir=./$1 ;; esac
   [ -d "$dir" ] || die "not a folder: $1"
@@ -185,7 +200,8 @@ pack() {
   bytes=$(wc -c < "$out" | tr -d ' ')
   [ "$bytes" -eq "$expect" ] || { rm -rf "$out_dir"; die "files changed while packing: run pack again"; }
   sha=$(sha256_of "$out")
-  printf '{"file":%s,"sha256":"%s","bytes":%s,"files":%s}\n' "$(json_str "$out")" "$sha" "$bytes" "$count"
+  git_facts
+  printf '{"file":%s,"sha256":"%s","bytes":%s,"files":%s%s}\n' "$(json_str "$out")" "$sha" "$bytes" "$count" "$GIT"
 }
 
 put() {

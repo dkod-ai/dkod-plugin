@@ -95,6 +95,25 @@ function InGitTree([string]$root) {
   return ($r.Code -eq 0) -and ($r.Out.Trim() -eq 'true')
 }
 
+# DKO-1095: folder name, branch, short commit, commit time and uncommitted count, for the preflight
+# line. $null outside git or before the first commit. Never a remote.
+function GitFacts([string]$root) {
+  if (-not (InGitTree $root)) { return $null }
+  try {
+    $head = RunGit $root @('rev-parse', '--short', 'HEAD')
+    $at = RunGit $root @('log', '-1', '--format=%ct')
+    $status = RunGit $root @('status', '--porcelain', '--', '.')
+    $br = RunGit $root @('rev-parse', '--abbrev-ref', 'HEAD')
+  } catch { return $null }
+  if ($head.Code -ne 0 -or $at.Code -ne 0 -or $status.Code -ne 0) { return $null }
+  $h = $head.Out.Trim()
+  $t = $at.Out.Trim()
+  if (($h -notmatch '^[0-9a-f]{7,40}$') -or ($t -notmatch '^[0-9]+$')) { return $null }
+  $branch = if ($br.Code -eq 0) { $br.Out.Trim() } else { 'HEAD' }
+  $dirty = @($status.Out.Split("`n") | Where-Object { $_.Trim() -ne '' }).Count
+  return '{"folder":' + (JsonString (Split-Path -Leaf $root)) + ',"branch":' + (JsonString $branch) + ',"head":"' + $h + '","head_at":' + $t + ',"dirty":' + $dirty + '}'
+}
+
 # Candidate paths, relative to root with forward slashes, before the common filters.
 function Candidates([string]$root) {
   $list = New-Object System.Collections.Generic.List[string]
@@ -233,7 +252,9 @@ function Pack([string]$folder) {
     Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
     throw
   }
-  return '{"file":' + (JsonString $out) + ',"sha256":"' + $hex + '","bytes":' + $bytes + ',"files":' + $entryArr.Length + '}'
+  $git = GitFacts $root
+  $tail = if ($null -eq $git) { '' } else { ',"git":' + $git }
+  return '{"file":' + (JsonString $out) + ',"sha256":"' + $hex + '","bytes":' + $bytes + ',"files":' + $entryArr.Length + $tail + '}'
 }
 
 function Put([string]$file, [string]$url, [string[]]$headerArgs) {
