@@ -1,5 +1,6 @@
 // Content checks for the skill and the manifests. They sit outside test/ because the plugin test
-// loader there refuses .md and .json imports and node:fs. Run with `bun test ./checks`.
+// loader there refuses .md and .json imports and node:fs. It is not named *.test.ts so that loader
+// skips it. Run with `bun test ./checks/skill.check.ts`.
 import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
