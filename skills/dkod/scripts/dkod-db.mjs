@@ -285,12 +285,15 @@ function connectWebSocket(rawUrl, headers, handlers) {
 
 var DB_APP_KEY = /^[a-z0-9][a-z0-9-]{0,62}$/;
 var DEFAULT_PORT = 6543;
+var WAIT_LIMIT_MS = 10 * 60000;
+var CHECK_TIMEOUT_MS = 15000;
+var CHECK_RETRY_MS = 1e4;
 var PENDING_CAP = 1 << 20;
 var RENEW_BEFORE_MS = 5 * 60000;
 var RENEW_MIN_MS = 30000;
 var RETRY_STEPS_MS = [30000, 60000, 120000, 300000];
 var FLAGS = {
-  up: ["app", "port", "dir", "gateway", "config"],
+  up: ["app", "port", "dir", "gateway", "config", "wait"],
   migrate: ["dir", "port"],
   explain: [],
   import: []
@@ -311,7 +314,7 @@ function parseArgs(argv) {
 }
 var USAGE = [
   "Usage:",
-  "  node dkod-db.mjs up --app <app key> [--port 6543] [--dir <app folder>]",
+  "  node dkod-db.mjs up --app <app key> [--port 6543] [--dir <app folder>] [--wait <seconds>]",
   "  node dkod-db.mjs migrate [--dir <app folder>] [--port 6543]"
 ].join(`
 `);
@@ -323,6 +326,10 @@ function portOf(raw, fallback) {
   const n = Number(raw);
   return n <= 65535 ? n : null;
 }
+var NO_DOCKER = "Do not make a database with Docker or a local Postgres: the app's Dev database is the one DKOD makes.";
+var MAKE_STEP = "Call dkoder.devdb.status with the app's key: when it says missing, call dkoder.devdb.make with confirm: true, then run this again.";
+var missingDb = (app) => `The ${app} Dev database does not exist yet. ${MAKE_STEP} ${NO_DOCKER}`;
+var notReachable = (app) => `The ${app} Dev database did not answer in time. Check the network and the gateway address, then run this again. ${NO_DOCKER}`;
 var NO_DEVICE = "This computer has no Dkoder device token. Install Dkoder here first, then run this again.";
 function trustedDashboard(raw) {
   if (typeof raw !== "string")
@@ -390,12 +397,83 @@ async function fetchDbToken(creds, app, io) {
   if (res.status === 429)
     throw new TokenError("rate", "Too many tokens in a minute. Wait a moment and try again.");
   if (res.status === 409)
-    throw new TokenError("forbidden", typeof body.message === "string" && body.message ? body.message : "This app has no Dev database yet. DKOD is making it, or its owner has not asked for one. Ask in the Dkoder chat.");
+    throw new TokenError("forbidden", `This app has no Dev database yet. ${MAKE_STEP} ${NO_DOCKER}`);
   const expiresAt = typeof body.expires_at === "string" ? Date.parse(body.expires_at) : NaN;
   if (res.status !== 200 || typeof body.token !== "string" || !body.token || Number.isNaN(expiresAt)) {
     throw new TokenError("unavailable", "DKOD could not make a token right now. Try again in a minute.");
   }
   return { token: body.token, expiresAt, gatewayUrl: typeof body.gateway_url === "string" ? body.gateway_url : null };
+}
+var pgMessage = (type, body) => {
+  const head = Buffer.alloc(5);
+  head.write(type, 0, "latin1");
+  head.writeInt32BE(body.length + 4, 1);
+  return Buffer.concat([head, body]);
+};
+function startupMessage(database) {
+  const text = Buffer.from(`user\x00dev\x00database\x00${database}\x00application_name\x00dkod-db-check\x00\x00`);
+  const head = Buffer.alloc(8);
+  head.writeInt32BE(text.length + 8, 0);
+  head.writeInt32BE(196608, 4);
+  return Buffer.concat([head, text]);
+}
+function checkDatabase(gateway, app, token, io) {
+  return new Promise((resolve) => {
+    let done = false;
+    let buf = Buffer.alloc(0);
+    let asked = false;
+    const finish = (result) => {
+      if (done)
+        return;
+      done = true;
+      cancel();
+      if (result.kind === "ready")
+        ws.sendBinary(pgMessage("X", Buffer.alloc(0)));
+      ws.close(1000);
+      resolve(result);
+    };
+    const cancel = io.schedule(CHECK_TIMEOUT_MS, () => finish({ kind: "not_open" }));
+    const ws = connectWebSocket(`${gateway}/v1/connect/${app}`, { authorization: `Bearer ${token}`, "x-request-id": io.uuid() }, {
+      onOpen() {
+        ws.sendBinary(startupMessage(dbNameOf(app)));
+      },
+      onBinary(data) {
+        buf = Buffer.concat([buf, data]);
+        while (!done && buf.length >= 5) {
+          const len = buf.readInt32BE(1);
+          if (buf.length < len + 1)
+            return;
+          const type = String.fromCharCode(buf[0]);
+          const body = buf.subarray(5, len + 1);
+          buf = buf.subarray(len + 1);
+          if (type === "E") {
+            let code = "";
+            for (let i = 0;i < body.length && body[i] !== 0; ) {
+              const end = body.indexOf(0, i + 1);
+              if (end < 0)
+                break;
+              if (String.fromCharCode(body[i]) === "C")
+                code = body.subarray(i + 1, end).toString();
+              i = end + 1;
+            }
+            finish({ kind: code === "3D000" ? "no_database" : "not_open" });
+          } else if (type === "Z") {
+            if (!asked) {
+              asked = true;
+              ws.sendBinary(pgMessage("Q", Buffer.from("select 1\x00")));
+            } else
+              finish({ kind: "ready" });
+          }
+        }
+      },
+      onRefused(status, reason) {
+        finish({ kind: "refused", reason: reason || `HTTP ${status}` });
+      },
+      onClose() {
+        finish({ kind: "not_open" });
+      }
+    });
+  });
 }
 var dbNameOf = (app) => `${app.replaceAll("-", "_")}_dev`;
 var databaseUrlOf = (app, port) => `postgres://dev@127.0.0.1:${port}/${dbNameOf(app)}`;
@@ -463,6 +541,28 @@ async function startUp(flags, io, cwd) {
   if (problem)
     return fail(2, problem);
   const gateway = gatewayBase.replace(/\/+$/, "");
+  const waitRaw = flags.get("wait");
+  if (waitRaw !== undefined && !/^\d{1,6}$/.test(waitRaw))
+    return fail(2, "--wait must be a number of seconds.");
+  const waitMs = waitRaw === undefined ? WAIT_LIMIT_MS : Number(waitRaw) * 1000;
+  const startedAt = io.now();
+  let sawNoDatabase = false;
+  for (;; ) {
+    const checked = await checkDatabase(gateway, app, issued.token, io);
+    if (checked.kind === "ready")
+      break;
+    if (checked.kind === "refused")
+      return fail(2, `connect refused: ${checked.reason}`);
+    if (checked.kind === "no_database")
+      sawNoDatabase = true;
+    const elapsed = io.now() - startedAt;
+    if (elapsed + CHECK_RETRY_MS > waitMs)
+      return fail(1, sawNoDatabase ? missingDb(app) : notReachable(app));
+    io.print(`dkod-db: waiting for DKOD to make the ${app} Dev database (${Math.round(elapsed / 1000)} s of ${Math.round(waitMs / 1000)} s)`);
+    await new Promise((resolve) => {
+      io.schedule(CHECK_RETRY_MS, resolve);
+    });
+  }
   let token = issued.token;
   let expiresAt = issued.expiresAt;
   const open = new Set;
