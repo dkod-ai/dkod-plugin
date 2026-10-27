@@ -28,7 +28,7 @@ If a tool says the server needs sign-in, or the DKOD band above the prompt is ye
 
 Start a session first, before you plan, ask questions, make a folder or write a file, for any code work, not only deploys. The org's templates and policy decide the stack and where things go. In Cursor, Dkoder refuses file writes and commands that change anything until the chat has a session.
 
-1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.16.0"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user in one line that the plugin is updated, and go on. In Cursor that is `dkod-update.mjs` in the `scripts` folder next to this file: it needs no git. Never update the plugin with git. The app key is the app's short name in lowercase kebab-case, usually the app's repository or folder name. If there is no app yet, use the name the user gave; ask only when they gave none.
+1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.17.0"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user in one line that the plugin is updated, and go on. In Cursor that is `dkod-update.mjs` in the `scripts` folder next to this file: it needs no git. Never update the plugin with git. The app key is the app's short name in lowercase kebab-case, usually the app's repository or folder name. If there is no app yet, use the name the user gave; ask only when they gave none.
 2. Call `dkoder.policy` and `dkoder.templates` with the `sessionId`. Follow what they return while you write code. When a template has `content: null`, DKOD could not read it now: work from its `name` and `description`, and do not look for the file anywhere else.
 3. When the user asks for a new app (there is no code for it yet), run the wizard (below) before you plan or write any code.
 
@@ -36,14 +36,15 @@ Start a session first, before you plan, ask questions, make a folder or write a 
 
 The wizard asks the org's own questions for a new app, writes a PRD (the plan) for the user to approve, and then you build and test the app on this computer. Skip it when the app already has code, or when the user asks only for a change.
 
-1. Call `dkoder.wizard.questions` with the `sessionId`. Ask the questions only in this chat. Never open a web page or a browser for them.
+1. Call `dkoder.wizard.questions` with the `sessionId`. Ask the questions only in this chat. Never open a web page or a browser for them. When the chat has an attached spec file, send its text as `spec` (and its file name as `spec_name`) with this first call.
 2. The answer has the next `questions`, at most 4. Ask them with the client's question tool (in Cursor the question tool, in Claude Code `AskUserQuestion`), all in one turn:
    - Show each question's `why` under it.
    - A `choice` takes one option, a `multi` one or more. Put the `recommended` option first and mark it "(Recommended)".
    - A `text` question takes the user's own words. Show its `example`.
    - When the chosen option has `asks_emails`, ask for the email addresses too.
-   - Never answer a question for the user, and never skip one.
-3. Call `dkoder.wizard.answer` with the `sessionId` and `answers` by question `id`: `{ "option": "<id>" }`, `{ "options": ["<id>", ...] }`, or `{ "text": "..." }`, with `emails` where an option asks them. It returns the next questions. When it refuses an answer, ask the user that question again. Repeat until it answers `done: true`.
+   - A question the spec answers is not returned. When one comes back pre-filled by the spec, show the spec's answer and the spec line it came from, and let the user confirm or change it.
+   - Never answer a question for the user, and never skip one. Ask every question the spec does not answer.
+3. Call `dkoder.wizard.answer` with the `sessionId` and `answers` by question `id`: `{ "option": "<id>" }`, `{ "options": ["<id>", ...] }`, or `{ "text": "..." }`, with `emails` where an option asks them. For a pre-filled question send the answer the user confirmed or changed. It returns the next questions. When it refuses an answer, ask the user that question again. Repeat until it answers `done: true`.
 4. Call `dkoder.wizard.prd` with the `sessionId`. Show the PRD's summary in a few lines. Then ask with the client's question tool, one question with two options: "Approve" and "Change an answer". The user clicks; they never have to type.
    - On "Approve", call `dkoder.wizard.approve` with the `sessionId` and the `prd_at` exactly as given. It answers `approved` with the `template`, the `required_checks` and `deploy_answers`.
    - On "Change an answer", ask which answer and the new one, send it with `dkoder.wizard.answer`, call `dkoder.wizard.prd` again and ask again.

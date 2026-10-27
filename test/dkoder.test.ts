@@ -3,6 +3,12 @@
 // here sit beneath the mod and stand for the host: git answers for a repo whose remote is the app
 // repo, and dkoder.json (root-owned on a device) is served from memory.
 import { expect, mock, test } from 'claude-code/testing'
+import { readFileSync } from 'node:fs'
+
+const ROOT = new URL('../', import.meta.url)
+const read = (p: string) => readFileSync(new URL(p, ROOT), 'utf8')
+const SKILL = read('skills/dkod/SKILL.md')
+const WIZARD = SKILL.slice(SKILL.indexOf('## New app: the wizard'))
 
 const STRIPE = 'sk_' + 'live_' + '4eC39HqLyjWDarjtT1zdp7dc'
 const CONFIG = { owners: ['dkod-demo'], governanceRepo: 'dkod-demo/dkod-governance', appRepos: ['dkod-demo/rc-news-app'] }
@@ -190,6 +196,34 @@ async function staleRun($: any, on: any, versions: string[]) {
 
 test('a dkod tool call after the server moved on gives one stale-tools note', async ($: any, on: any) => {
   expect((await staleRun($, on, ['aaaaaaaaaaaa', 'bbbbbbbbbbbb'])).length).toBe(1)
+})
+
+test('the wizard section hands the attached spec to the first questions call and sends pre-filled answers', () => {
+  expect(WIZARD).toContain('When the chat has an attached spec file, send its text as `spec`')
+  expect(WIZARD).toContain('When one comes back pre-filled by the spec')
+  expect(WIZARD).toContain('send the answer the user confirmed or changed')
+})
+
+test('the wizard still never answers for the user and asks every question the spec leaves open', () => {
+  expect(WIZARD).toContain('Never answer a question for the user, and never skip one.')
+  expect(WIZARD).toContain('Ask every question the spec does not answer.')
+})
+
+test('the skill steps stay in order: session, policy and templates, wizard, PRD approval, local build', () => {
+  const marks = ['dkoder.session.start', 'dkoder.wizard.questions', 'dkoder.wizard.prd', 'dkoder.wizard.approve'].map((m) => SKILL.indexOf(m))
+  expect(marks.every((i) => i >= 0)).toBe(true)
+  expect(marks).toEqual([...marks].sort((a, b) => a - b))
+  expect(SKILL.indexOf('## New app: the wizard')).toBeGreaterThan(marks[0])
+})
+
+test('pluginVersion in the skill is 0.17.0 and matches both plugin.json and both marketplace.json', () => {
+  const v = /pluginVersion: "([^"]+)"/.exec(SKILL)?.[1]
+  expect(v).toBe('0.17.0')
+  expect(JSON.parse(read('.claude-plugin/plugin.json')).version).toBe(v)
+  expect(JSON.parse(read('.cursor-plugin/plugin.json')).version).toBe(v)
+  for (const f of ['.claude-plugin/marketplace.json', '.cursor-plugin/marketplace.json']) {
+    for (const p of JSON.parse(read(f)).plugins) expect(p.version).toBe(v)
+  }
 })
 
 test('the same tool list version gives no stale-tools note', async ($: any, on: any) => {
