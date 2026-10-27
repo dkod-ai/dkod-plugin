@@ -42,7 +42,7 @@ The wizard asks the org's own questions for a new app, writes a PRD (the plan) f
    - A `choice` takes one option, a `multi` one or more. Put the `recommended` option first and mark it "(Recommended)".
    - A `text` question takes the user's own words. Show its `example`.
    - When the chosen option has `asks_emails`, ask for the email addresses too.
-   - A question the spec answers is not returned. When one comes back pre-filled by the spec, show the spec's answer and the spec line it came from, and let the user confirm or change it.
+   - A question the spec answers fully is not returned; one the spec only suggests comes back pre-filled: show the spec's answer and the spec line it came from, and let the user confirm or change it.
    - Never answer a question for the user, and never skip one. Ask every question the spec does not answer.
 3. Call `dkoder.wizard.answer` with the `sessionId` and `answers` by question `id`: `{ "option": "<id>" }`, `{ "options": ["<id>", ...] }`, or `{ "text": "..." }`, with `emails` where an option asks them. For a pre-filled question send the answer the user confirmed or changed. It returns the next questions. When it refuses an answer, ask the user that question again. Repeat until it answers `done: true`.
 4. Call `dkoder.wizard.prd` with the `sessionId`. Show the PRD's summary in a few lines. Then ask with the client's question tool, one question with two options: "Approve" and "Change an answer". The user clicks; they never have to type.
