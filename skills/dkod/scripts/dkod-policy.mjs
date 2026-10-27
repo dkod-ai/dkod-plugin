@@ -40,25 +40,6 @@ async function runReal(host, argv, init, known) {
   return host.run(argv, init);
 }
 
-var POLICY_LEVELS = ["block", "warn", "off"];
-var CHECK_IDS = [
-  "dockerfile.from_digest",
-  "dockerfile.numeric_user",
-  "image.no_moving_tag",
-  "k8s.probes",
-  "k8s.resources",
-  "k8s.security_context",
-  "k8s.rbac_no_wildcards",
-  "k8s.labels",
-  "file.exists",
-  "content.forbid",
-  "content.require",
-  "secrets.none",
-  "tls.no_insecure",
-  "version.semver",
-  "commit.conventional",
-  "migration.stack"
-];
 var MAX_PATTERN_LENGTH = 200;
 var MAX_UNBOUNDED = 4;
 var MAX_LINE_LENGTH = 2000;
@@ -349,12 +330,7 @@ function workloadDocs(file, kinds) {
   return yamlDocs(file.text).filter((d) => d.kind !== null && kinds.has(d.kind));
 }
 var DEFAULT_MOVING_TAGS = ["latest", "main", "master", "stable", "edge", "nightly"];
-var MIGRATION_STACK_DEFAULTS = {
-  folderPrefix: "dk-",
-  denyDependencies: ["express", "sqlite3", "better-sqlite3", "mongoose", "mysql2", "prisma", "npm"],
-  packageManager: "bun",
-  databaseEngine: "postgres"
-};
+var DEFAULT_FOLDER_PREFIX = "dk-";
 var DRIVER_ENGINE = {
   pg: "postgres",
   postgres: "postgres",
@@ -386,15 +362,6 @@ function stackGlobs(folderPrefix) {
   return stackFiles(`**/${folderPrefix}*/**`);
 }
 var STACK_FOLDER_PATHS = stackFiles("**");
-function migrationStackParams(m) {
-  return {
-    folder_prefix: m.folderPrefix,
-    paths: stackGlobs(m.folderPrefix),
-    deny_dependencies: m.denyDependencies.slice(0, MAX_LIST_ENTRIES),
-    database_engine: m.databaseEngine,
-    package_manager: m.packageManager
-  };
-}
 function textProblem(params, key) {
   const v = params[key];
   return typeof v === "string" && v.length > 0 && v.length <= 200 ? [] : [`"${key}" must be a short string`];
@@ -796,9 +763,9 @@ var CATALOG = {
     scope: "file",
     title: "A dk- app uses only the stack in migration.yaml",
     summary: "Inside a dk- folder: no denied dependency, the stack's package manager and database only, and no file database.",
-    paths: stackGlobs(MIGRATION_STACK_DEFAULTS.folderPrefix),
+    paths: stackGlobs(DEFAULT_FOLDER_PREFIX),
     folderPaths: STACK_FOLDER_PATHS,
-    pathsFor: (params) => stackGlobs(typeof params.folder_prefix === "string" && params.folder_prefix !== "" ? params.folder_prefix : MIGRATION_STACK_DEFAULTS.folderPrefix),
+    pathsFor: (params) => stackGlobs(typeof params.folder_prefix === "string" && params.folder_prefix !== "" ? params.folder_prefix : DEFAULT_FOLDER_PREFIX),
     byName: true,
     textPaths: ["**/package.json"],
     exclude: [],
@@ -880,6 +847,7 @@ var CATALOG = {
     }
   }
 };
+
 var MAX_FINDINGS = 200;
 var MAX_FILE_BYTES = 512 * 1024;
 function finish(findings, checked) {
@@ -958,6 +926,7 @@ function formatFindings(findings, max = 20) {
   return shown.join(`
 `);
 }
+
 var K = new Uint32Array([
   1116352408,
   1899447441,
@@ -1024,6 +993,26 @@ var K = new Uint32Array([
   3204031479,
   3329325298
 ]);
+
+var POLICY_LEVELS = ["block", "warn", "off"];
+var CHECK_IDS = [
+  "dockerfile.from_digest",
+  "dockerfile.numeric_user",
+  "image.no_moving_tag",
+  "k8s.probes",
+  "k8s.resources",
+  "k8s.security_context",
+  "k8s.rbac_no_wildcards",
+  "k8s.labels",
+  "file.exists",
+  "content.forbid",
+  "content.require",
+  "secrets.none",
+  "tls.no_insecure",
+  "version.semver",
+  "commit.conventional",
+  "migration.stack"
+];
 
 var MAX_CHECKS_PER_RULE = 32;
 var MAX_RULES_PER_PACK = 200;
@@ -1111,122 +1100,7 @@ function readPack(raw) {
   }
   return { version: 1, rules };
 }
-function check(use, params = {}, extra = {}) {
-  return { use, with: params, message: extra.message ?? null, level: extra.level ?? null };
-}
-var has = (h, ...words) => words.some((w) => {
-  let at = h.indexOf(w);
-  while (at !== -1) {
-    if (at === 0 || !/[a-z0-9]/.test(h[at - 1]))
-      return true;
-    at = h.indexOf(w, at + 1);
-  }
-  return false;
-});
-var RECOGNISERS = [
-  {
-    id: "pinned-base-images",
-    label: "Base images pinned by digest",
-    test: (h) => has(h, "digest") && has(h, "from", "base image"),
-    checks: [check("dockerfile.from_digest", { exclude: ["Dockerfile.dev"] }, { message: "Pin the base image by digest: FROM image:tag@sha256:<digest>" })]
-  },
-  {
-    id: "no-moving-tags",
-    label: "No moving image tags",
-    test: (h) => has(h, "tag") && has(h, "latest", "floating", "moves", "moving"),
-    checks: [
-      check("image.no_moving_tag", { tags: ["latest", "main", "master", "stable", "edge", "nightly"], exclude: ["docker-compose*.y*ml", "compose*.y*ml", "Dockerfile.dev"] }, { message: "Use a fixed image version or a digest, never a tag that moves" })
-    ]
-  },
-  {
-    id: "non-root",
-    label: "Non-root containers",
-    test: (h) => has(h, "non-root", "nonroot", "runasnonroot", "as root"),
-    checks: [
-      check("dockerfile.numeric_user", { exclude: ["Dockerfile.dev"] }, { message: "Run the image as a numeric non-root user: USER 10001" }),
-      check("k8s.security_context", {}, { message: "Run as non-root, drop ALL capabilities, read-only root filesystem, no privileged mode" })
-    ]
-  },
-  {
-    id: "probes",
-    label: "Health probes",
-    test: (h) => has(h, "probe", "liveness", "readiness"),
-    checks: [check("k8s.probes", { require: ["readinessProbe", "livenessProbe", "startupProbe"] }, { message: "Long-running workloads need readiness, liveness and startup probes" })]
-  },
-  {
-    id: "resources",
-    label: "Resource requests and limits",
-    test: (h) => has(h, "requests") && has(h, "memory") || has(h, "resource limit", "memory limit"),
-    checks: [check("k8s.resources", {}, { message: "Declare requests.cpu, requests.memory and limits.memory" })]
-  },
-  {
-    id: "rbac",
-    label: "Least-privilege RBAC",
-    test: (h) => has(h, "rbac", "wildcard", "cluster-admin", "least privilege", "least-privilege"),
-    checks: [check("k8s.rbac_no_wildcards", {}, { message: 'Name each permission; no "*" and no cluster-admin' })]
-  },
-  {
-    id: "secrets",
-    label: "No secret values in code",
-    test: (h) => has(h, "secret value", "plaintext secret", "plain text secret", "hardcoded secret", "hard-coded secret", "secret in code"),
-    checks: [check("secrets.none", {}, { message: "Never write a secret value; read it by name at run time" })]
-  },
-  {
-    id: "tls",
-    label: "TLS with verification",
-    test: (h) => has(h, "tls", "https", "certificate verification"),
-    checks: [check("tls.no_insecure", {}, { message: "Use TLS with certificate checks on; plain HTTP only to loopback" })]
-  },
-  {
-    id: "structured-logs",
-    label: "Structured JSON logs",
-    test: (h) => has(h, "log") && has(h, "json"),
-    checks: [
-      check("content.forbid", { pattern: "\\bconsole\\.(?:log|info|debug)\\(", paths: ["*.{ts,tsx,js,jsx,mjs,cjs}"], exclude: ["**/test/**", "**/tests/**", "*.test.*", "*.spec.*", "**/scripts/**"] }, { message: "Log through the JSON logger, not console.log", level: "warn" })
-    ]
-  },
-  {
-    id: "semver",
-    label: "Semantic versions",
-    test: (h) => has(h, "major.minor.patch", "semver", "semantic version"),
-    checks: [check("version.semver", {}, { message: "Version every artifact as MAJOR.MINOR.PATCH" })]
-  },
-  {
-    id: "conventional-commits",
-    label: "Conventional commits",
-    test: (h) => has(h, "commit") && has(h, "conventional", "type(scope)"),
-    checks: [check("commit.conventional", { types: ["feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert"] }, { message: "Write the commit subject as type(scope): summary" })]
-  },
-  {
-    id: "owner",
-    label: "Every service has an owner",
-    test: (h) => has(h, "owner", "owning team", "ownership"),
-    checks: [check("k8s.labels", { required: ["app.dkod.ai/owner"] }, { message: "Every deployed workload names its owner", level: "warn" })]
-  },
-  {
-    id: "package-manager",
-    label: "bun is the only package manager",
-    test: (h) => has(h, "bun") && has(h, "npm", "yarn", "pnpm", "package manager", "package step"),
-    checks: [
-      check("content.forbid", { pattern: "\\S", paths: ["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml"] }, { message: "Use bun: delete this lockfile; bun keeps bun.lock" }),
-      check("content.forbid", {
-        pattern: "^[^#]*(?:^|[\\s;&|(\"'`=])(?:npm|npx|yarn|pnpm)(?:\\s|$)",
-        paths: ["Dockerfile*", "*.Dockerfile", "Containerfile*", ".github/workflows/*.y*ml", ".gitlab-ci.y*ml", "package.json", "Makefile", "*.sh"]
-      }, { message: "Use bun, bunx and bun run here, not npm, npx, yarn or pnpm" }),
-      check("content.forbid", { pattern: "^\\s*FROM.*[\\s/]node[:@]", flags: "i", paths: ["Dockerfile*", "*.Dockerfile", "Containerfile*"] }, { message: "Build from the official oven/bun image, not node" })
-    ]
-  },
-  {
-    id: "migration-stack",
-    label: "A dk- app uses only the stack in migration.yaml",
-    test: (h) => has(h, "dk-") && has(h, "stack", "migration.yaml"),
-    checks: [
-      check("migration.stack", migrationStackParams(MIGRATION_STACK_DEFAULTS), {
-        message: "Use only the stack in migration.yaml: no denied dependency, the stack's database and package manager, no file database"
-      })
-    ]
-  }
-];
+
 var POLICY_CHECK_TOOL = "policy_check";
 var POLICY_CHECK_TOOL_FULL = `mcp__dkod__${POLICY_CHECK_TOOL}`;
 var MAX_FOLDER_FILES = 5000;

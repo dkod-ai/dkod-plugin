@@ -7,7 +7,7 @@ description: Use for any request to build, create, change, fix, run, ship, deplo
 
 DKOD is the company's platform. It holds the org's policy, its app templates and its Deploy rules. The `dkod` MCP server that comes with Dkoder gives you its tools; their names end in `dkoder_<name>` (for example `dkoder.deliver`).
 
-If a tool says the server needs sign-in, or the DKOD band above the prompt is yellow, tell the user: Sign in to DKOD at <your DKOD dashboard>/auth/org/start, then connect dkod: in Cursor, Settings, MCP, dkod, Connect; in Claude Code, type /mcp, pick dkod, Authenticate. They sign in with their company's own sign-in.
+If a tool says the server needs sign-in, or the DKOD band above the prompt is yellow, tell the user: Sign in to DKOD at <your DKOD dashboard>/auth/org/start, then connect dkod: in Cursor, Settings, MCP, dkod, Connect; in Claude Code, type /mcp, pick dkod, Authenticate. They sign in with their company's own sign-in. In the Cursor CLI (`cursor-agent`), add the dkod server to `~/.cursor/mcp.json` and run `cursor-agent mcp login dkod` in the project folder; the sign-in is per project folder.
 
 ## The rules
 
@@ -28,7 +28,7 @@ If a tool says the server needs sign-in, or the DKOD band above the prompt is ye
 
 Start a session first, before you plan, ask questions, make a folder or write a file, for any code work, not only deploys. The org's templates and policy decide the stack and where things go. In Cursor, Dkoder refuses file writes and commands that change anything until the chat has a session.
 
-1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.17.0"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user in one line that the plugin is updated, and go on. In Cursor that is `dkod-update.mjs` in the `scripts` folder next to this file: it needs no git. Never update the plugin with git. The app key is the app's short name in lowercase kebab-case, usually the app's repository or folder name. If there is no app yet, use the name the user gave; ask only when they gave none.
+1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.17.0"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user in one line that the plugin is updated, read this SKILL.md again from disk, and go on with its new text, not the text loaded earlier in the session. In Cursor that is `dkod-update.mjs` in the `scripts` folder next to this file: it needs no git. Never update the plugin with git. The app key is the app's short name in lowercase kebab-case, usually the app's repository or folder name. If there is no app yet, use the name the user gave; ask only when they gave none.
 2. Call `dkoder.policy` and `dkoder.templates` with the `sessionId`. Follow what they return while you write code. When a template has `content: null`, DKOD could not read it now: work from its `name` and `description`, and do not look for the file anywhere else.
 3. When the user asks for a new app (there is no code for it yet), run the wizard (below) before you plan or write any code.
 
@@ -36,15 +36,14 @@ Start a session first, before you plan, ask questions, make a folder or write a 
 
 The wizard asks the org's own questions for a new app, writes a PRD (the plan) for the user to approve, and then you build and test the app on this computer. Skip it when the app already has code, or when the user asks only for a change.
 
-1. Call `dkoder.wizard.questions` with the `sessionId`. Ask the questions only in this chat. Never open a web page or a browser for them. When the chat has an attached spec file, send its text as `spec` (and its file name as `spec_name`) with this first call.
+1. Call `dkoder.wizard.questions` with the `sessionId`. When the user attached a spec, send its text as `spec` and its file name as `spec_name` (prose only, no code or secrets): questions the spec clearly answers are not returned. Ask the questions only in this chat. Never open a web page or a browser for them.
 2. The answer has the next `questions`, at most 4. Ask them with the client's question tool (in Cursor the question tool, in Claude Code `AskUserQuestion`), all in one turn:
    - Show each question's `why` under it.
    - A `choice` takes one option, a `multi` one or more. Put the `recommended` option first and mark it "(Recommended)".
    - A `text` question takes the user's own words. Show its `example`.
    - When the chosen option has `asks_emails`, ask for the email addresses too.
-   - A question the spec answers fully is not returned; one the spec only suggests comes back pre-filled: show the spec's answer and the spec line it came from, and let the user confirm or change it.
-   - Never answer a question for the user, and never skip one. Ask every question the spec does not answer.
-3. Call `dkoder.wizard.answer` with the `sessionId` and `answers` by question `id`: `{ "option": "<id>" }`, `{ "options": ["<id>", ...] }`, or `{ "text": "..." }`, with `emails` where an option asks them. For a pre-filled question send the answer the user confirmed or changed. It returns the next questions. When it refuses an answer, ask the user that question again. Repeat until it answers `done: true`.
+   - Never answer a question for the user, and never skip one.
+3. Call `dkoder.wizard.answer` with the `sessionId` and `answers` by question `id`: `{ "option": "<id>" }`, `{ "options": ["<id>", ...] }`, or `{ "text": "..." }`, with `emails` where an option asks them. It returns the next questions. When it refuses an answer, ask the user that question again. Repeat until it answers `done: true`.
 4. Call `dkoder.wizard.prd` with the `sessionId`. Show the PRD's summary in a few lines. Then ask with the client's question tool, one question with two options: "Approve" and "Change an answer". The user clicks; they never have to type.
    - On "Approve", call `dkoder.wizard.approve` with the `sessionId` and the `prd_at` exactly as given. It answers `approved` with the `template`, the `required_checks` and `deploy_answers`.
    - On "Change an answer", ask which answer and the new one, send it with `dkoder.wizard.answer`, call `dkoder.wizard.prd` again and ask again.
@@ -168,17 +167,19 @@ First call `dkoder.devdb.status` with the app's key. Owner or admin only.
 - `making`: DKOD made it and nobody has opened it yet. Start the helper now, below: the token it is handed is what turns Making into Ready.
 - `ready`: the helper was handed a token before. Start it, below.
 - `kept`: the app had one and it was dropped. Ask the person before you make it again.
+- To delete the Dev database (a cancelled migration, a stuck `making`): ask the person first, since its data is lost, then call `dkoder.devdb.delete` with `confirm: true`. `dkoder.devdb.status` says `missing` afterwards.
 - `no_dev_instance`, `off`, `no_app_databases`, `no_cloud_environment`: the organization's Dev instance is not made yet. Tell the person, and that an admin finishes it in Setup: Dev database.
 
 When the plan's `change.kind` is not `none`, do the steps `dkoder.deploy.database` gives, including the `0001_baseline` migration, then run `node "<scripts>/dkod-db.mjs" migrate`. Dev and Prod then start from the same schema.
 
 When the app has a Dev database, start the helper at the start of work, as a BACKGROUND command: `node "<scripts>/dkod-db.mjs" up --app <app key>` (in Claude Code, Bash with `run_in_background`; it stops when the session ends). `<scripts>` is the `scripts` folder next to this file. It needs Node (`node -v`) and this computer's Dkoder device token.
 
+- It waits (up to 10 minutes, `--wait <seconds>` changes it) until the database answers `select 1`, and prints its ready line only then. If it exits saying the Dev database does not exist, follow that sentence: `dkoder.devdb.status`, then `dkoder.devdb.make` with `confirm: true` when it says `missing`, then run `up` again. Never run Docker or a local Postgres for it.
 - It opens Postgres on `127.0.0.1:6543` and writes `DATABASE_URL` into the app's `.env.local`. The URL has no password: there is none. Never ask the user for a database password, and never put one in a file.
 - It prints one ready line. If it exits with a sentence (not a member, no default domain, port busy), tell the user that sentence.
 - After you add a migration, run `node "<scripts>/dkod-db.mjs" migrate` in the app's folder. It runs Drizzle or Alembic against the Dev database and prints a short summary.
 - If `.env.local` is not in `.gitignore`, the helper warns. Add it to `.gitignore`.
-- Never put a password, a token or a row in a message, a file or a tool call. `dkoder.devdb.status` and `dkoder.devdb.make` answer names and a state only.
+- Never put a password, a token or a row in a message, a file or a tool call. `dkoder.devdb.status`, `dkoder.devdb.make` and `dkoder.devdb.delete` answer names and a state only.
 
 ## Ship
 

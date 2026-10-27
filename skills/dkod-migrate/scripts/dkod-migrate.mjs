@@ -95,6 +95,8 @@ var join = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`
 var SKIP = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".dkod", "__pycache__"];
 var ASSET_KINDS = ["css", "font", "icon", "image"];
 var TEXT_MAX2 = 200;
+var QUERY_MAX = 4000;
+var LOCAL_KEYS = ["tables", "queries", "functions", "design"];
 var isRec = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 var CONTROL_ANY = new RegExp("[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]");
 function safeFile(s) {
@@ -173,7 +175,7 @@ function validateMap(json) {
     if (!(k in json))
       bad(k, "is missing");
   for (const k of Object.keys(json))
-    if (!keys.includes(k) && k !== "tables")
+    if (!keys.includes(k) && !LOCAL_KEYS.includes(k))
       bad(k, "is not a field of the app map");
   const max = APP_MAP.max;
   if ("summary" in json)
@@ -269,6 +271,35 @@ function validateMap(json) {
       text(t.name, `tables[${i}].name`);
       texts(t.columns, `tables[${i}].columns`, 500);
     });
+  }
+  if ("queries" in json) {
+    array(json.queries, "queries", 2000).forEach((q, i) => {
+      if (typeof q !== "string" || q.trim() === "")
+        bad(`queries[${i}]`, "must be the SQL string as written in the code");
+      else if (q.length > QUERY_MAX)
+        bad(`queries[${i}]`, `must be at most ${QUERY_MAX} characters`);
+    });
+  }
+  if ("functions" in json) {
+    array(json.functions, "functions", 5000).forEach((f, i) => {
+      if (typeof f !== "string" || !/^[\w$.:<>-]{1,120}$/.test(f))
+        bad(`functions[${i}]`, "must be a function name");
+    });
+  }
+  if ("design" in json) {
+    const d = json.design;
+    if (!isRec(d))
+      bad("design", "must be an object");
+    else {
+      fields(d, "design", ["colors", "fonts", "buttons", "tooltips"]);
+      array(d.colors, "design.colors", 500).forEach((c, i) => {
+        if (typeof c !== "string" || !/^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/.test(c))
+          bad(`design.colors[${i}]`, "must be a lowercase hex color like #1a2b3c");
+      });
+      texts(d.fonts, "design.fonts", 100);
+      texts(d.buttons, "design.buttons", 1000);
+      texts(d.tooltips, "design.tooltips", 1000);
+    }
   }
   if (Buffer.byteLength(JSON.stringify(json)) > APP_MAP.maxMapBytes)
     bad("app-map.json", `must stay under ${APP_MAP.maxMapBytes} bytes`);
@@ -372,6 +403,95 @@ function discoverRoutes(original, io) {
   const seen = new Set;
   return all.filter((r) => seen.has(r.path) ? false : (seen.add(r.path), true));
 }
+var bare = (s) => s.replace(/[`"'[\]]/g, "");
+var CONSTRAINT = /^(?:primary|foreign|unique|constraint|check|key|index|fulltext|exclude)$/i;
+function discoverTables(original, io) {
+  const out = new Map;
+  const put = (name, cols) => {
+    const set = out.get(name) ?? new Set;
+    for (const c of cols)
+      set.add(c);
+    out.set(name, set);
+  };
+  for (const f of io.walk(original, SKIP)) {
+    if (IS_TEST.test(f))
+      continue;
+    if (/(?:^|\/)data\/.+\.csv$/i.test(f)) {
+      const header = (io.readFile(join(original, f)) ?? "").split(/\r?\n/, 1)[0] ?? "";
+      put((f.split("/").pop() ?? f).replace(/\.csv$/i, ""), header.split(",").map((c) => bare(c.trim())).filter((c) => c !== ""));
+      continue;
+    }
+    if (!/\.sql$/i.test(f) && !CODE.test(f) && !PY.test(f))
+      continue;
+    const raw = io.readFile(join(original, f));
+    if (raw === null)
+      continue;
+    const text = raw.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
+    for (const m of text.matchAll(/CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([`"[\]\w.]+)\s*\(/gi)) {
+      const name = bare(m[1]).split(".").pop();
+      const cols = [];
+      let depth = 1;
+      let cur = "";
+      const flush = () => {
+        const first = bare(cur.trim().split(/[\s(]+/)[0] ?? "");
+        if (first !== "" && !CONSTRAINT.test(first))
+          cols.push(first);
+        cur = "";
+      };
+      for (let i = m.index + m[0].length;i < text.length; i++) {
+        const ch = text[i];
+        if (ch === "(")
+          depth++;
+        else if (ch === ")" && --depth === 0)
+          break;
+        if (ch === "," && depth === 1)
+          flush();
+        else
+          cur += ch;
+      }
+      flush();
+      put(name, cols);
+    }
+  }
+  return out;
+}
+var ENV_READS = [
+  /\bprocess\.env\.([A-Za-z_]\w*)/g,
+  /\bprocess\.env\[\s*(["'`])([A-Za-z_]\w*)\1\s*\]/g,
+  /\bimport\.meta\.env\.([A-Za-z_]\w*)/g,
+  /\bos\.environ\[\s*(["'])([A-Za-z_]\w*)\1\s*\]/g,
+  /\bos\.environ\.get\(\s*(["'])([A-Za-z_]\w*)\1/g,
+  /\bos\.getenv\(\s*(["'])([A-Za-z_]\w*)\1/g
+];
+var VITE_BUILTIN = new Set(["MODE", "DEV", "PROD", "SSR", "BASE_URL"]);
+function discoverSettings(original, io) {
+  const names = new Set;
+  for (const f of io.walk(original, SKIP)) {
+    if (IS_TEST.test(f) || !CODE.test(f) && !PY.test(f))
+      continue;
+    const text = io.readFile(join(original, f));
+    if (text === null)
+      continue;
+    for (const re of ENV_READS)
+      for (const m of text.matchAll(re))
+        if (!VITE_BUILTIN.has(m[2] ?? m[1]))
+          names.add(m[2] ?? m[1]);
+  }
+  return [...names].sort();
+}
+function discoverColors(original, io) {
+  const colors = new Set;
+  for (const f of io.walk(original, SKIP)) {
+    if (!/\.(?:css|scss|sass|less)$/i.test(f))
+      continue;
+    const text = (io.readFile(join(original, f)) ?? "").replace(/\/\*[\s\S]*?\*\//g, "");
+    for (const d of text.matchAll(/[\w-]+\s*:\s*([^;{}]+)(?=[;}]|$)/g)) {
+      for (const c of d[1].replace(/url\([^)]*\)/gi, " ").matchAll(/#([0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})(?![\w-])/g))
+        colors.add(`#${c[1].toLowerCase()}`);
+    }
+  }
+  return [...colors].sort();
+}
 function pageSlug(path) {
   const slug = path.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
   return slug === "" ? "home" : slug;
@@ -396,7 +516,7 @@ async function checkMap(folder, io) {
   const problems = [];
   const missing = [];
   const noShot = [];
-  const counts = { routes: 0, pages: 0, stores: 0, tables: 0, services: 0, settings: 0, found_routes: 0, screenshots: 0, assets: 0 };
+  const counts = { routes: 0, pages: 0, stores: 0, tables: 0, services: 0, settings: 0, queries: 0, functions: 0, design: 0, found_routes: 0, screenshots: 0, assets: 0 };
   const parsed = readJson(io.readFile(join(mapDir, "app-map.json")));
   const designFiles = new Set(io.walk(join(mapDir, "design"), []));
   let map = null;
@@ -410,8 +530,11 @@ async function checkMap(folder, io) {
   const list = (key) => map !== null && Array.isArray(map[key]) ? map[key].filter(isRec) : [];
   const routes = list("routes");
   const pages = list("pages");
-  for (const key of ["routes", "pages", "stores", "tables", "services", "settings"])
-    counts[key] = list(key).length;
+  for (const key of ["routes", "pages", "stores", "tables", "services", "settings", "queries", "functions"])
+    counts[key] = map !== null && Array.isArray(map[key]) ? map[key].length : 0;
+  const design = map !== null && isRec(map.design) ? map.design : {};
+  const designList = (k) => Array.isArray(design[k]) ? design[k].filter((s) => typeof s === "string") : [];
+  counts.design = ["colors", "fonts", "buttons", "tooltips"].reduce((n, k) => n + designList(k).length, 0);
   const mapped = [...routes, ...pages].flatMap((r) => typeof r.path === "string" ? [normalizeRoute(r.path)] : []);
   const found = discoverRoutes(original, io);
   counts.found_routes = found.length;
@@ -422,6 +545,34 @@ async function checkMap(folder, io) {
   }
   if (found.length === 0 && mapped.length > 0)
     problems.push("original: no route found in its router files, check that `original` in .dkod/migration.json is the app's folder");
+  const missingTables = [];
+  const missingColumns = [];
+  if (map !== null) {
+    const mappedTables = new Map;
+    for (const t of list("tables")) {
+      if (typeof t.name !== "string")
+        continue;
+      const set = mappedTables.get(t.name.toLowerCase()) ?? new Set;
+      for (const c of Array.isArray(t.columns) ? t.columns : [])
+        if (typeof c === "string")
+          set.add(c.toLowerCase());
+      mappedTables.set(t.name.toLowerCase(), set);
+    }
+    for (const [name, cols] of discoverTables(original, io)) {
+      const have = mappedTables.get(name.toLowerCase());
+      if (have === undefined) {
+        missingTables.push(name);
+        continue;
+      }
+      for (const c of cols)
+        if (!have.has(c.toLowerCase()))
+          missingColumns.push(`${name}.${c}`);
+    }
+  }
+  const mappedSettings = new Set(list("settings").flatMap((s) => typeof s.name === "string" ? [s.name] : []));
+  const missingSettings = map === null ? [] : discoverSettings(original, io).filter((n) => !mappedSettings.has(n));
+  const mappedColors = new Set(designList("colors").map((c) => c.toLowerCase()));
+  const missingColors = map === null ? [] : discoverColors(original, io).filter((c) => !mappedColors.has(c));
   for (const page of pages) {
     if (typeof page.path !== "string")
       continue;
@@ -459,9 +610,13 @@ async function checkMap(folder, io) {
     });
   }
   const report = {
-    ok: problems.length === 0 && missing.length === 0 && noShot.length === 0,
+    ok: problems.length === 0 && missing.length === 0 && noShot.length === 0 && missingTables.length === 0 && missingColumns.length === 0 && missingSettings.length === 0 && missingColors.length === 0,
     counts,
     missing_routes: missing,
+    missing_tables: missingTables,
+    missing_columns: missingColumns,
+    missing_settings: missingSettings,
+    missing_colors: missingColors,
     pages_without_screenshot: noShot,
     problems
   };
@@ -505,7 +660,7 @@ function reportTests(text) {
   return out;
 }
 function suiteFiles(dir, io) {
-  const files = io.walk(join2(dir, "tests/parity"), []).map((rel) => `tests/parity/${rel}`);
+  const files = io.walk(join2(dir, "tests/parity"), ["node_modules"]).map((rel) => `tests/parity/${rel}`);
   return files.sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
 }
 function tagsOf(title) {
@@ -527,8 +682,21 @@ var fail = (io, report) => {
   io.print(JSON.stringify({ ok: false, missing: { routes: [], pages: [], flows: [], data: [], design: [] }, original_failures: [], ...report }));
   return 1;
 };
+var PACKAGE_FILES = new Set(["package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"]);
 async function freeze(folder, reportFile, io) {
   const dir = folder === "" ? io.cwd : folder;
+  const packaged = new Set;
+  for (const f of io.walk(join2(dir, "tests/parity"), [])) {
+    const parts = f.split("/");
+    const nm = parts.indexOf("node_modules");
+    if (nm >= 0)
+      packaged.add(parts.slice(0, nm + 1).join("/"));
+    else if (PACKAGE_FILES.has(parts[parts.length - 1]))
+      packaged.add(f);
+  }
+  if (packaged.size > 0) {
+    return fail(io, { problems: [...packaged].map((f) => `tests/parity/${f}: a package file or node_modules does not belong in the suite. Keep package.json, the lockfile and node_modules at the dk- folder root, and delete this.`) });
+  }
   if (originalOf(io.readFile(join2(dir, ".dkod/migration.json"))) === null) {
     io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
     return 2;
@@ -813,7 +981,9 @@ async function sideBySide(folder, originalReport, dkReport, io) {
   }
   const map = json2(io.readFile(join4(dir, ".dkod/map/app-map.json")));
   const count = (key) => isRec4(map) && Array.isArray(map[key]) ? map[key].length : 0;
-  const dataImported = false;
+  const snapshot = json2(io.readFile(join4(dir, ".dkod/snapshot.json")));
+  const copied = (key) => isRec4(snapshot) && Array.isArray(snapshot[key]) && snapshot[key].length > 0;
+  const dataImported = isRec4(snapshot) && snapshot.mode === "snapshot" && (copied("files") || copied("databases"));
   const ok = problems.length === 0;
   io.print(JSON.stringify({
     ok,
