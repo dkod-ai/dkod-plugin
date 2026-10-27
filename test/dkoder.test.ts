@@ -3,14 +3,12 @@
 // here sit beneath the mod and stand for the host: git answers for a repo whose remote is the app
 // repo, and dkoder.json (root-owned on a device) is served from memory.
 import { expect, mock, test } from 'claude-code/testing'
-import { readFileSync } from 'node:fs'
+import SKILL from '../skills/dkod/SKILL.md' with { type: 'text' }
 import claudePlugin from '../.claude-plugin/plugin.json' with { type: 'json' }
 import cursorPlugin from '../.cursor-plugin/plugin.json' with { type: 'json' }
 import claudeMarketplace from '../.claude-plugin/marketplace.json' with { type: 'json' }
 import cursorMarketplace from '../.cursor-plugin/marketplace.json' with { type: 'json' }
 
-// The loader only takes code files, so the skill text is read from disk, not imported.
-const SKILL = readFileSync(new URL('../skills/dkod/SKILL.md', import.meta.url), 'utf8')
 const WIZARD = SKILL.slice(SKILL.indexOf('## New app: the wizard'))
 
 const STRIPE = 'sk_' + 'live_' + '4eC39HqLyjWDarjtT1zdp7dc'
