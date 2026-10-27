@@ -3,11 +3,12 @@
 // here sit beneath the mod and stand for the host: git answers for a repo whose remote is the app
 // repo, and dkoder.json (root-owned on a device) is served from memory.
 import { expect, mock, test } from 'claude-code/testing'
-import { readFileSync } from 'node:fs'
+import SKILL from '../skills/dkod/SKILL.md' with { type: 'text' }
+import claudePlugin from '../.claude-plugin/plugin.json' with { type: 'json' }
+import cursorPlugin from '../.cursor-plugin/plugin.json' with { type: 'json' }
+import claudeMarketplace from '../.claude-plugin/marketplace.json' with { type: 'json' }
+import cursorMarketplace from '../.cursor-plugin/marketplace.json' with { type: 'json' }
 
-const ROOT = new URL('../', import.meta.url)
-const read = (p: string) => readFileSync(new URL(p, ROOT), 'utf8')
-const SKILL = read('skills/dkod/SKILL.md')
 const WIZARD = SKILL.slice(SKILL.indexOf('## New app: the wizard'))
 
 const STRIPE = 'sk_' + 'live_' + '4eC39HqLyjWDarjtT1zdp7dc'
@@ -219,10 +220,10 @@ test('the skill steps stay in order: session, policy and templates, wizard, PRD 
 test('pluginVersion in the skill is 0.17.0 and matches both plugin.json and both marketplace.json', () => {
   const v = /pluginVersion: "([^"]+)"/.exec(SKILL)?.[1]
   expect(v).toBe('0.17.0')
-  expect(JSON.parse(read('.claude-plugin/plugin.json')).version).toBe(v)
-  expect(JSON.parse(read('.cursor-plugin/plugin.json')).version).toBe(v)
-  for (const f of ['.claude-plugin/marketplace.json', '.cursor-plugin/marketplace.json']) {
-    for (const p of JSON.parse(read(f)).plugins) expect(p.version).toBe(v)
+  expect(claudePlugin.version).toBe(v)
+  expect(cursorPlugin.version).toBe(v)
+  for (const m of [claudeMarketplace, cursorMarketplace]) {
+    for (const p of m.plugins) expect(p.version).toBe(v)
   }
 })
 
