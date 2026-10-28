@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join as join6 } from "node:path";
+import { dirname, join as join7 } from "node:path";
 
 var APP_MAP = {
   kind: "app.map",
@@ -624,13 +624,1328 @@ async function checkMap(folder, io) {
   return report.ok ? 0 : 1;
 }
 
+var MAX_PATTERN_LENGTH = 200;
+var MAX_UNBOUNDED = 4;
+var MAX_LINE_LENGTH = 2000;
+function patternProblems(pattern, flags = "") {
+  const problems = [];
+  if (pattern.length === 0)
+    problems.push("the pattern is empty");
+  if (pattern.length > MAX_PATTERN_LENGTH)
+    problems.push(`the pattern is longer than ${MAX_PATTERN_LENGTH} characters`);
+  if (!/^i?$/.test(flags))
+    problems.push('the only flag allowed is "i"');
+  if (/\\[1-9]|\\k</.test(pattern))
+    problems.push("back-references are not allowed");
+  if (problems.length > 0)
+    return problems;
+  try {
+    new RegExp(pattern, flags);
+  } catch (err) {
+    return [`the pattern does not compile: ${err.message}`];
+  }
+  const stack = [{ risky: false }];
+  let unbounded = 0;
+  let i = 0;
+  const isQuant = (at) => {
+    const c = pattern[at];
+    if (c === "*" || c === "+" || c === "?")
+      return true;
+    return c === "{" && /^\{\d+(,\d*)?\}/.test(pattern.slice(at));
+  };
+  const unboundedAt = (at) => {
+    const c = pattern[at];
+    if (c === "*" || c === "+")
+      return true;
+    return c === "{" && /^\{\d+,\}/.test(pattern.slice(at));
+  };
+  while (i < pattern.length) {
+    const c = pattern[i];
+    if (c === "\\") {
+      i += 2;
+    } else if (c === "[") {
+      i += 1;
+      while (i < pattern.length && pattern[i] !== "]")
+        i += pattern[i] === "\\" ? 2 : 1;
+      i += 1;
+    } else if (c === "(") {
+      stack.push({ risky: false });
+      i += 1;
+      if (pattern[i] === "?") {
+        const next = pattern[i + 1];
+        if (next === "<" && (pattern[i + 2] === "=" || pattern[i + 2] === "!"))
+          i += 3;
+        else if (next === "<")
+          i = pattern.indexOf(">", i) + 1 || pattern.length;
+        else
+          i += 2;
+      }
+      continue;
+    } else if (c === ")") {
+      const inner = stack.pop() ?? { risky: false };
+      i += 1;
+      if (isQuant(i)) {
+        if (inner.risky) {
+          problems.push("a repeated group may not contain another repeat or a choice (|), because it can backtrack without end");
+          break;
+        }
+        stack[stack.length - 1].risky = true;
+      } else if (inner.risky) {
+        stack[stack.length - 1].risky = true;
+      }
+      continue;
+    } else if (c === "|") {
+      stack[stack.length - 1].risky = true;
+      i += 1;
+      continue;
+    } else {
+      i += 1;
+    }
+    if (isQuant(i)) {
+      stack[stack.length - 1].risky = true;
+      if (unboundedAt(i))
+        unbounded += 1;
+    }
+  }
+  if (unbounded > MAX_UNBOUNDED)
+    problems.push(`the pattern has more than ${MAX_UNBOUNDED} open-ended repeats (*, +)`);
+  return problems;
+}
+function compileSafe(pattern, flags = "") {
+  return patternProblems(pattern, flags).length === 0 ? new RegExp(pattern, flags) : null;
+}
+
+var cache = new Map;
+function escapeChar(c) {
+  return /[\\^$.|+()[\]{}*?]/.test(c) ? `\\${c}` : c;
+}
+function globToRegExp(glob) {
+  const hit = cache.get(glob);
+  if (hit)
+    return hit;
+  let out = "";
+  let i = 0;
+  while (i < glob.length) {
+    const c = glob[i];
+    if (c === "*") {
+      if (glob[i + 1] === "*") {
+        if (glob[i + 2] === "/") {
+          out += "(?:[^/]+/)*";
+          i += 3;
+        } else {
+          out += ".*";
+          i += 2;
+        }
+      } else {
+        out += "[^/]*";
+        i += 1;
+      }
+    } else if (c === "?") {
+      out += "[^/]";
+      i += 1;
+    } else if (c === "{") {
+      const end = glob.indexOf("}", i);
+      if (end === -1) {
+        out += "\\{";
+        i += 1;
+      } else {
+        const words = glob.slice(i + 1, end).split(",").map((w) => [...w].map(escapeChar).join(""));
+        out += `(?:${words.join("|")})`;
+        i = end + 1;
+      }
+    } else {
+      out += escapeChar(c);
+      i += 1;
+    }
+  }
+  const re = new RegExp(`^${out}$`);
+  if (cache.size > 500)
+    cache.clear();
+  cache.set(glob, re);
+  return re;
+}
+function matchGlob(glob, path) {
+  const target = glob.includes("/") ? path : path.split("/").pop() ?? path;
+  return globToRegExp(glob).test(target);
+}
+function matchAny(globs, path) {
+  return globs.some((g) => matchGlob(g, path));
+}
+
+function yamlDocs(text) {
+  const lines = text.split(/\r?\n/);
+  const docs = [];
+  let start = 0;
+  const flush = (end) => {
+    if (end <= start)
+      return;
+    const body = lines.slice(start, end);
+    let kind = null;
+    let kindLine = start + 1;
+    for (let i = 0;i < body.length; i++) {
+      const m = /^kind:\s*["']?([A-Za-z]+)/.exec(body[i]);
+      if (m) {
+        kind = m[1];
+        kindLine = start + i + 1;
+        break;
+      }
+    }
+    docs.push({ text: body.join(`
+`), startLine: start + 1, kind, kindLine });
+  };
+  for (let i = 0;i < lines.length; i++) {
+    if (/^---\s*$/.test(lines[i])) {
+      flush(i);
+      start = i + 1;
+    }
+  }
+  flush(lines.length);
+  return docs;
+}
+function lineIn(doc, re) {
+  const lines = doc.text.split(`
+`);
+  for (let i = 0;i < lines.length; i++)
+    if (re.test(lines[i]))
+      return doc.startLine + i;
+  return null;
+}
+function templatedKey(doc, key) {
+  const lines = doc.text.split(`
+`);
+  for (let i = 0;i < lines.length; i++) {
+    if (!new RegExp(`^\\s*${key}:`).test(lines[i]))
+      continue;
+    if (lines[i].includes("{{"))
+      return true;
+    const next = lines.slice(i + 1).find((l) => l.trim() !== "");
+    if (next !== undefined && next.trim().startsWith("{{"))
+      return true;
+  }
+  return false;
+}
+function dockerInstructions(text) {
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const first = lines[i];
+    const startLine = i + 1;
+    if (/^\s*(#|$)/.test(first)) {
+      i += 1;
+      continue;
+    }
+    let joined = first;
+    while (/\\\s*$/.test(joined) && i + 1 < lines.length) {
+      joined = joined.replace(/\\\s*$/, " ") + lines[i + 1];
+      i += 1;
+    }
+    i += 1;
+    const m = /^\s*([A-Za-z]+)\s*(.*)$/.exec(joined);
+    if (m)
+      out.push({ op: m[1].toUpperCase(), args: m[2].trim(), line: startLine });
+  }
+  return out;
+}
+function fromLines(instructions) {
+  const out = [];
+  for (const ins of instructions) {
+    if (ins.op !== "FROM")
+      continue;
+    const words = ins.args.split(/\s+/).filter((w) => w !== "" && !w.startsWith("--"));
+    const image = words[0] ?? "";
+    const asAt = words.findIndex((w) => w.toUpperCase() === "AS");
+    out.push({ image, alias: asAt >= 0 ? words[asAt + 1] ?? null : null, line: ins.line });
+  }
+  return out;
+}
+function imageTag(ref) {
+  const digest = ref.includes("@sha256:");
+  const name = ref.split("@")[0];
+  const slash = name.lastIndexOf("/");
+  const colon = name.indexOf(":", slash + 1);
+  if (colon === -1)
+    return { tag: "latest", implicit: true, digest };
+  return { tag: name.slice(colon + 1), implicit: false, digest };
+}
+
+var DOCKERFILES = ["Dockerfile", "Dockerfile.*", "*.Dockerfile", "*.dockerfile"];
+var YAML = ["*.yaml", "*.yml"];
+var TESTS = ["**/test/**", "**/tests/**", "**/__tests__/**", "**/fixtures/**", "*.test.*", "*.spec.*", "*_test.go", "test_*.py"];
+var SOURCE = ["*.{ts,tsx,js,jsx,mjs,cjs,py,go,rb,java,kt,rs,php,cs,swift,scala}"];
+var CONFIG = ["*.{yaml,yml,json,toml,ini,conf,properties}", ".env.example", "Dockerfile", "Dockerfile.*"];
+var LONG_RUNNING = new Set(["Deployment", "StatefulSet", "DaemonSet"]);
+var WORKLOADS = new Set(["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob", "Pod", "ReplicaSet"]);
+function stringList(params, key) {
+  const v = params[key];
+  if (v === undefined)
+    return null;
+  if (!Array.isArray(v))
+    return null;
+  return v.filter((x) => typeof x === "string");
+}
+var MAX_LIST_ENTRIES = 32;
+function listProblems(params, key, opts = {}) {
+  const v = params[key];
+  if (v === undefined)
+    return opts.required ? [`"${key}" is required`] : [];
+  if (!Array.isArray(v) || v.some((x) => typeof x !== "string" || x.length === 0 || x.length > 200))
+    return [`"${key}" must be a list of short strings`];
+  if (v.length > (opts.max ?? MAX_LIST_ENTRIES))
+    return [`"${key}" may hold at most ${opts.max ?? MAX_LIST_ENTRIES} entries`];
+  if (opts.required && v.length === 0)
+    return [`"${key}" must not be empty`];
+  return [];
+}
+function patternParam(params) {
+  const p = params.pattern;
+  if (typeof p !== "string")
+    return ['"pattern" is required and must be a string'];
+  const flags = params.flags === undefined ? "" : params.flags;
+  if (typeof flags !== "string")
+    return ['"flags" must be a string'];
+  return patternProblems(p, flags).map((x) => `"pattern": ${x}`);
+}
+function lines(text) {
+  return text.split(/\r?\n/).map((l) => l.length > MAX_LINE_LENGTH ? l.slice(0, MAX_LINE_LENGTH) : l);
+}
+function workloadDocs(file, kinds) {
+  return yamlDocs(file.text).filter((d) => d.kind !== null && kinds.has(d.kind));
+}
+var DEFAULT_MOVING_TAGS = ["latest", "main", "master", "stable", "edge", "nightly"];
+var DEFAULT_FOLDER_PREFIX = "dk-";
+var DRIVER_ENGINE = {
+  pg: "postgres",
+  postgres: "postgres",
+  sqlite3: "sqlite",
+  "better-sqlite3": "sqlite",
+  "@libsql/client": "sqlite",
+  mysql: "mysql",
+  mysql2: "mysql",
+  mariadb: "mysql",
+  mongodb: "mongodb",
+  mongoose: "mongodb",
+  mssql: "mssql",
+  oracledb: "oracle"
+};
+var ENGINE_ALIAS = { postgresql: "postgres", mongo: "mongodb", sqlite3: "sqlite" };
+var DEPENDENCY_FIELDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
+var LOCKFILE_BY_MANAGER = {
+  npm: ["package-lock.json", "npm-shrinkwrap.json"],
+  yarn: ["yarn.lock"],
+  pnpm: ["pnpm-lock.yaml"],
+  bun: ["bun.lock", "bun.lockb"]
+};
+var ALL_LOCKFILES = [...new Set(Object.values(LOCKFILE_BY_MANAGER).flat())];
+var FILE_DATABASE = /\.(?:db|sqlite)$/;
+function stackFiles(dir) {
+  return [`${dir}/package.json`, `${dir}/{${ALL_LOCKFILES.join(",")}}`, `${dir}/*.db`, `${dir}/*.sqlite`];
+}
+function stackGlobs(folderPrefix) {
+  return stackFiles(`**/${folderPrefix}*/**`);
+}
+var STACK_FOLDER_PATHS = stackFiles("**");
+function textProblem(params, key) {
+  const v = params[key];
+  return typeof v === "string" && v.length > 0 && v.length <= 200 ? [] : [`"${key}" must be a short string`];
+}
+var CATALOG = {
+  "dockerfile.from_digest": {
+    id: "dockerfile.from_digest",
+    scope: "file",
+    title: "Base images pinned by digest",
+    summary: "Every FROM line names its image with @sha256:<digest>.",
+    paths: DOCKERFILES,
+    exclude: [],
+    params: [],
+    validate: () => [],
+    runFile(file) {
+      const froms = fromLines(dockerInstructions(file.text));
+      const aliases = new Set;
+      const hits = [];
+      for (const f of froms) {
+        const image = f.image;
+        const isStage = aliases.has(image.toLowerCase());
+        if (f.alias)
+          aliases.add(f.alias.toLowerCase());
+        if (isStage || image === "" || image.toLowerCase() === "scratch" || image.includes("$"))
+          continue;
+        if (!/@sha256:[0-9a-f]{64}\b/.test(image))
+          hits.push({ path: file.path, line: f.line, detail: `FROM ${image} is not pinned by digest` });
+      }
+      return hits;
+    }
+  },
+  "dockerfile.numeric_user": {
+    id: "dockerfile.numeric_user",
+    scope: "file",
+    title: "Image runs as a numeric non-root user",
+    summary: "The final stage sets USER to a numeric UID that is not 0.",
+    paths: DOCKERFILES,
+    exclude: [],
+    params: [],
+    validate: () => [],
+    runFile(file) {
+      const ins = dockerInstructions(file.text);
+      let lastFrom = -1;
+      for (let i = 0;i < ins.length; i++)
+        if (ins[i].op === "FROM")
+          lastFrom = i;
+      if (lastFrom === -1)
+        return [];
+      const users = ins.slice(lastFrom).filter((x) => x.op === "USER");
+      const last = users[users.length - 1];
+      if (!last)
+        return [{ path: file.path, line: ins[lastFrom].line, detail: "the final stage sets no USER, so it runs as root" }];
+      const uid = last.args.split(":")[0].trim();
+      if (!/^\d+$/.test(uid))
+        return [{ path: file.path, line: last.line, detail: `USER ${last.args} is not a numeric UID` }];
+      if (Number(uid) === 0)
+        return [{ path: file.path, line: last.line, detail: "USER 0 is root" }];
+      return [];
+    }
+  },
+  "image.no_moving_tag": {
+    id: "image.no_moving_tag",
+    scope: "file",
+    title: "No moving image tags",
+    summary: "No image is referenced by a tag that moves, such as latest, or by no tag at all.",
+    paths: [...YAML, ...DOCKERFILES],
+    exclude: [],
+    params: [{ name: "tags", kind: "strings", hint: "Tags that move. Default: latest, main, master, stable, edge, nightly." }],
+    validate: (p) => listProblems(p, "tags"),
+    runFile(file, params) {
+      const moving = new Set((stringList(params, "tags") ?? DEFAULT_MOVING_TAGS).map((t) => t.toLowerCase()));
+      const hits = [];
+      const judge = (ref, line) => {
+        if (ref === "" || ref.includes("{{") || ref.includes("$"))
+          return;
+        const t = imageTag(ref);
+        if (t.digest)
+          return;
+        if (moving.has(t.tag.toLowerCase()))
+          hits.push({ path: file.path, line, detail: t.implicit ? `image ${ref} has no tag, which means latest` : `image ${ref} uses the moving tag "${t.tag}"` });
+      };
+      const isDocker = matchAny(DOCKERFILES, file.path);
+      if (isDocker) {
+        const ins = dockerInstructions(file.text);
+        const aliases = new Set;
+        for (const f of fromLines(ins)) {
+          const stage = aliases.has(f.image.toLowerCase());
+          if (f.alias)
+            aliases.add(f.alias.toLowerCase());
+          if (!stage && f.image.toLowerCase() !== "scratch")
+            judge(f.image, f.line);
+        }
+        return hits;
+      }
+      const ls = lines(file.text);
+      for (let i = 0;i < ls.length; i++) {
+        const l = ls[i];
+        const img = /^\s*(?:-\s+)?image:\s*["']?([^"'\s#]+)/.exec(l);
+        if (img)
+          judge(img[1], i + 1);
+        const tag = /^\s*tag:\s*["']?([^"'\s#]+)/.exec(l);
+        if (tag && moving.has(tag[1].toLowerCase()))
+          hits.push({ path: file.path, line: i + 1, detail: `tag: ${tag[1]} is a moving tag` });
+      }
+      return hits;
+    }
+  },
+  "k8s.probes": {
+    id: "k8s.probes",
+    scope: "file",
+    title: "Health probes on long-running workloads",
+    summary: "Every Deployment, StatefulSet and DaemonSet sets the required probes. Jobs are exempt.",
+    paths: YAML,
+    exclude: [],
+    params: [{ name: "require", kind: "strings", hint: "Default: readinessProbe, livenessProbe, startupProbe." }],
+    validate: (p) => listProblems(p, "require"),
+    runFile(file, params) {
+      const need = stringList(params, "require") ?? ["readinessProbe", "livenessProbe", "startupProbe"];
+      const hits = [];
+      for (const d of workloadDocs(file, LONG_RUNNING)) {
+        const missing = need.filter((k) => !d.text.includes(k));
+        if (missing.length > 0)
+          hits.push({ path: file.path, line: d.kindLine, detail: `${d.kind} has no ${missing.join(", ")}` });
+      }
+      return hits;
+    }
+  },
+  "k8s.resources": {
+    id: "k8s.resources",
+    scope: "file",
+    title: "Resource requests and memory limit",
+    summary: "Every workload declares requests.cpu, requests.memory and limits.memory.",
+    paths: YAML,
+    exclude: [],
+    params: [],
+    validate: () => [],
+    runFile(file) {
+      const hits = [];
+      for (const d of workloadDocs(file, WORKLOADS)) {
+        if (templatedKey(d, "resources"))
+          continue;
+        if (!/^\s*resources:/m.test(d.text)) {
+          hits.push({ path: file.path, line: d.kindLine, detail: `${d.kind} declares no resources` });
+          continue;
+        }
+        const missing = [];
+        const requests = /^\s*requests:/m.test(d.text);
+        const limits = /^\s*limits:/m.test(d.text);
+        const memories = (d.text.match(/^\s*memory:/gm) ?? []).length;
+        if (!requests)
+          missing.push("requests.cpu", "requests.memory");
+        else if (!/^\s*cpu:/m.test(d.text))
+          missing.push("requests.cpu");
+        if (!limits)
+          missing.push("limits.memory");
+        if (requests && limits && memories < 2)
+          missing.push("requests.memory or limits.memory");
+        if (requests && !limits && memories < 1)
+          missing.push("requests.memory");
+        if (missing.length > 0)
+          hits.push({ path: file.path, line: lineIn(d, /^\s*resources:/) ?? d.kindLine, detail: `${d.kind} resources miss ${missing.join(", ")}` });
+      }
+      return hits;
+    }
+  },
+  "k8s.security_context": {
+    id: "k8s.security_context",
+    scope: "file",
+    title: "Locked-down security context",
+    summary: "Workloads run as non-root, drop ALL capabilities, use a read-only root filesystem, and never ask for privileged mode or host namespaces.",
+    paths: YAML,
+    exclude: [],
+    params: [],
+    validate: () => [],
+    runFile(file) {
+      const hits = [];
+      for (const d of workloadDocs(file, WORKLOADS)) {
+        const bad = [
+          [/^\s*privileged:\s*true\b/, "privileged: true"],
+          [/^\s*host(?:Network|PID|IPC):\s*true\b/, "a host namespace"],
+          [/^\s*runAsUser:\s*0\b/, "runAsUser: 0"],
+          [/^\s*allowPrivilegeEscalation:\s*true\b/, "allowPrivilegeEscalation: true"]
+        ];
+        for (const [re, what] of bad) {
+          const line = lineIn(d, re);
+          if (line !== null)
+            hits.push({ path: file.path, line, detail: `${d.kind} asks for ${what}` });
+        }
+        if (templatedKey(d, "securityContext"))
+          continue;
+        const missing = [];
+        if (!/^\s*runAsNonRoot:\s*true\b/m.test(d.text))
+          missing.push("runAsNonRoot: true");
+        if (!/^\s*readOnlyRootFilesystem:\s*true\b/m.test(d.text))
+          missing.push("readOnlyRootFilesystem: true");
+        if (!/drop:[^\n]*\bALL\b|drop:\s*\n\s*-\s*["']?ALL\b/.test(d.text))
+          missing.push("capabilities.drop: [ALL]");
+        if (missing.length > 0)
+          hits.push({ path: file.path, line: d.kindLine, detail: `${d.kind} does not set ${missing.join(", ")}` });
+      }
+      return hits;
+    }
+  },
+  "k8s.rbac_no_wildcards": {
+    id: "k8s.rbac_no_wildcards",
+    scope: "file",
+    title: "No RBAC wildcards or cluster-admin",
+    summary: 'No Role or ClusterRole grants "*", and nothing binds cluster-admin.',
+    paths: YAML,
+    exclude: [],
+    params: [],
+    validate: () => [],
+    runFile(file) {
+      const hits = [];
+      for (const d of yamlDocs(file.text)) {
+        if (d.kind === "Role" || d.kind === "ClusterRole") {
+          const ls = d.text.split(`
+`);
+          for (let i = 0;i < ls.length; i++) {
+            if (/["']\*["']/.test(ls[i]))
+              hits.push({ path: file.path, line: d.startLine + i, detail: `${d.kind} grants the wildcard "*"` });
+          }
+        }
+        if (d.kind === "RoleBinding" || d.kind === "ClusterRoleBinding") {
+          const line = lineIn(d, /^\s*name:\s*["']?cluster-admin["']?\s*$/);
+          if (line !== null)
+            hits.push({ path: file.path, line, detail: `${d.kind} binds cluster-admin` });
+        }
+      }
+      return hits;
+    }
+  },
+  "k8s.labels": {
+    id: "k8s.labels",
+    scope: "file",
+    title: "Required labels on workloads",
+    summary: "Every workload carries each named label or annotation key.",
+    paths: YAML,
+    exclude: [],
+    params: [{ name: "required", kind: "strings", hint: "Label or annotation keys, for example app.dkod.ai/owner." }],
+    validate: (p) => listProblems(p, "required", { required: true }),
+    runFile(file, params) {
+      const need = stringList(params, "required") ?? [];
+      const hits = [];
+      for (const d of workloadDocs(file, WORKLOADS)) {
+        const missing = need.filter((k) => !d.text.includes(k));
+        if (missing.length > 0)
+          hits.push({ path: file.path, line: d.kindLine, detail: `${d.kind} has no ${missing.join(", ")}` });
+      }
+      return hits;
+    }
+  },
+  "file.exists": {
+    id: "file.exists",
+    scope: "tree",
+    title: "A required file exists",
+    summary: "At least one file matches one of the given paths.",
+    paths: ["**"],
+    exclude: [],
+    params: [{ name: "any_of", kind: "strings", hint: "Paths or globs, for example CODEOWNERS or .github/CODEOWNERS." }],
+    validate: (p) => listProblems(p, "any_of", { required: true }),
+    runTree(files, params) {
+      const want = stringList(params, "any_of") ?? [];
+      if (files.some((f) => matchAny(want, f.path)))
+        return [];
+      return [{ path: null, line: null, detail: `none of ${want.join(", ")} exists` }];
+    }
+  },
+  "content.forbid": {
+    id: "content.forbid",
+    scope: "file",
+    title: "Forbidden text",
+    summary: "No line in the matched files matches the pattern.",
+    paths: ["**"],
+    exclude: [],
+    params: [
+      { name: "pattern", kind: "string", hint: "A regular expression, matched line by line." },
+      { name: "flags", kind: "string", hint: 'Optional. "i" ignores case.' }
+    ],
+    validate: patternParam,
+    runFile(file, params) {
+      const re = compileSafe(String(params.pattern), typeof params.flags === "string" ? params.flags : "");
+      if (re === null)
+        return [];
+      const hits = [];
+      const ls = lines(file.text);
+      for (let i = 0;i < ls.length; i++)
+        if (re.test(ls[i]))
+          hits.push({ path: file.path, line: i + 1, detail: "a forbidden pattern matches here" });
+      return hits;
+    }
+  },
+  "content.require": {
+    id: "content.require",
+    scope: "file",
+    title: "Required text",
+    summary: "Each matched file has at least one line that matches the pattern.",
+    paths: ["**"],
+    exclude: [],
+    params: [
+      { name: "pattern", kind: "string", hint: "A regular expression, matched line by line." },
+      { name: "flags", kind: "string", hint: 'Optional. "i" ignores case.' }
+    ],
+    validate: patternParam,
+    runFile(file, params) {
+      const re = compileSafe(String(params.pattern), typeof params.flags === "string" ? params.flags : "");
+      if (re === null)
+        return [];
+      return lines(file.text).some((l) => re.test(l)) ? [] : [{ path: file.path, line: null, detail: "the required pattern is not in this file" }];
+    }
+  },
+  "secrets.none": {
+    id: "secrets.none",
+    scope: "file",
+    title: "No secret values",
+    summary: "DKOD's secret detector finds no credential value. Test fixtures are skipped.",
+    paths: ["**"],
+    exclude: TESTS,
+    params: [],
+    validate: () => [],
+    needsSecretScan: true,
+    runFile(file, _params, opts) {
+      if (!opts.secretScan)
+        return [];
+      return opts.secretScan(file).map((s) => ({ path: file.path, line: s.line, detail: `a ${s.kind} value is written here` }));
+    }
+  },
+  "tls.no_insecure": {
+    id: "tls.no_insecure",
+    scope: "file",
+    title: "TLS verification stays on",
+    summary: "No code turns certificate checks off, and no URL uses plain http:// except to loopback.",
+    paths: [...SOURCE, ...CONFIG],
+    exclude: [...TESTS, "*.md", "*.svg", "*.lock", "bun.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"],
+    params: [{ name: "allow_http_hosts", kind: "strings", hint: "Hosts that may use http://. Loopback is always allowed." }],
+    validate: (p) => listProblems(p, "allow_http_hosts"),
+    runFile(file, params) {
+      const allow = new Set(["localhost", "127.0.0.1", "0.0.0.0", "[::1]", "www.w3.org", "json-schema.org", "schemas.xmlsoap.org", "schemas.microsoft.com", ...stringList(params, "allow_http_hosts") ?? []]);
+      const off = [
+        [/rejectUnauthorized\s*:\s*false\b/, "rejectUnauthorized: false turns certificate checks off"],
+        [/NODE_TLS_REJECT_UNAUTHORIZED\s*[=:]\s*["']?0\b/, "NODE_TLS_REJECT_UNAUTHORIZED=0 turns certificate checks off"],
+        [/InsecureSkipVerify\s*:\s*true\b/, "InsecureSkipVerify: true turns certificate checks off"],
+        [/\bverify\s*=\s*False\b/, "verify=False turns certificate checks off"],
+        [/insecure-skip-tls-verify\s*[:=]\s*true\b/, "insecure-skip-tls-verify turns certificate checks off"],
+        [/\bsslmode\s*=\s*disable\b/, "sslmode=disable sends database traffic without TLS"]
+      ];
+      const hits = [];
+      const ls = lines(file.text);
+      for (let i = 0;i < ls.length; i++) {
+        const l = ls[i];
+        for (const [re, what] of off)
+          if (re.test(l))
+            hits.push({ path: file.path, line: i + 1, detail: what });
+        const urls = l.matchAll(/\bhttp:\/\/([^/\s"'`:]+)/g);
+        for (const m of urls) {
+          const host = m[1].toLowerCase();
+          if (!allow.has(host) && !host.endsWith(".localhost"))
+            hits.push({ path: file.path, line: i + 1, detail: `http://${host} is plain HTTP` });
+        }
+      }
+      return hits;
+    }
+  },
+  "version.semver": {
+    id: "version.semver",
+    scope: "file",
+    title: "MAJOR.MINOR.PATCH versions",
+    summary: "package.json and Chart.yaml carry a version of the form MAJOR.MINOR.PATCH.",
+    paths: ["package.json", "Chart.yaml"],
+    exclude: [],
+    params: [],
+    validate: () => [],
+    runFile(file) {
+      const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+      const base = file.path.split("/").pop() ?? file.path;
+      if (base === "package.json") {
+        let doc;
+        try {
+          doc = JSON.parse(file.text);
+        } catch {
+          return [];
+        }
+        const v = typeof doc === "object" && doc !== null ? doc.version : undefined;
+        const line = lines(file.text).findIndex((l) => /"version"\s*:/.test(l)) + 1 || null;
+        if (typeof v !== "string")
+          return [{ path: file.path, line: null, detail: "package.json has no version" }];
+        return semver.test(v) ? [] : [{ path: file.path, line, detail: `version "${v}" is not MAJOR.MINOR.PATCH` }];
+      }
+      const ls = lines(file.text);
+      const at = ls.findIndex((l) => /^version:/.test(l));
+      if (at === -1)
+        return [{ path: file.path, line: null, detail: "Chart.yaml has no version" }];
+      const v = ls[at].replace(/^version:\s*/, "").replace(/\s+#.*$/, "").trim().replace(/^["']|["']$/g, "");
+      return semver.test(v) ? [] : [{ path: file.path, line: at + 1, detail: `version "${v}" is not MAJOR.MINOR.PATCH` }];
+    }
+  },
+  "migration.stack": {
+    id: "migration.stack",
+    scope: "file",
+    title: "A dk- app uses only the stack in migration.yaml",
+    summary: "Inside a dk- folder: no denied dependency, the stack's package manager and database only, and no file database.",
+    paths: stackGlobs(DEFAULT_FOLDER_PREFIX),
+    folderPaths: STACK_FOLDER_PATHS,
+    pathsFor: (params) => stackGlobs(typeof params.folder_prefix === "string" && params.folder_prefix !== "" ? params.folder_prefix : DEFAULT_FOLDER_PREFIX),
+    byName: true,
+    textPaths: ["**/package.json"],
+    exclude: [],
+    params: [
+      { name: "folder_prefix", kind: "string", hint: "The prefix of a migration app folder, from migration.yaml." },
+      { name: "deny_dependencies", kind: "strings", hint: "Package names the stack refuses, from migration.yaml." },
+      { name: "database_engine", kind: "string", hint: "The database engine the stack uses, for example postgres." },
+      { name: "package_manager", kind: "string", hint: "The one package manager the stack uses, for example bun." }
+    ],
+    validate: (p) => [
+      ...p.folder_prefix === undefined ? [] : textProblem(p, "folder_prefix"),
+      ...listProblems(p, "deny_dependencies"),
+      ...textProblem(p, "database_engine"),
+      ...textProblem(p, "package_manager")
+    ],
+    runFile(file, params) {
+      const base = file.path.split("/").pop() ?? file.path;
+      const deny = new Set(stringList(params, "deny_dependencies") ?? []);
+      const engine = typeof params.database_engine === "string" ? params.database_engine.trim().toLowerCase() : "";
+      const stack = ENGINE_ALIAS[engine] ?? engine;
+      const manager = typeof params.package_manager === "string" ? params.package_manager.trim().toLowerCase() : "";
+      if (ALL_LOCKFILES.includes(base) && !(LOCKFILE_BY_MANAGER[manager] ?? []).includes(base))
+        return [{ path: file.path, line: null, detail: `${base} belongs to a package manager other than ${manager}` }];
+      if (FILE_DATABASE.test(base))
+        return [{ path: file.path, line: null, detail: `${base} is a file database; the stack uses ${engine}` }];
+      if (base !== "package.json")
+        return [];
+      let doc;
+      try {
+        doc = JSON.parse(file.text);
+      } catch {
+        return [];
+      }
+      const root = typeof doc === "object" && doc !== null && !Array.isArray(doc) ? doc : {};
+      const lineOf = (key, from = 0) => {
+        const at = file.text.indexOf(`"${key}"`, from);
+        return at === -1 ? null : file.text.slice(0, at).split(/\r?\n/).length;
+      };
+      const hits = [];
+      for (const field of DEPENDENCY_FIELDS) {
+        const deps = root[field];
+        if (typeof deps !== "object" || deps === null || Array.isArray(deps))
+          continue;
+        const fieldAt = Math.max(0, file.text.indexOf(`"${field}"`));
+        for (const name of Object.keys(deps)) {
+          const driver = DRIVER_ENGINE[name];
+          if (deny.has(name) || driver !== undefined && driver !== stack)
+            hits.push({ path: file.path, line: lineOf(name, fieldAt), detail: `${name} is not in the stack` });
+        }
+      }
+      const pm = typeof root.packageManager === "string" ? root.packageManager : "";
+      if (pm !== "" && manager !== "" && pm.replace(/@.*$/, "").toLowerCase() !== manager)
+        hits.push({ path: file.path, line: lineOf("packageManager"), detail: `packageManager is not ${manager}` });
+      return hits;
+    }
+  },
+  "commit.conventional": {
+    id: "commit.conventional",
+    scope: "commit",
+    title: "Conventional commit subjects",
+    summary: "Each commit subject reads type(scope): summary, and a breaking change carries ! and a BREAKING CHANGE: footer.",
+    paths: [],
+    exclude: [],
+    params: [{ name: "types", kind: "strings", hint: "Allowed types. Default: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert." }],
+    validate: (p) => listProblems(p, "types"),
+    runCommit(message, params) {
+      const types = stringList(params, "types") ?? ["feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert"];
+      const subject = (message.split(/\r?\n/)[0] ?? "").trim();
+      if (/^Merge /.test(subject) || /^Revert "/.test(subject))
+        return [];
+      const m = /^([a-z]+)(\([^()\s]+\))?(!)?: \S/.exec(subject);
+      if (!m)
+        return [{ path: null, line: 1, detail: `"${subject.slice(0, 80)}" does not read type(scope): summary` }];
+      if (!types.includes(m[1]))
+        return [{ path: null, line: 1, detail: `"${m[1]}" is not one of the allowed types (${types.join(", ")})` }];
+      if (m[3] === "!" && !/^BREAKING CHANGE: \S/m.test(message))
+        return [{ path: null, line: 1, detail: "a breaking change (!) needs a BREAKING CHANGE: footer" }];
+      return [];
+    }
+  }
+};
+
+var K = new Uint32Array([
+  1116352408,
+  1899447441,
+  3049323471,
+  3921009573,
+  961987163,
+  1508970993,
+  2453635748,
+  2870763221,
+  3624381080,
+  310598401,
+  607225278,
+  1426881987,
+  1925078388,
+  2162078206,
+  2614888103,
+  3248222580,
+  3835390401,
+  4022224774,
+  264347078,
+  604807628,
+  770255983,
+  1249150122,
+  1555081692,
+  1996064986,
+  2554220882,
+  2821834349,
+  2952996808,
+  3210313671,
+  3336571891,
+  3584528711,
+  113926993,
+  338241895,
+  666307205,
+  773529912,
+  1294757372,
+  1396182291,
+  1695183700,
+  1986661051,
+  2177026350,
+  2456956037,
+  2730485921,
+  2820302411,
+  3259730800,
+  3345764771,
+  3516065817,
+  3600352804,
+  4094571909,
+  275423344,
+  430227734,
+  506948616,
+  659060556,
+  883997877,
+  958139571,
+  1322822218,
+  1537002063,
+  1747873779,
+  1955562222,
+  2024104815,
+  2227730452,
+  2361852424,
+  2428436474,
+  2756734187,
+  3204031479,
+  3329325298
+]);
+
+var IGNORED_BASENAMES = new Set(["readme.md", "license", "license.md", "licence", "licence.md"]);
+var MAX_ASSET_BYTES = 512 * 1024;
+function splitFrontMatter(source) {
+  const text = source.startsWith("\uFEFF") ? source.slice(1) : source;
+  if (!/^---\r?\n/.test(text))
+    return { front: null, body: text };
+  const end = text.indexOf(`
+---`, 3);
+  if (end === -1)
+    return { front: null, body: text };
+  const after = text.slice(end + 4);
+  if (!/^\r?\n/.test(after) && after !== "")
+    return { front: null, body: text };
+  const body = after.replace(/^\r?\n/, "").replace(/^\r?\n/, "");
+  return { front: text.slice(4, end), body };
+}
+
+import { randomUUID } from "node:crypto";
+
+class TemplateError extends Error {
+  detail;
+  constructor(message, detail = "") {
+    super(message);
+    this.name = "TemplateError";
+    this.detail = detail;
+  }
+}
+var NAMESPACES = new Set(["app", "policy", "answers", "dkod"]);
+var PATH_RE = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/;
+var TOKEN_RE = /\{\{([^{}]*)\}\}/g;
+var EACH_OPEN_RE = /^#each\s+(.+)$/;
+var IF_OPEN_RE = /^#if\s+(.+)$/;
+function rootOf(path) {
+  const dot = path.indexOf(".");
+  return dot === -1 ? path : path.slice(0, dot);
+}
+function isOurPath(path) {
+  if (path === "@index")
+    return true;
+  if (!PATH_RE.test(path))
+    return false;
+  const root = rootOf(path);
+  return NAMESPACES.has(root) || root === "this";
+}
+function isLoopBound(path) {
+  return path === "@index" || path === "this" || path.startsWith("this.");
+}
+function resolvePath(ctx, path) {
+  let cursor = ctx;
+  for (const segment of path.split(".")) {
+    if (cursor === null || typeof cursor !== "object")
+      return;
+    if (!Object.prototype.hasOwnProperty.call(cursor, segment))
+      return;
+    cursor = cursor[segment];
+  }
+  return cursor;
+}
+function truthy(value) {
+  if (value === undefined || value === null || value === false)
+    return false;
+  if (value === "" || value === 0)
+    return false;
+  if (Array.isArray(value))
+    return value.length > 0;
+  return Boolean(value);
+}
+function parse(source) {
+  const root = [];
+  const stack = [];
+  const target = () => {
+    const top = stack[stack.length - 1];
+    if (!top)
+      return root;
+    return top.otherwise ?? top.body;
+  };
+  const insideEach = () => stack.some((frame) => frame.kind === "each");
+  const assertBlockPath = (path, raw) => {
+    if (!isOurPath(path)) {
+      throw new TemplateError(`${raw} names ${path}, which is outside the app, policy, answers and dkod namespaces`, raw);
+    }
+    if (isLoopBound(path) && !insideEach()) {
+      throw new TemplateError(`${raw} uses a loop binding outside an {{#each}}`, raw);
+    }
+  };
+  TOKEN_RE.lastIndex = 0;
+  let cut = 0;
+  let match;
+  while ((match = TOKEN_RE.exec(source)) !== null) {
+    if (match.index > cut)
+      target().push({ kind: "text", text: source.slice(cut, match.index) });
+    cut = TOKEN_RE.lastIndex;
+    const raw = match[0];
+    const body = (match[1] ?? "").trim();
+    const each = EACH_OPEN_RE.exec(body);
+    if (each) {
+      const path = each[1].trim();
+      assertBlockPath(path, raw);
+      if (stack.length >= 6)
+        throw new TemplateError(`${raw} nests more than six blocks deep`, raw);
+      stack.push({ kind: "each", path, body: [], otherwise: null, raw });
+      continue;
+    }
+    const conditional = IF_OPEN_RE.exec(body);
+    if (conditional) {
+      const path = conditional[1].trim();
+      assertBlockPath(path, raw);
+      if (stack.length >= 6)
+        throw new TemplateError(`${raw} nests more than six blocks deep`, raw);
+      stack.push({ kind: "if", path, body: [], otherwise: null, raw });
+      continue;
+    }
+    if (body === "else") {
+      const top = stack[stack.length - 1];
+      if (!top || top.kind !== "if")
+        throw new TemplateError("{{else}} sits outside an {{#if}}", raw);
+      if (top.otherwise)
+        throw new TemplateError("an {{#if}} has two {{else}} branches", raw);
+      top.otherwise = [];
+      continue;
+    }
+    if (body === "/each" || body === "/if") {
+      const closes = body === "/each" ? "each" : "if";
+      const top = stack.pop();
+      if (!top)
+        throw new TemplateError(`${raw} closes a block that was never opened`, raw);
+      if (top.kind !== closes)
+        throw new TemplateError(`${top.raw} is closed by ${raw}`, raw);
+      target().push(top.kind === "each" ? { kind: "each", path: top.path, body: top.body } : { kind: "if", path: top.path, then: top.body, otherwise: top.otherwise ?? [] });
+      continue;
+    }
+    if (isLoopBound(body) && !insideEach()) {
+      throw new TemplateError(`${raw} is only meaningful inside an {{#each}}`, raw);
+    }
+    if (!isOurPath(body)) {
+      target().push({ kind: "text", text: raw });
+      continue;
+    }
+    target().push({ kind: "scalar", path: body, raw });
+  }
+  if (cut < source.length)
+    target().push({ kind: "text", text: source.slice(cut) });
+  const unclosed = stack[stack.length - 1];
+  if (unclosed)
+    throw new TemplateError(`${unclosed.raw} is never closed`, unclosed.raw);
+  return root;
+}
+function scalarText(value) {
+  return typeof value === "string" ? value : String(value);
+}
+function renderNodes(nodes, scope, out, gaps) {
+  for (const node of nodes) {
+    if (node.kind === "text") {
+      out.push(node.text);
+      continue;
+    }
+    if (node.kind === "scalar") {
+      const value = resolvePath(scope, node.path);
+      if (value === undefined || value === null) {
+        if (!gaps.includes(node.path))
+          gaps.push(node.path);
+        out.push(node.raw);
+        continue;
+      }
+      if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+        const shape = Array.isArray(value) ? "a list" : typeof value === "object" ? "a mapping" : typeof value;
+        throw new TemplateError(`${node.raw} resolves to ${shape}; use {{#each}} or a scalar path`, node.raw);
+      }
+      out.push(scalarText(value));
+      continue;
+    }
+    if (node.kind === "each") {
+      const value = resolvePath(scope, node.path);
+      if (!Array.isArray(value))
+        continue;
+      value.forEach((item, index) => {
+        renderNodes(node.body, { ...scope, this: item, "@index": index }, out, gaps);
+      });
+      continue;
+    }
+    renderNodes(truthy(resolvePath(scope, node.path)) ? node.then : node.otherwise, scope, out, gaps);
+  }
+}
+function render(source, ctx) {
+  const out = [];
+  const gaps = [];
+  renderNodes(parse(source), ctx, out, gaps);
+  return { text: out.join(""), gaps: gaps.map((path) => ({ path })) };
+}
+
+var INPUT_TYPES = new Set(["text", "number", "choice", "boolean", "list"]);
+var MAX_REPO_PATH = 256;
+function safeRepoPath(p) {
+  if (typeof p !== "string")
+    return false;
+  if (p.trim() === "")
+    return false;
+  if (p.length > MAX_REPO_PATH)
+    return false;
+  if (p.startsWith("/"))
+    return false;
+  if (p.includes("\\"))
+    return false;
+  if (/[\n\r\u2028\u2029\0]/.test(p))
+    return false;
+  return !p.split("/").some((segment) => segment === "..");
+}
+var FENCE_OPEN_RE = /^(`{3,})([^\n]*)$/;
+var PATH_ATTR_RE = /(?:^|\s)path=(?:"([^"]+)"|'([^']+)'|((?:\{\{[^{}]*\}\}|\S)+))/;
+function scanFences(body, lineOffset) {
+  const lines = body.split(`
+`);
+  const blocks = [];
+  const errors = [];
+  const prose = [];
+  const seen = new Set;
+  let i = 0;
+  while (i < lines.length) {
+    const start = i;
+    const line = lines[i].replace(/\r$/, "");
+    const open = FENCE_OPEN_RE.exec(line);
+    if (!open) {
+      prose.push(lines[i]);
+      i += 1;
+      continue;
+    }
+    const ticks = open[1].length;
+    const info = (open[2] ?? "").trim();
+    const closeRe = new RegExp("^`{" + String(ticks) + ",}[ \\t]*$");
+    let end = i + 1;
+    while (end < lines.length && !closeRe.test(lines[end].replace(/\r$/, "")))
+      end += 1;
+    if (end >= lines.length) {
+      errors.push(`unclosed fence opened at line ${String(lineOffset + start + 1)}`);
+      break;
+    }
+    const inner = lines.slice(start + 1, end);
+    const attr = PATH_ATTR_RE.exec(info);
+    const raw = attr ? (attr[1] ?? attr[2] ?? attr[3] ?? "").trim() : "";
+    i = end + 1;
+    if (raw === "") {
+      prose.push(...lines.slice(start, end + 1));
+      continue;
+    }
+    const firstWord = info.split(/\s+/)[0] ?? "";
+    const lang = firstWord.includes("=") ? "" : firstWord;
+    const literal = raw.replace(/\{\{[^{}]*\}\}/g, "x");
+    if (!safeRepoPath(literal)) {
+      errors.push(`unsafe path=${raw} in the fence at line ${String(lineOffset + start + 1)}`);
+      continue;
+    }
+    if (seen.has(raw)) {
+      errors.push(`path=${raw} is written by more than one block`);
+      continue;
+    }
+    seen.add(raw);
+    blocks.push({ path: raw, lang, body: inner.length > 0 ? inner.join(`
+`) + `
+` : "" });
+  }
+  return {
+    blocks,
+    errors,
+    prose: prose.join(`
+`).replace(/\n{3,}/g, `
+
+`).trim()
+  };
+}
+function isPlainObject(value) {
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+function shieldValues(ctx) {
+  const values = [];
+  const nonce = randomUUID().replace(/-/g, "");
+  const wrap = (value) => {
+    if (typeof value === "string") {
+      if (value === "")
+        return value;
+      values.push(value);
+      return `dkodshield${nonce}x${String(values.length - 1)}x`;
+    }
+    if (Array.isArray(value))
+      return value.map(wrap);
+    if (typeof value === "object" && value !== null && isPlainObject(value)) {
+      const out = {};
+      for (const [key, member] of Object.entries(value))
+        out[key] = wrap(member);
+      return out;
+    }
+    return value;
+  };
+  const marker = new RegExp(`dkodshield${nonce}x(\\d+)x`, "g");
+  return {
+    ctx: wrap(ctx),
+    restore: (text) => text.replace(marker, (whole, index) => values[Number(index)] ?? whole)
+  };
+}
+function renderTemplateFiles(source, ctx) {
+  const { body } = splitFrontMatter(source);
+  const shield = shieldValues(ctx);
+  let rendered;
+  let gaps;
+  try {
+    const result = render(body, shield.ctx);
+    rendered = result.text;
+    gaps = result.gaps;
+  } catch (err) {
+    if (err instanceof TemplateError)
+      return { files: [], gaps: [], errors: [err.message] };
+    throw err;
+  }
+  const scan = scanFences(rendered, 0);
+  const errors = scan.errors.map(shield.restore);
+  const files = [];
+  const seen = new Set;
+  for (const block of scan.blocks) {
+    const path = shield.restore(block.path);
+    if (!safeRepoPath(path)) {
+      errors.push(`path=${path} escapes the repository once its placeholders are resolved`);
+      continue;
+    }
+    if (seen.has(path)) {
+      errors.push(`path=${path} is written by more than one block`);
+      continue;
+    }
+    seen.add(path);
+    files.push({ path, lang: shield.restore(block.lang), content: shield.restore(block.body) });
+  }
+  if (gaps.length > 0)
+    return { files: [], gaps, errors };
+  return { files, gaps, errors };
+}
+
 var join2 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+var NOT_WRITTEN = new Set(["values.yaml", "README.md"]);
+var ROOTS = ["app", "answers", "policy", "dkod"];
+var SOURCE_KEYS = ["package_manager", "install_command", "lockfile", "run_command", "build_command", "start_command", "lockfile_command", "bun", "fullstack", "app_start", "static_dir", "app_port"];
+var UNWRITTEN_KEYS = ["org", "image_repository", "app_commit_sha", "governance_repo", "governance_sha"];
+var isRec2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var json = (text) => {
+  try {
+    return JSON.parse(text ?? "");
+  } catch {
+    return null;
+  }
+};
+function templateTokenLine(text) {
+  const token = /\{\{\s*(?:#(?:if|each)\b|\/(?:if|each)\s*\}\}|else\s*\}\}|(?:dkod|answers|app|policy)\.[A-Za-z_])/;
+  const lines = text.split(/\r?\n/);
+  const at = lines.findIndex((line) => token.test(line));
+  return at === -1 ? null : at + 1;
+}
+function inputDefault(source, key) {
+  const { front } = splitFrontMatter(source);
+  if (front === null)
+    return null;
+  for (const chunk of front.split(/^\s*-\s+key:/m).slice(1)) {
+    if (chunk.split(`
+`)[0].trim().replace(/^["']|["']$/g, "") !== key)
+      continue;
+    const m = /^\s*default:\s*(.+?)\s*$/m.exec(chunk);
+    return m === null ? null : m[1].replace(/^["']|["']$/g, "");
+  }
+  return null;
+}
+var baseName = (folder) => folder.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? folder;
+function contextFor(source, name, tables, values) {
+  const port = inputDefault(source, "port");
+  const given = isRec2(values) ? values : {};
+  const ctx = {
+    app: { slug: name, name },
+    answers: { port: port !== null && /^\d+$/.test(port) ? Number(port) : port ?? undefined, needs_database: tables },
+    policy: {},
+    dkod: {}
+  };
+  for (const root of ROOTS) {
+    const own = given[root];
+    if (isRec2(own))
+      ctx[root] = { ...ctx[root], ...own };
+  }
+  const dkod = ctx.dkod;
+  for (const key of UNWRITTEN_KEYS)
+    if (dkod[key] === undefined)
+      dkod[key] = "";
+  if (ctx.app.template === undefined)
+    ctx.app.template = "";
+  for (const key of SOURCE_KEYS)
+    dkod[key] = key === "bun" || key === "fullstack" ? false : "";
+  return ctx;
+}
+async function render2(args, io) {
+  const force = args.includes("--force");
+  const [templateFile, folder, valuesFile] = args.filter((a) => a !== "--force");
+  if (templateFile === undefined || folder === undefined)
+    return -1;
+  const dir = folder === "" ? io.cwd : folder;
+  const source = io.readFile(templateFile);
+  const fail = (errors, gaps = []) => {
+    io.print(JSON.stringify({ ok: false, written: [], skipped: [], gaps, errors }));
+    return 1;
+  };
+  if (source === null)
+    return fail([`${templateFile}: not found. Save the template's content from dkoder.templates to this file first.`]);
+  let values = {};
+  if (valuesFile !== undefined) {
+    values = json(io.readFile(valuesFile));
+    if (!isRec2(values))
+      return fail([`${valuesFile}: not found or not a JSON object.`]);
+  }
+  const map = json(io.readFile(join2(dir, ".dkod/map/app-map.json")));
+  const tables = isRec2(map) && Array.isArray(map.tables) && map.tables.length > 0;
+  const name = baseName(dir === "." ? io.cwd : dir);
+  const rendered = renderTemplateFiles(source, contextFor(source, name, tables, values));
+  if (rendered.errors.length > 0 || rendered.gaps.length > 0)
+    return fail(rendered.errors, rendered.gaps.map((g) => g.path));
+  const errors = [];
+  const written = [];
+  const skipped = [];
+  const todo = rendered.files.filter((f) => !NOT_WRITTEN.has(f.path));
+  for (const file of todo) {
+    const line = templateTokenLine(file.content);
+    if (line !== null)
+      errors.push(`${file.path}: still has template text at line ${String(line)}.`);
+  }
+  if (errors.length > 0)
+    return fail(errors);
+  for (const file of todo) {
+    const path = join2(dir, file.path);
+    if (!force && io.readFile(path) !== null) {
+      skipped.push(file.path);
+      continue;
+    }
+    io.writeFile(path, file.content);
+    written.push(file.path);
+  }
+  io.print(JSON.stringify({ ok: true, written, skipped, gaps: [], errors: [] }));
+  return 0;
+}
+
+var join3 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var TEST_FILE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
 var TITLE = /\b(?:test|it)(?:\.(?:only|fixme|slow))?\(\s*(["'`])((?:\\.|(?!\1)[^\\])*)\1/g;
-var isRec2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-var list2 = (v) => Array.isArray(v) ? v.filter(isRec2) : [];
+var isRec3 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var list2 = (v) => Array.isArray(v) ? v.filter(isRec3) : [];
 var same = (a, b) => a.trim().replace(/\s+/g, " ").toLowerCase() === b.trim().replace(/\s+/g, " ").toLowerCase();
-var freezePath = (dir) => join2(dir, ".dkod/parity/freeze.json");
+var freezePath = (dir) => join3(dir, ".dkod/parity/freeze.json");
 function testTitles(text) {
   return [...text.matchAll(TITLE)].map((m) => m[2]);
 }
@@ -641,7 +1956,7 @@ function reportTests(text) {
   } catch {
     return null;
   }
-  if (!isRec2(json) || !Array.isArray(json.suites))
+  if (!isRec3(json) || !Array.isArray(json.suites))
     return null;
   const out = [];
   const visit = (suite) => {
@@ -660,7 +1975,7 @@ function reportTests(text) {
   return out;
 }
 function suiteFiles(dir, io) {
-  const files = io.walk(join2(dir, "tests/parity"), ["node_modules"]).map((rel) => `tests/parity/${rel}`);
+  const files = io.walk(join3(dir, "tests/parity"), ["node_modules"]).map((rel) => `tests/parity/${rel}`);
   return files.sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
 }
 function tagsOf(title) {
@@ -686,7 +2001,7 @@ var PACKAGE_FILES = new Set(["package.json", "package-lock.json", "npm-shrinkwra
 async function freeze(folder, reportFile, io) {
   const dir = folder === "" ? io.cwd : folder;
   const packaged = new Set;
-  for (const f of io.walk(join2(dir, "tests/parity"), [])) {
+  for (const f of io.walk(join3(dir, "tests/parity"), [])) {
     const parts = f.split("/");
     const nm = parts.indexOf("node_modules");
     if (nm >= 0)
@@ -697,7 +2012,7 @@ async function freeze(folder, reportFile, io) {
   if (packaged.size > 0) {
     return fail(io, { problems: [...packaged].map((f) => `tests/parity/${f}: a package file or node_modules does not belong in the suite. Keep package.json, the lockfile and node_modules at the dk- folder root, and delete this.`) });
   }
-  if (originalOf(io.readFile(join2(dir, ".dkod/migration.json"))) === null) {
+  if (originalOf(io.readFile(join3(dir, ".dkod/migration.json"))) === null) {
     io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
     return 2;
   }
@@ -705,14 +2020,14 @@ async function freeze(folder, reportFile, io) {
     return fail(io, { problems: ["freeze needs the Playwright JSON report of the run on the original: freeze <folder> <report.json>"] });
   let map;
   try {
-    const parsed = JSON.parse(io.readFile(join2(dir, ".dkod/map/app-map.json")) ?? "");
-    if (!isRec2(parsed))
+    const parsed = JSON.parse(io.readFile(join3(dir, ".dkod/map/app-map.json")) ?? "");
+    if (!isRec3(parsed))
       throw new Error("not an object");
     map = parsed;
   } catch {
     return fail(io, { problems: [".dkod/map/app-map.json: missing or not valid JSON. Do the map step, and run check-map, first."] });
   }
-  const specs = io.walk(join2(dir, "tests/parity"), []).filter((f) => TEST_FILE.test(f));
+  const specs = io.walk(join3(dir, "tests/parity"), []).filter((f) => TEST_FILE.test(f));
   if (specs.length === 0)
     return fail(io, { problems: ["tests/parity: no test file found. Write the parity suite there first."] });
   const reportText = io.readFile(reportFile);
@@ -727,7 +2042,7 @@ async function freeze(folder, reportFile, io) {
   const notRun = [];
   let tagged = 0;
   for (const f of specs) {
-    for (const title of testTitles(io.readFile(join2(dir, `tests/parity/${f}`)) ?? "")) {
+    for (const title of testTitles(io.readFile(join3(dir, `tests/parity/${f}`)) ?? "")) {
       const tags = tagsOf(title);
       if (tags.length === 0)
         continue;
@@ -757,7 +2072,7 @@ async function freeze(folder, reportFile, io) {
     } else if (r.kind === "page" && !got("page").includes(path) && !pages.includes(path))
       pages.push(path);
   }
-  const designFiles = new Set(io.walk(join2(dir, ".dkod/map/design"), []));
+  const designFiles = new Set(io.walk(join3(dir, ".dkod/map/design"), []));
   const design = [];
   for (const p of list2(map.pages)) {
     if (typeof p.path !== "string")
@@ -782,7 +2097,7 @@ async function freeze(folder, reportFile, io) {
     return fail(io, { missing, original_failures, counts: { tests: run.length, original_passed: passed.size, original_failed: original_failures.length } });
   }
   const files = suiteFiles(dir, io);
-  const sha256 = io.sha256(files.map((f) => join2(dir, f)));
+  const sha256 = io.sha256(files.map((f) => join3(dir, f)));
   const record = { sha256, files, baseline: { tests: run.map((t) => t.title), passed: passed.size }, frozenAt: new Date().toISOString() };
   io.writeFile(freezePath(dir), `${JSON.stringify(record, null, 2)}
 `);
@@ -791,7 +2106,7 @@ async function freeze(folder, reportFile, io) {
 }
 async function unfreeze(folder, io) {
   const dir = folder === "" ? io.cwd : folder;
-  if (originalOf(io.readFile(join2(dir, ".dkod/migration.json"))) === null) {
+  if (originalOf(io.readFile(join3(dir, ".dkod/migration.json"))) === null) {
     io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
     return 2;
   }
@@ -806,12 +2121,12 @@ async function unfreeze(folder, io) {
   return 0;
 }
 
-var join3 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+var join4 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var SKIP2 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".dkod"];
-var SOURCE = /\.[cm]?[jt]sx?$/;
+var SOURCE2 = /\.[cm]?[jt]sx?$/;
 var DATA = /\.(?:sqlite|sqlite3|db|db3)$/i;
-var isRec3 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-var json = (text) => {
+var isRec4 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var json2 = (text) => {
   try {
     return JSON.parse(text ?? "");
   } catch {
@@ -831,7 +2146,7 @@ function ignoresEnvLocal(text) {
 }
 async function checkBuild(folder, reportFile, io) {
   const dir = folder === "" ? io.cwd : folder;
-  const original = originalOf(io.readFile(join3(dir, ".dkod/migration.json")));
+  const original = originalOf(io.readFile(join4(dir, ".dkod/migration.json")));
   if (original === null) {
     io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
     return 2;
@@ -841,13 +2156,13 @@ async function checkBuild(folder, reportFile, io) {
   let tests = 0;
   let newPassed = 0;
   let visual = 0;
-  const frozen = json(io.readFile(freezePath(dir)));
-  if (!isRec3(frozen) || typeof frozen.sha256 !== "string" || !isRec3(frozen.baseline) || !Array.isArray(frozen.baseline.tests)) {
+  const frozen = json2(io.readFile(freezePath(dir)));
+  if (!isRec4(frozen) || typeof frozen.sha256 !== "string" || !isRec4(frozen.baseline) || !Array.isArray(frozen.baseline.tests)) {
     problems.push(".dkod/parity/freeze.json: missing. Freeze the suite (step 3) before the build is checked.");
   } else {
     const record = frozen;
     const files = suiteFiles(dir, io);
-    if (files.length === 0 || io.sha256(files.map((f) => join3(dir, f))) !== record.sha256) {
+    if (files.length === 0 || io.sha256(files.map((f) => join4(dir, f))) !== record.sha256) {
       problems.push("tests/parity: the suite changed after the freeze (sha256 differs). Put the frozen files back; never edit them.");
     }
     const reportText = reportFile === undefined ? null : io.readFile(reportFile);
@@ -873,10 +2188,10 @@ async function checkBuild(folder, reportFile, io) {
     }
   }
   const sources = io.walk(dir, SKIP2);
-  const map = json(io.readFile(join3(dir, ".dkod/map/app-map.json")));
-  const tables = isRec3(map) && Array.isArray(map.tables) ? map.tables.filter(isRec3).flatMap((t) => typeof t.name === "string" ? [t.name] : []) : [];
+  const map = json2(io.readFile(join4(dir, ".dkod/map/app-map.json")));
+  const tables = isRec4(map) && Array.isArray(map.tables) ? map.tables.filter(isRec4).flatMap((t) => typeof t.name === "string" ? [t.name] : []) : [];
   if (tables.length > 0) {
-    const text = sources.filter((f) => SOURCE.test(f) && !/^(?:tests|migrations)\//.test(f)).map((f) => io.readFile(join3(dir, f)) ?? "").join(`
+    const text = sources.filter((f) => SOURCE2.test(f) && !/^(?:tests|migrations)\//.test(f)).map((f) => io.readFile(join4(dir, f)) ?? "").join(`
 `);
     for (const name of tables) {
       const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -889,23 +2204,35 @@ async function checkBuild(folder, reportFile, io) {
   for (const f of sources)
     if (DATA.test(f))
       problems.push(`${f}: a file database in the dk- folder. The data lives in the Dev data service.`);
-  const assets = json(io.readFile(join3(dir, ".dkod/map/assets/assets.json")));
+  const assets = json2(io.readFile(join4(dir, ".dkod/map/assets/assets.json")));
   if (Array.isArray(assets)) {
-    for (const a of assets.filter(isRec3)) {
+    for (const a of assets.filter(isRec4)) {
       if (typeof a.path !== "string")
         continue;
-      const source = join3(original, a.path);
+      const source = join4(original, a.path);
       if (io.readFile(source) === null) {
         problems.push(`asset ${a.path}: not readable in the original at ${source}.`);
         continue;
       }
       const want = io.sha256([source]);
-      const same = sources.some((f) => base(f) === base(a.path) && io.sha256([join3(dir, f)]) === want);
+      const same = sources.some((f) => base(f) === base(a.path) && io.sha256([join4(dir, f)]) === want);
       if (!same)
         problems.push(`asset ${a.path}: no byte-identical copy in the dk- folder. Copy the file as it is; never redraw it.`);
     }
   }
-  if (io.readFile(join3(dir, ".env.local")) !== null && !ignoresEnvLocal(io.readFile(join3(dir, ".gitignore")) ?? "")) {
+  for (const f of sources) {
+    const infra = f === "Dockerfile" || f === ".dockerignore" || f === "package.json" || /^\.github\/workflows\//.test(f);
+    if (!infra && !(SOURCE2.test(f) && !f.startsWith("tests/")))
+      continue;
+    const line = templateTokenLine(io.readFile(join4(dir, f)) ?? "");
+    if (line !== null)
+      problems.push(`${f}: still has template text ({{...}} at line ${String(line)}). Render the template with dkod-migrate.mjs render; never copy its source.`);
+  }
+  const appName = base((dir === "." ? io.cwd : dir).replace(/[\\/]+$/, ""));
+  if (appName.startsWith("dk-") && sources.includes("package.json") && !sources.includes("bun.lock")) {
+    problems.push("bun.lock: missing. Run `bun install` in the dk- folder and keep bun.lock; without it the deploy installs without a lock file.");
+  }
+  if (io.readFile(join4(dir, ".env.local")) !== null && !ignoresEnvLocal(io.readFile(join4(dir, ".gitignore")) ?? "")) {
     problems.push(".env.local: not covered by .gitignore. Add it before anything is committed.");
   }
   const ok = problems.length === 0;
@@ -913,9 +2240,9 @@ async function checkBuild(folder, reportFile, io) {
   return ok ? 0 : 1;
 }
 
-var join4 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
-var isRec4 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-var json2 = (text) => {
+var join5 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+var isRec5 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var json3 = (text) => {
   try {
     return JSON.parse(text ?? "");
   } catch {
@@ -926,7 +2253,7 @@ var READY = "Ready to deploy";
 var NOT_YET = "Not yet";
 async function sideBySide(folder, originalReport, dkReport, io) {
   const dir = folder === "" ? io.cwd : folder;
-  if (originalOf(io.readFile(join4(dir, ".dkod/migration.json"))) === null) {
+  if (originalOf(io.readFile(join5(dir, ".dkod/migration.json"))) === null) {
     io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
     return 2;
   }
@@ -934,13 +2261,13 @@ async function sideBySide(folder, originalReport, dkReport, io) {
   const original = { tests: 0, passed: 0, failed: 0 };
   const dk = { tests: 0, passed: 0, failed: 0 };
   let visual = 0;
-  const frozen = json2(io.readFile(freezePath(dir)));
-  if (!isRec4(frozen) || typeof frozen.sha256 !== "string" || !isRec4(frozen.baseline) || !Array.isArray(frozen.baseline.tests)) {
+  const frozen = json3(io.readFile(freezePath(dir)));
+  if (!isRec5(frozen) || typeof frozen.sha256 !== "string" || !isRec5(frozen.baseline) || !Array.isArray(frozen.baseline.tests)) {
     problems.push(".dkod/parity/freeze.json: missing. Freeze the suite (step 3) first.");
   } else {
     const record = frozen;
     const files = suiteFiles(dir, io);
-    if (files.length === 0 || io.sha256(files.map((f) => join4(dir, f))) !== record.sha256) {
+    if (files.length === 0 || io.sha256(files.map((f) => join5(dir, f))) !== record.sha256) {
       problems.push("tests/parity: the suite changed after the freeze (sha256 differs). Put the frozen files back; never edit them.");
     }
     const load = (file, label) => {
@@ -979,11 +2306,10 @@ async function sideBySide(folder, originalReport, dkReport, io) {
       }
     }
   }
-  const map = json2(io.readFile(join4(dir, ".dkod/map/app-map.json")));
-  const count = (key) => isRec4(map) && Array.isArray(map[key]) ? map[key].length : 0;
-  const snapshot = json2(io.readFile(join4(dir, ".dkod/snapshot.json")));
-  const copied = (key) => isRec4(snapshot) && Array.isArray(snapshot[key]) && snapshot[key].length > 0;
-  const dataImported = isRec4(snapshot) && snapshot.mode === "snapshot" && (copied("files") || copied("databases"));
+  const map = json3(io.readFile(join5(dir, ".dkod/map/app-map.json")));
+  const count = (key) => isRec5(map) && Array.isArray(map[key]) ? map[key].length : 0;
+  const snapshot = json3(io.readFile(join5(dir, ".dkod/snapshot.json")));
+  const dataImported = isRec5(snapshot) && snapshot.mode === "snapshot" && snapshot.imported === true;
   const ok = problems.length === 0;
   io.print(JSON.stringify({
     ok,
@@ -1001,16 +2327,17 @@ var USAGE = [
   "  node dkod-migrate.mjs check-map <the dk- app's folder>",
   "  node dkod-migrate.mjs freeze <the dk- app's folder> <report.json>",
   "  node dkod-migrate.mjs unfreeze <the dk- app's folder>",
+  "  node dkod-migrate.mjs render <template.md> <the dk- app's folder> [values.json] [--force]",
   "  node dkod-migrate.mjs check-build <the dk- app's folder> <report.json>",
   "  node dkod-migrate.mjs side-by-side <the dk- app's folder> <original report.json> <dk report.json>",
   "  node dkod-migrate.mjs clean <the dk- app's folder>"
 ].join(`
 `);
 var NEW_APP_ONLY = "The original app has no data files and no local database this computer can copy. The migration is new-app-only: its tests run only on the dk- app. Ask the builder how the original reads its data.";
-var join5 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+var join6 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var norm = (p) => p.replace(/\/\.\//g, "/").replace(/\/+/g, "/");
-var snapshotPath = (dir) => join5(dir, ".dkod/snapshot.json");
-var recordPath = (dir) => join5(dir, ".dkod/migration.json");
+var snapshotPath = (dir) => join6(dir, ".dkod/snapshot.json");
+var recordPath = (dir) => join6(dir, ".dkod/migration.json");
 var SKIP3 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor"];
 var DATA2 = /\.(?:sqlite|sqlite3|db|db3)$/i;
 var LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
@@ -1065,7 +2392,7 @@ function copiedFile(original, files, value) {
   const raw = isUrl ? value.slice(5) : value;
   if (raw === "" || !isUrl && /^[a-z][a-z0-9+.-]*:/i.test(raw))
     return null;
-  const rel = norm(raw.startsWith("/") ? raw : join5(original, raw)).slice(norm(original).length).replace(/^\//, "");
+  const rel = norm(raw.startsWith("/") ? raw : join6(original, raw)).slice(norm(original).length).replace(/^\//, "");
   if (rel === "")
     return null;
   const copy = files.find((f) => norm(f).endsWith(`/${rel}`));
@@ -1145,20 +2472,20 @@ async function snapshot(folder, io) {
     return 2;
   }
   await removeSnapshot(dir, io);
-  const scratch = io.mkdtemp(join5(io.tmpdir(), "dkod-migrate-"));
+  const scratch = io.mkdtemp(join6(io.tmpdir(), "dkod-migrate-"));
   const id = (scratch.split(/[\\/]/).pop() ?? "run").replace(/[^A-Za-z0-9]/g, "_");
   const files = [];
   for (const rel of io.walk(original, SKIP3)) {
     if (!DATA2.test(rel))
       continue;
-    const to = join5(scratch, rel);
-    io.copyFile(join5(original, rel), to);
+    const to = join6(scratch, rel);
+    io.copyFile(join6(original, rel), to);
     files.push(to);
   }
   const env = { DKOD_MIGRATE_DATA: scratch };
   const databases = [];
   for (const file of [".env", ".env.local"]) {
-    for (const [key, value] of envPairs(io.readFile(join5(original, file)))) {
+    for (const [key, value] of envPairs(io.readFile(join6(original, file)))) {
       const copied = copiedFile(original, files, value);
       if (copied !== null) {
         env[key] = copied;
@@ -1197,6 +2524,11 @@ async function clean(folder, io) {
 }
 async function runMigrateCli(argv, io) {
   const [command, folder, reportFile, dkReportFile] = argv;
+  if (command === "render") {
+    const code = await render2(argv.slice(1), io);
+    if (code >= 0)
+      return code;
+  }
   if (command === "side-by-side" && folder !== undefined)
     return await sideBySide(folder, reportFile, dkReportFile, io);
   if (command === "freeze" && folder !== undefined)
@@ -1227,7 +2559,7 @@ function walk(dir, skip) {
     for (const name of names) {
       if (skip.includes(name))
         continue;
-      const full = join6(at, name);
+      const full = join7(at, name);
       const next = rel === "" ? name : `${rel}/${name}`;
       if (statSync(full).isDirectory())
         visit(full, next);
@@ -1265,7 +2597,7 @@ var io = {
   rm: (path, opts) => rmSync(path, { recursive: opts.recursive ?? false, force: opts.force ?? false }),
   mkdtemp: (prefix) => mkdtempSync(prefix),
   tmpdir,
-  hasTool: (program) => (process.env.PATH ?? "").split(process.platform === "win32" ? ";" : ":").some((dir) => dir !== "" && existsSync(join6(dir, program))),
+  hasTool: (program) => (process.env.PATH ?? "").split(process.platform === "win32" ? ";" : ":").some((dir) => dir !== "" && existsSync(join7(dir, program))),
   print: (line) => process.stdout.write(`${line}
 `),
   run: (cmd, args, env, cwd) => new Promise((resolve) => {
