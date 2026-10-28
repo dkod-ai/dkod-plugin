@@ -547,12 +547,47 @@ async function startUp(flags, io, cwd) {
   const waitMs = waitRaw === undefined ? WAIT_LIMIT_MS : Number(waitRaw) * 1000;
   const startedAt = io.now();
   let sawNoDatabase = false;
+  let token = issued.token;
+  let expiresAt = issued.expiresAt;
+  const refresh = async () => {
+    try {
+      const next = await fetchDbToken(creds, app, io);
+      token = next.token;
+      expiresAt = next.expiresAt;
+      return "ok";
+    } catch (error) {
+      if (error instanceof TokenError && (error.kind === "unavailable" || error.kind === "rate"))
+        return "later";
+      return error instanceof Error ? error : new Error("Could not get a token.");
+    }
+  };
+  let retriedAfterRefusal = false;
   for (;; ) {
-    const checked = await checkDatabase(gateway, app, issued.token, io);
+    let checked = { kind: "not_open" };
+    let renewed = "ok";
+    if (expiresAt - RENEW_BEFORE_MS <= io.now())
+      renewed = await refresh();
+    if (renewed instanceof Error)
+      return fail(2, renewed.message);
+    if (renewed === "ok") {
+      checked = await checkDatabase(gateway, app, token, io);
+      if (checked.kind === "refused") {
+        if (retriedAfterRefusal)
+          return fail(2, `connect refused: ${checked.reason}`);
+        const again = await refresh();
+        if (again instanceof Error)
+          return fail(2, again.message);
+        if (again === "ok") {
+          retriedAfterRefusal = true;
+          continue;
+        }
+        checked = { kind: "not_open" };
+      } else {
+        retriedAfterRefusal = false;
+      }
+    }
     if (checked.kind === "ready")
       break;
-    if (checked.kind === "refused")
-      return fail(2, `connect refused: ${checked.reason}`);
     if (checked.kind === "no_database")
       sawNoDatabase = true;
     const elapsed = io.now() - startedAt;
@@ -563,8 +598,6 @@ async function startUp(flags, io, cwd) {
       io.schedule(CHECK_RETRY_MS, resolve);
     });
   }
-  let token = issued.token;
-  let expiresAt = issued.expiresAt;
   const open = new Set;
   const sockets = new Set;
   let stopped = false;
