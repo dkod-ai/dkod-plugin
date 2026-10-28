@@ -50,15 +50,15 @@ After the freeze, never edit `tests/parity`: Dkoder refuses it. To change the su
 
 Build the dk- app in the `folder`, on the stack and on the template the start call returned. Report step `building` when this step starts. The map and the frozen suite are the spec; the original's code is not.
 
-1. Start from the template's text: the template that `dkoder.templates` named in the start call. Never pick another.
+1. Render the template: the one that `dkoder.templates` named in the start call. Never pick another. Save its `content` to a file outside the dk- folder (the system temp folder), and its `dkod` values and `policy` values to a `values.json` beside it (`{ "policy": {...}, "dkod": {...} }`). Run `<scripts>/dkod-migrate.mjs` render <that template file> <folder> <values.json>. It writes the Dockerfile, CI, package.json and the other files DKOD puts in the repository, with every placeholder answered, and never overwrites a file that exists unless you add `--force`. It exits 1 and writes nothing on an unanswered placeholder (`gaps`): answer it in `values.json` and run it again. Then build on the rendered files. Never copy the template's text into the folder: its `{{#if ...}}` branches are not a Dockerfile.
 2. Copy the files listed in `.dkod/map/assets/assets.json` from the original as they are, into the places the template serves them from. Never redraw one: `check-build` compares the bytes.
 3. Write every route, page, API path and flow of the map, so the frozen suite can pass on the dk- app.
 4. Write the data layer the stack names: a schema from the map's `tables`, and a `0001_baseline` migration made from it. The original's data files, and any driver for them, stay out of the `folder`.
 5. Give the app its Dev data: do the dkod skill's section on Dev data. Call `dkoder.devdb.status`, and `dkoder.devdb.make` when it asks for it; the Dev data belongs to the original app's key, the `appKey` in `.dkod/migration.json`: pass that key to `dkoder.devdb.status`, `dkoder.devdb.make` and `dkod-db.mjs` (`--app <that key>`), never a `dk-` name, so the app has one set of Dev data. Run `dkod-db.mjs` up so it writes `DATABASE_URL` into `.env.local`; then run `dkod-db.mjs` migrate. `.env.local` must be in `.gitignore`, and you never read or print its values.
-6. Read `data_import` in the migration file. With `ask`, ask the builder whether to bring the original's data. On a yes, say that data import is not available yet (it comes later) and that the dk- app starts with an empty, migrated Dev store; invent no import command. Seed only through the suite's own setup. With `never`, do not ask.
+6. Read `data_import` in the migration file. With `ask`, ask the builder whether to bring the original's data (with the question tool; if it is not available, stop, ask in plain text and wait for the reply, and never pick an answer yourself). On a yes, say that data import is not available yet (it comes later) and that the dk- app starts with an empty, migrated Dev store; invent no import command. Seed only through the suite's own setup. With `never`, do not ask.
 7. Loop until everything passes: start the dk- app on the Dev data, and run the frozen suite on it with `PARITY_BASE_URL=<the dk- app's url>`, `PARITY_MAX_DIFF_RATIO` and `--reporter=json`, writing to a file outside `.dkod`. Then run `<scripts>/dkod-migrate.mjs` check-build <folder> <that report file>, each required check of the template (run its script by name, as the PRD's "Required checks" list them) and the dkod skill's policy checks, the stack rule among them. Fix what any of them names and run all of it again, until the suite is green, `check-build` prints `"ok":true` and no policy finding blocks.
 
-`check-build` fails on a suite edited after the freeze, a baseline test that fails or is missing, a map table with no schema, no `0001_baseline` migration, a data file in the `folder`, an asset that is not byte-identical, and a `.env.local` that is not ignored. Keep its `counts` for step 5.
+`check-build` fails on a suite edited after the freeze, a baseline test that fails or is missing, a map table with no schema, no `0001_baseline` migration, a data file in the `folder`, an asset that is not byte-identical, a `.env.local` that is not ignored, a Dockerfile, workflow, package.json or source file that still has template text (`{{#if`, `{{else}}`, `{{ dkod.`...), and a package.json with no lock file. Keep its `counts` for step 5.
 
 ### 5. Parity
 
@@ -69,10 +69,10 @@ The builder judges parity, not you. Do these in order:
 3. Run `<scripts>/dkod-migrate.mjs` side-by-side <folder> <original report file> <dk report file>. It prints the parity report (routes, flows, tests passed on each app, `visual_diff`, `data_imported`) and the question. It exits 1 on a changed suite, a missing report or a failing test: fix it and run from 2 again.
 4. Open both urls side by side in the browser.
 5. Show the builder the report it printed. Report step `parity_passed` with `parity_sha256` set to the same sha256 you sent as `suite_sha256`, and with its `counts` (`tests`, `original_passed`, `original_failed`, `new_passed`, `new_failed`, `visual_diff`).
-6. Ask the builder its `question` with the client's question tool, with the options "Ready to deploy" and "Not yet".
+6. Ask the builder its `question` with the client's question tool, with the options "Ready to deploy" and "Not yet". If the question tool is not available (for example in print mode), stop, ask the same question in plain text with the two options, and wait for the builder's reply. Never pick an answer yourself.
 7. On "Ready to deploy", call `dkoder.migrate.confirm`: it is the only call that moves a migration to `confirmed`. Then go on to the section after this one, Push to prod. On "Not yet", ask what is wrong, fix it, and start step 5 again from 1.
 
-Never confirm for the builder. Call `dkoder.migrate.confirm` only after the builder answered "Ready to deploy".
+Never confirm for the builder. Call `dkoder.migrate.confirm` only after the builder answered "Ready to deploy" (in the question tool or in text); never pick an answer yourself.
 
 ### 6. Push to prod
 
