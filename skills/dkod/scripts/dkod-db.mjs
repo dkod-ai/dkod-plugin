@@ -288,6 +288,7 @@ var DEFAULT_PORT = 6543;
 var WAIT_LIMIT_MS = 10 * 60000;
 var CHECK_TIMEOUT_MS = 15000;
 var CHECK_RETRY_MS = 1e4;
+var UNKNOWN_APP = "unknown_app";
 var PENDING_CAP = 1 << 20;
 var RENEW_BEFORE_MS = 5 * 60000;
 var RENEW_MIN_MS = 30000;
@@ -329,6 +330,7 @@ function portOf(raw, fallback) {
 var NO_DOCKER = "Do not make a database with Docker or a local Postgres: the app's Dev database is the one DKOD makes.";
 var MAKE_STEP = "Call dkoder.devdb.status with the app's key: when it says missing, call dkoder.devdb.make with confirm: true, then run this again.";
 var missingDb = (app) => `The ${app} Dev database does not exist yet. ${MAKE_STEP} ${NO_DOCKER}`;
+var notSynced = (app) => `DKOD has made the ${app} Dev database, but the Dev database gateway has not loaded it yet. It usually takes a few minutes: run this again. ${NO_DOCKER}`;
 var notReachable = (app) => `The ${app} Dev database did not answer in time. Check the network and the gateway address, then run this again. ${NO_DOCKER}`;
 var NO_DEVICE = "This computer has no Dkoder device token. Install Dkoder here first, then run this again.";
 function trustedDashboard(raw) {
@@ -562,6 +564,7 @@ async function startUp(flags, io, cwd) {
     }
   };
   let retriedAfterRefusal = false;
+  let sawSyncing = false;
   for (;; ) {
     let checked = { kind: "not_open" };
     let renewed = "ok";
@@ -571,7 +574,13 @@ async function startUp(flags, io, cwd) {
       return fail(2, renewed.message);
     if (renewed === "ok") {
       checked = await checkDatabase(gateway, app, token, io);
-      if (checked.kind === "refused") {
+      if (checked.kind === "refused" && checked.reason === UNKNOWN_APP) {
+        const again = await refresh();
+        if (again instanceof Error)
+          return fail(2, again.message);
+        sawSyncing = true;
+        checked = { kind: "not_open" };
+      } else if (checked.kind === "refused") {
         if (retriedAfterRefusal)
           return fail(2, `connect refused: ${checked.reason}`);
         const again = await refresh();
@@ -592,8 +601,8 @@ async function startUp(flags, io, cwd) {
       sawNoDatabase = true;
     const elapsed = io.now() - startedAt;
     if (elapsed + CHECK_RETRY_MS > waitMs)
-      return fail(1, sawNoDatabase ? missingDb(app) : notReachable(app));
-    io.print(`dkod-db: waiting for DKOD to make the ${app} Dev database (${Math.round(elapsed / 1000)} s of ${Math.round(waitMs / 1000)} s)`);
+      return fail(1, sawNoDatabase ? missingDb(app) : sawSyncing ? notSynced(app) : notReachable(app));
+    io.print(sawSyncing && !sawNoDatabase ? `dkod-db: waiting for the Dev database gateway to load ${app}; DKOD has made it, the gateway gets it within a few minutes (${Math.round(elapsed / 1000)} s of ${Math.round(waitMs / 1000)} s)` : `dkod-db: waiting for DKOD to make the ${app} Dev database (${Math.round(elapsed / 1000)} s of ${Math.round(waitMs / 1000)} s)`);
     await new Promise((resolve) => {
       io.schedule(CHECK_RETRY_MS, resolve);
     });
