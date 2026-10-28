@@ -255,6 +255,30 @@ const at = (dir, w) => (w.startsWith("/") ? w : join(dir, w));
 const WRITERS = new Set(["cp", "mv", "tee", "touch", "mkdir", "rm", "rmdir", "ln", "install", "rsync", "truncate", "chmod", "chown", "dd", "sed", "unzip", "tar", "ditto"]);
 const INSTALLERS = new Set(["npm", "yarn", "pnpm", "bun", "pip", "pip3", "poetry", "cargo", "go", "composer"]);
 const INSTALL_WORDS = new Set(["install", "i", "add", "ci", "update", "upgrade", "up", "link", "uninstall", "un", "remove", "rm", "prune", "dedupe", "rebuild", "get"]);
+const PATH_FLAGS = new Set(["--prefix", "--cwd", "-C", "--dir", "--cd", "--directory", "--manifest-path", "--workspace", "-w"]);
+/** Flags that take a value, which is not the subcommand: `pnpm --filter web add x` installs. */
+const VALUE_FLAGS = new Set([...PATH_FLAGS, "--filter", "-F", "--registry", "--cache", "--userconfig", "--python", "--target", "--package", "-p", "--loglevel"]);
+/**
+ * The subcommand is the first word that is not a flag, a flag's value, a `+toolchain` or yarn's
+ * `workspace <name>`: `cargo test update` runs tests. pnpm's `-w` takes no value, so `pnpm -w add x` installs.
+ */
+const runsInstall = (program, args) => {
+  if (!INSTALLERS.has(program)) return false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.startsWith("+")) continue;
+    if (a.startsWith("-")) {
+      if (VALUE_FLAGS.has(a) && !(a === "-w" && INSTALL_WORDS.has(args[i + 1] ?? ""))) i++;
+      continue;
+    }
+    if (program === "yarn" && a === "workspace") {
+      i++;
+      continue;
+    }
+    return INSTALL_WORDS.has(a);
+  }
+  return false;
+};
 
 /**
  * Does a changing part of the command name the original app's folder? A `cd` carries to the parts
@@ -277,10 +301,9 @@ function touchesOriginal(original, dir, command) {
     // In the original's folder only a program that changes files counts, so its own test suite
     // still runs there.
     if (inside(original, here)) {
-      const sub = w.find((x) => !x.startsWith("-") && x !== w[0]);
-      return WRITERS.has(w[0]) || (INSTALLERS.has(w[0]) && INSTALL_WORDS.has(sub ?? ""));
+      return WRITERS.has(w[0]) || runsInstall(w[0], w.slice(1));
     }
-    return w.some((x) => inside(original, at(here, x)));
+    return w.some((x) => inside(original, at(here, x.replace(/^--[\w-]+=/, ""))));
   });
 }
 
@@ -295,9 +318,182 @@ function touchesSuite(suite, dir, command) {
       if (typeof w[1] === "string") here = at(here, w[1]);
       return false;
     }
-    if (w.length === 0 || !WRITERS.has(w[0])) return false;
-    return inside(suite, here) || w.slice(1).some((x) => inside(suite, at(here, x)));
+    if (w.length === 0) return false;
+    // An installer writes package.json, a lockfile and node_modules in the folder it runs in or is pointed at.
+    const installs = runsInstall(w[0], w.slice(1));
+    if (!WRITERS.has(w[0]) && !installs) return false;
+    return inside(suite, here) || w.slice(1).some((x) => inside(suite, at(here, x.replace(/^--[\w-]+=/, ""))));
   });
+}
+
+// DKO-1255: migration.stack, the Claude hook's rule, for a dk-<app> folder: bun and the stack's database only.
+// The defaults are the stack's (bun, postgres); the org's migration.yaml is not read here.
+const STACK_DENY = new Set(["express"]);
+const STACK_ENGINE = "postgres";
+const DRIVER_ENGINE = { pg: "postgres", postgres: "postgres", sqlite3: "sqlite", "better-sqlite3": "sqlite", "@libsql/client": "sqlite", mysql: "mysql", mysql2: "mysql", mariadb: "mysql", mongodb: "mongodb", mongoose: "mongodb", mssql: "mssql", oracledb: "oracle" };
+const OTHER_LOCKFILES = new Set(["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml"]);
+// npx and `yarn dlx` run a tool once and add no dependency; they are not checked on purpose.
+const OTHER_MANAGERS = new Set(["npm", "yarn", "pnpm"]);
+const ADD_WORDS = new Set(["install", "i", "add", "ci"]);
+const FILE_DATABASE = /\.(?:db|sqlite)$/;
+const offStack = (name) => STACK_DENY.has(name) || (DRIVER_ENGINE[name] !== undefined && DRIVER_ENGINE[name] !== STACK_ENGINE);
+const stackDeny = (detail) => `A dk- app uses only the stack in migration.yaml: ${detail}. Use bun, and the stack's packages and database (${STACK_ENGINE}).`;
+
+/** Is `p` under a dk- folder? A file needs the folder above it; a folder may be the dk- folder itself. */
+function inDkFolder(p, isDir) {
+  const segs = norm(p).split("/").filter(Boolean);
+  return (isDir ? segs : segs.slice(0, -1)).some((s) => s.startsWith("dk-"));
+}
+
+/** The detail of a stack break by writing `target` with `text`, or null. */
+function stackFile(target, text) {
+  if (!inDkFolder(target, false)) return null;
+  const base = norm(target).split("/").pop() ?? "";
+  if (OTHER_LOCKFILES.has(base)) return `${base} belongs to a package manager other than bun`;
+  if (FILE_DATABASE.test(base)) return `${base} is a file database; the stack uses ${STACK_ENGINE}`;
+  if (base !== "package.json") return null;
+  for (const m of text.matchAll(/"((?:@[\w.-]+\/)?[\w.-]+)"\s*:/g)) if (offStack(m[1])) return `${m[1]} is not in the stack`;
+  const pm = /"packageManager"\s*:\s*"(npm|yarn|pnpm)\b/.exec(text);
+  return pm ? `packageManager is not bun` : null;
+}
+
+/**
+ * The files a write tool targets, and the text it adds (a patch names its files inside). Removed
+ * text (old_string, the '-' lines of a patch) is not scanned: taking an off-stack package out is allowed.
+ */
+function writeTargets(args, dir) {
+  const targets = [];
+  const texts = [];
+  const visit = (v, key) => {
+    if (typeof v === "string") {
+      if (/^(file_path|notebook_path|path|filePath|filename|target_file)$/.test(key) && v !== "") targets.push(at(dir, v));
+      else if (/^(old_string|old_str|oldString|old_text|oldText)$/.test(key)) return;
+      else if (/^\*\*\* Begin Patch/m.test(v) || /^\*\*\* (?:Add|Update|Delete) File: /m.test(v)) texts.push(v.split("\n").filter((l) => /^\+(?!\+\+)/.test(l)).map((l) => l.slice(1)).join("\n"));
+      else texts.push(v);
+      for (const m of v.matchAll(/^\*\*\* (?:Add|Update) File: (.+)$/gm)) targets.push(at(dir, m[1].trim()));
+    } else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) visit(x, k);
+  };
+  visit(args, "");
+  return { targets, text: texts.join("\n") };
+}
+
+/** The detail of a stack break in a Write/Edit tool call, or null. */
+function stackWrite(args, dir, tool) {
+  if (/^delete(_file)?$/i.test(tool)) return null;
+  const { targets, text } = writeTargets(args, dir);
+  for (const t of targets) {
+    const hit = stackFile(t, text);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** The detail of a stack break by a shell command run in `dir`, or null. */
+function stackCommand(dir, command) {
+  const segs = parts(command) ?? command.split(/[;&|\n]+/).map((s) => s.trim()).filter(Boolean);
+  let here = dir;
+  for (const seg of segs) {
+    const w = noEnv(words(seg));
+    if (w[0] === "cd") {
+      if (typeof w[1] === "string") here = at(here, w[1]);
+      continue;
+    }
+    const args = w.slice(1);
+    const near = inDkFolder(here, true) || args.some((x) => inDkFolder(at(here, x.replace(/^--[\w-]+=/, "")), true));
+    if (!near) continue;
+    const adds = args.some((x) => ADD_WORDS.has(x));
+    if (OTHER_MANAGERS.has(w[0]) && (adds || (w[0] === "yarn" && args.every((x) => x.startsWith("-"))))) return `${w[0]} is a package manager other than bun`;
+    if (w[0] === "bun" && adds) {
+      const sub = args.findIndex((x) => ADD_WORDS.has(x));
+      for (const x of args.slice(sub + 1)) {
+        const name = x.startsWith("-") ? "" : x.replace(/(?<=.)@[^/]*$/, "");
+        if (name && offStack(name)) return `${name} is not in the stack`;
+      }
+    }
+    if (WRITERS.has(w[0]) && !/^(rm|rmdir)$/.test(w[0]) || segs.length === 1 && /[<>]/.test(seg)) {
+      for (const x of args) {
+        const hit = stackFile(at(here, x), "");
+        if (hit) return hit;
+      }
+    }
+  }
+  return null;
+}
+
+// DKO-1255: a stack block is reported to Control > What Guard stopped. Route 1: the device token in
+// dkoder.json (or DKOD_URL and DKODER_TOKEN). Route 2, with no token: a pending entry that the deny
+// message tells the agent to clear by calling dkoder_guard_report. Never a command line or a file body.
+const REPORT_TOOL = "dkoder.guard.report";
+const PENDING = join(STATE_DIR, "pending.json");
+
+function trustedDashboard(raw) {
+  try {
+    const url = new URL(String(raw));
+    const local = url.hostname === "127.0.0.1" || url.hostname === "localhost";
+    if (url.protocol === "https:" || (url.protocol === "http:" && local)) return url.origin;
+  } catch { /* not a URL */ }
+  return null;
+}
+
+/** { dashboardUrl, token } from the env or dkoder.json in the plugin folder, else null. */
+function credentials() {
+  const url = trustedDashboard(process.env.DKOD_URL);
+  if (url && process.env.DKODER_TOKEN) return { dashboardUrl: url, token: process.env.DKODER_TOKEN };
+  for (const dir of [process.env.CURSOR_PLUGIN_ROOT, ROOT]) {
+    if (!dir) continue;
+    try {
+      const c = JSON.parse(readFileSync(join(dir, "dkoder.json"), "utf8"));
+      const dashboardUrl = trustedDashboard(c?.dashboardUrl);
+      if (dashboardUrl && typeof c.token === "string" && c.token) return { dashboardUrl, token: c.token };
+    } catch { /* none here: try the next */ }
+  }
+  return null;
+}
+
+const readPending = () => {
+  try {
+    const now = Date.now();
+    return Object.fromEntries(Object.entries(JSON.parse(readFileSync(PENDING, "utf8"))).filter(([, v]) => now - (v?.at ?? 0) < DAY));
+  } catch {
+    return {};
+  }
+};
+const writePending = (all) => {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    writeFileSync(PENDING, JSON.stringify(all));
+  } catch { /* no state: the block is simply not repeated */ }
+};
+
+const pendingDeny = (p) =>
+  `DKOD: a Guard block in this chat is not reported yet, so Dkoder refused this. Call the DKOD tool dkoder_guard_report (server plugin-dkod-dkod) with ${JSON.stringify({ rule: p.rule, tool: p.tool, action: p.action })}, then do this step again.`;
+
+/** Denies a stack break: reports it by route 1, else keeps it pending for route 2. */
+async function blockStack(detail, tool, action) {
+  const rule = "migration-stack";
+  const name = String(tool || "shell").replace(/[^A-Za-z0-9_.:-]/g, "").slice(0, 64) || "shell";
+  let reported = false;
+  const creds = credentials();
+  if (creds) {
+    try {
+      const res = await fetch(`${creds.dashboardUrl}/api/v1/dkoder/events`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${creds.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ kind: "action", action, decision: "blocked", rule, repo: null, tool: name, agent: "cursor", at: new Date().toISOString() }),
+        signal: AbortSignal.timeout(3000),
+      });
+      reported = res.ok;
+    } catch { /* offline: fall to route 2 */ }
+  }
+  let more = "";
+  if (!reported && chat) {
+    const entry = { at: Date.now(), rule, tool: name, action };
+    const all = readPending();
+    all[chat] = entry;
+    writePending(all);
+    more = ` Then report this block: call the DKOD tool dkoder_guard_report (server plugin-dkod-dkod) with ${JSON.stringify({ rule, tool: name, action })}. Until you do, Dkoder refuses further writes.`;
+  }
+  out({ permission: "deny", user_message: "DKOD: this dk- app uses only the stack in migration.yaml.", agent_message: stackDeny(detail) + more });
 }
 
 let input = {};
@@ -322,6 +518,18 @@ if (event === "preToolUse") {
   const dir = workDir(input);
   const original = migrationOriginal(dir);
   const suite = frozenSuite(dir);
+  // DKO-1255: an unreported stack block stops further writes; then the stack check.
+  const pending = chat ? readPending()[chat] : undefined;
+  const changing = WRITES.test(tool) || (SHELL.test(tool) && !readOnly(String(args?.command ?? "")));
+  if (pending && changing) out({ permission: "deny", user_message: "DKOD: report the Guard block first. The agent is told how.", agent_message: pendingDeny(pending) });
+  if (WRITES.test(tool)) {
+    const hit = stackWrite(args, dir, tool);
+    if (hit) await blockStack(hit, tool, "write");
+  }
+  if (SHELL.test(tool) && !readOnly(String(args?.command ?? ""))) {
+    const hit = stackCommand(dir, String(args?.command ?? ""));
+    if (hit) await blockStack(hit, tool, "blocked-command");
+  }
   if (suite !== null && WRITES.test(tool)) {
     for (const key of ["file_path", "notebook_path", "path", "filePath", "filename", "target_file"]) {
       const value = args?.[key];
@@ -389,6 +597,14 @@ if (event === "beforeMCPExecution" || (event === "" && "tool_name" in input)) {
   const server = `${input.mcp_server_name ?? ""} ${input.mcp_server_url ?? input.url ?? ""}`;
   if (!/\/api\/v1\/dkoder\/mcp\b/.test(server) && !/(^|[-\s])dkod($|[-\s])/.test(server)) out({});
   const tool = String(input.tool_name ?? "").replace(/_/g, ".");
+  // DKO-1255: the agent reports the block itself, so the pending entry is done.
+  if (tool === REPORT_TOOL && chat) {
+    const all = readPending();
+    if (all[chat]) {
+      delete all[chat];
+      writePending(all);
+    }
+  }
   if (tool === "dkoder.remove") {
     out({ permission: "ask", user_message: "DKOD: this removes the app from production. Allow only if you asked for that." });
   }
@@ -407,6 +623,13 @@ if (event === "beforeShellExecution" || (event === "" && "command" in input)) {
   const dir = workDir(input);
   const original = migrationOriginal(dir);
   const suite = frozenSuite(dir);
+  // DKO-1255: an unreported stack block stops further changing commands; then the stack check.
+  const pending = chat ? readPending()[chat] : undefined;
+  if (pending && !readOnly(command)) out({ permission: "deny", user_message: "DKOD: report the Guard block first. The agent is told how.", agent_message: pendingDeny(pending) });
+  if (!readOnly(command)) {
+    const hit = stackCommand(dir, command);
+    if (hit) await blockStack(hit, "Shell", "blocked-command");
+  }
   if (suite !== null && !readOnly(command) && touchesSuite(suite, dir, command)) {
     out({ permission: "deny", user_message: "DKOD: the parity suite is frozen.", agent_message: parityDeny() });
   }

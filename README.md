@@ -83,6 +83,18 @@ It needs no git, so a Mac without Apple's developer tools asks nothing. Do not r
 
 Restart Cursor. Then open **Settings → MCP**, find `DKOD` and choose **Connect**. You sign in with your company's own sign-in.
 
+**Cursor CLI (`cursor-agent`).** The plugin's MCP sign-in works only in the desktop app. In the CLI, add the dkod server to `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "dkod": { "url": "https://<your DKOD dashboard>/api/v1/dkoder/mcp" }
+  }
+}
+```
+
+Then, from your project folder, run `cursor-agent mcp login dkod` and sign in with your company's own sign-in. The sign-in is per project folder: run it in each project.
+
 <details>
 <summary><b>Update the plugin</b></summary>
 
