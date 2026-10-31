@@ -3,12 +3,18 @@ import { randomUUID } from "node:crypto";
 import { spawn as spawn2 } from "node:child_process";
 import { closeSync, existsSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3, randomBytes as randomBytes2 } from "node:crypto";
 import net2 from "node:net";
 import { tmpdir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
+function sealOf(r, nonce) {
+  const body = { mode: r.mode, scratch: r.scratch, files: r.files, databases: (r.databases ?? []).map((d) => ({ name: d.name, url: d.url, tables: d.tables ?? null })), env: r.env, message: r.message ?? null };
+  return createHash("sha256").update(JSON.stringify(body)).update(nonce).digest("hex");
+}
+
+import { createHash as createHash2, randomBytes } from "node:crypto";
 import net from "node:net";
 import tls from "node:tls";
 var MAX_MESSAGE_BYTES = 16 << 20;
@@ -52,7 +58,7 @@ function connectWebSocket(rawUrl, headers, handlers) {
   const port = url.port ? Number(url.port) : secure ? 443 : 80;
   const host = url.hostname;
   const key = randomBytes(16).toString("base64");
-  const expectedAccept = createHash("sha1").update(key + GUID).digest("base64");
+  const expectedAccept = createHash2("sha1").update(key + GUID).digest("base64");
   let opened = false;
   let closed = false;
   let sentClose = false;
@@ -1251,15 +1257,18 @@ END $$;
   if (record && record.mode === "snapshot")
     io.writeFile(snapshotFile, `${JSON.stringify({ ...record, ...marks }, null, 2)}
 `);
-  else if (!snapshotMode && record === null)
-    io.writeFile(snapshotFile, `${JSON.stringify({ ok: true, mode: "snapshot", scratch: "", files: [], databases: [], env: {}, ...marks }, null, 2)}
+  else if (!snapshotMode && record === null) {
+    const base = { ok: true, mode: "snapshot", scratch: "", files: [], databases: [], env: {} };
+    const nonce = randomBytes2(16).toString("hex");
+    io.writeFile(snapshotFile, `${JSON.stringify({ ...base, ...marks, nonce, seal: sealOf(base, nonce) }, null, 2)}
 `);
+  }
   io.print(JSON.stringify({ ok: true, app, tables: report, already_present: alreadyPresent, imported: true, skipped_tables: skippedTables, dropped_columns: droppedColumns }));
   return 0;
 }
 function statePaths(dir) {
   const resolved = resolvePath(dir);
-  const base = join(tmpdir(), `dkod-db-${createHash2("sha256").update(resolved).digest("hex").slice(0, 16)}`);
+  const base = join(tmpdir(), `dkod-db-${createHash3("sha256").update(resolved).digest("hex").slice(0, 16)}`);
   return { state: `${base}.json`, log: `${base}.log`, dir: resolved };
 }
 function readState(io, path) {

@@ -1,11 +1,11 @@
 // Built by packages/dkoder-plugin/scripts/build-migrate.ts from dkod-app. Do not edit: run `bun run --cwd packages/dkoder-plugin build:migrate`.
 import { spawn } from "node:child_process";
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join as join8 } from "node:path";
 
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 
 var APP_MAP = {
   kind: "app.map",
@@ -91,6 +91,15 @@ function isSettingName(s) {
   if (!ENV_NAME.test(s))
     return false;
   return !s.split("_").some((part) => /[0-9]{8}/.test(part) || part.length >= 16 && /[0-9]/.test(part) && /[A-Za-z]/.test(part));
+}
+
+import { randomBytes } from "node:crypto";
+
+import { createHash } from "node:crypto";
+var SEAL_FILE = ".dkod-snapshot-seal";
+function sealOf(r, nonce) {
+  const body = { mode: r.mode, scratch: r.scratch, files: r.files, databases: (r.databases ?? []).map((d) => ({ name: d.name, url: d.url, tables: d.tables ?? null })), env: r.env, message: r.message ?? null };
+  return createHash("sha256").update(JSON.stringify(body)).update(nonce).digest("hex");
 }
 
 var PG_SETTINGS = "SET TimeZone='UTC'; SET DateStyle='ISO, YMD'; SET extra_float_digits=1; SET bytea_output='hex'; SET IntervalStyle='postgres';";
@@ -1860,7 +1869,7 @@ async function checkFolder(pack, dir, io) {
 
 var LOCAL_HOST = "(?:localhost|127(?:[.]\\d+){3}|0[.]0[.]0[.]0|\\[?::1\\]?|redis|valkey|memcached)";
 var STORE_KEY = /^(?:export\s+)?(REDIS\w*|KV_\w*|CACHE_\w*|MEMCACHE\w*|VALKEY\w*)\s*[=:]\s*(.*)$/;
-var LOCAL_URL = new RegExp(`^["']?(?:\\w+://)?(?:[^@/\\s]*@)?${LOCAL_HOST}(?:[:/"']|$)`, "i");
+var LOCAL_URL = new RegExp(`^["']?(?:\\w+://)?(?:[^@/\\s]*@)?${LOCAL_HOST}(?::(?!//)|[/"']|$)`, "i");
 var LOCAL_BLOB_KEY = /^(?:export\s+)?(STORAGE_DRIVER|FILE_STORAGE\w*|BLOB_DRIVER|BLOB_STORAGE\w*|UPLOAD_DRIVER)\s*[=:]\s*["']?(local|fs|file|disk|filesystem)["']?\s*$/i;
 var CODE_HOST = "(?:localhost|127(?:[.]\\d+){3}|0[.]0[.]0[.]0|::1|redis)\\b";
 var LOCAL_STORE_CODE = [
@@ -2238,6 +2247,7 @@ async function checkBuild(folder, reportFile, io) {
   let tests = 0;
   let newPassed = 0;
   let visual = 0;
+  problems.push(...checkSnapshot(dir, io));
   const frozen = json3(io.readFile(freezePath(dir)));
   if (!isRec5(frozen) || typeof frozen.sha256 !== "string" || !isRec5(frozen.baseline) || !Array.isArray(frozen.baseline.tests)) {
     problems.push(".dkod/parity/freeze.json: missing. Freeze the suite (step 3) before the build is checked.");
@@ -2493,7 +2503,7 @@ async function sideBySide(folder, originalReport, dkReport, io) {
 
 var USAGE = [
   "Usage:",
-  "  node dkod-migrate.mjs snapshot <the dk- app's folder>",
+  "  node dkod-migrate.mjs snapshot <the dk- app's folder> [--db-url [KEY=]<url>] [--original-url http://localhost:<port>]",
   "  node dkod-migrate.mjs check-map <the dk- app's folder> [--original-url http://localhost:<port>]",
   "  node dkod-migrate.mjs freeze <the dk- app's folder> <report.json>",
   "  node dkod-migrate.mjs unfreeze <the dk- app's folder>",
@@ -2503,7 +2513,7 @@ var USAGE = [
   "  node dkod-migrate.mjs clean <the dk- app's folder>"
 ].join(`
 `);
-var NEW_APP_ONLY = "The original app has no data files and no local database this computer can copy. The migration is new-app-only: its tests run only on the dk- app. Ask the builder how the original reads its data.";
+var NEW_APP_ONLY = "The original app has no data files and no local database this computer can copy. The migration is new-app-only: its tests run only on the dk- app. Ask the builder how the original reads its data. If it reads its database from its environment, run snapshot again with --db-url <url> or, with the original running, --original-url http://localhost:<port>. Never write .dkod/snapshot.json by hand.";
 var join6 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var norm = (p) => p.replace(/\/\.\//g, "/").replace(/\/+/g, "/");
 var snapshotPath = (dir) => join6(dir, ".dkod/snapshot.json");
@@ -2512,6 +2522,62 @@ var SKIP2 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor"
 var DATA2 = /\.(?:sqlite|sqlite3|db|db3)$/i;
 var LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 var DB_SCHEMES = new Set(["postgres:", "postgresql:", "mysql:", "mariadb:"]);
+function checkSnapshot(dir, io) {
+  const text = io.readFile(snapshotPath(dir));
+  if (text === null)
+    return [];
+  const bad = [".dkod/snapshot.json was not written by dkod-migrate.mjs snapshot (no seal, or changed after it): run snapshot again; never write it by hand."];
+  let r;
+  try {
+    r = JSON.parse(text);
+  } catch {
+    return bad;
+  }
+  if (typeof r !== "object" || r === null || typeof r.seal !== "string" || typeof r.nonce !== "string" || sealOf(r, r.nonce) !== r.seal)
+    return bad;
+  if (r.mode === "snapshot" && typeof r.scratch === "string" && r.scratch !== "" && io.readFile(join6(r.scratch, SEAL_FILE))?.trim() !== r.seal)
+    return bad;
+  return [];
+}
+function snapshotArgs(args) {
+  const pairs = [];
+  let originalUrl = "";
+  for (let i = 0;i < args.length; i++) {
+    const a = args[i];
+    const joined = /^(--db-url|--original-url)=(.*)$/.exec(a);
+    const flag = joined?.[1] ?? a;
+    if (flag !== "--db-url" && flag !== "--original-url")
+      continue;
+    const value = joined !== null ? joined[2] : args[++i] ?? "";
+    if (flag === "--original-url")
+      originalUrl = value;
+    else {
+      const kv = /^([A-Za-z_][A-Za-z0-9_]*)=(.+)$/.exec(value);
+      pairs.push(kv !== null ? [kv[1], kv[2]] : ["DATABASE_URL", value]);
+    }
+  }
+  return { pairs, originalUrl };
+}
+async function processPairs(originalUrl, io) {
+  let port = "";
+  try {
+    port = new URL(originalUrl).port;
+  } catch {
+    return [];
+  }
+  if (port === "" || !io.hasTool("lsof") || !io.hasTool("ps"))
+    return [];
+  const pid = (await io.run("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], {}, io.cwd)).stdout.trim().split(/\s+/)[0] ?? "";
+  if (!/^[0-9]+$/.test(pid))
+    return [];
+  const out = [];
+  for (const token of (await io.run("ps", ["eww", "-o", "command=", "-p", pid], {}, io.cwd)).stdout.split(/\s+/)) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=([a-z][a-z0-9+.-]*:.*)$/i.exec(token);
+    if (m !== null)
+      out.push([m[1], m[2]]);
+  }
+  return out;
+}
 function originalOf(text) {
   if (text === null)
     return null;
@@ -2642,7 +2708,7 @@ async function removeSnapshot(dir, io) {
   io.rm(snapshotPath(dir), { force: true });
   return record;
 }
-async function snapshot(folder, io) {
+async function snapshot(folder, io, args = []) {
   const dir = folder === "" ? io.cwd : folder;
   const original = originalOf(io.readFile(recordPath(dir)));
   if (original === null) {
@@ -2662,29 +2728,38 @@ async function snapshot(folder, io) {
   }
   const env = { DKOD_MIGRATE_DATA: scratch };
   const databases = [];
-  for (const file of [".env", ".env.local"]) {
-    for (const [key, value] of envPairs(io.readFile(join6(original, file)))) {
-      const copied = copiedFile(original, files, value);
-      if (copied !== null) {
-        env[key] = copied;
-        continue;
-      }
-      const db = await copyDatabase(value, scratch, id, io);
-      if (db !== null) {
-        const source = localDatabase(value);
-        if (source.protocol.startsWith("postgres")) {
-          const env2 = connection(source).env;
-          const from = db.base?.url ?? db.url;
-          const cols = await readColumns(from, null, env2, io.run, io.cwd);
-          const got = cols === null ? null : await tallies(from, [...cols].map(([name, c]) => ({ name, cols: c })), env2, io.run, io.cwd);
-          if (got !== null)
-            Object.assign(db, { tables: got });
-        }
-        databases.push(db);
-        env[key] = db.url;
-      }
+  const pair = async (key, value) => {
+    if (key in env)
+      return;
+    const copied = copiedFile(original, files, value);
+    if (copied !== null) {
+      env[key] = copied;
+      return;
     }
-  }
+    const db = await copyDatabase(value, scratch, id, io);
+    if (db === null)
+      return;
+    const source = localDatabase(value);
+    if (source.protocol.startsWith("postgres")) {
+      const env2 = connection(source).env;
+      const from = db.base?.url ?? db.url;
+      const cols = await readColumns(from, null, env2, io.run, io.cwd);
+      const got = cols === null ? null : await tallies(from, [...cols].map(([name, c]) => ({ name, cols: c })), env2, io.run, io.cwd);
+      if (got !== null)
+        Object.assign(db, { tables: got });
+    }
+    databases.push(db);
+    env[key] = db.url;
+  };
+  const flags = snapshotArgs(args);
+  for (const [key, value] of flags.pairs)
+    await pair(key, value);
+  if (flags.originalUrl !== "")
+    for (const [key, value] of await processPairs(flags.originalUrl, io))
+      await pair(key, value);
+  for (const file of [".env.local", ".env"])
+    for (const [key, value] of envPairs(io.readFile(join6(original, file))))
+      await pair(key, value);
   const empty = files.length === 0 && databases.length === 0;
   if (empty)
     io.rm(scratch, { recursive: true, force: true });
@@ -2697,6 +2772,10 @@ async function snapshot(folder, io) {
     env: empty ? {} : env,
     ...empty ? { message: NEW_APP_ONLY } : {}
   };
+  record.nonce = randomBytes(16).toString("hex");
+  record.seal = sealOf(record, record.nonce);
+  if (!empty)
+    io.writeFile(join6(scratch, SEAL_FILE), record.seal);
   io.writeFile(snapshotPath(dir), `${JSON.stringify(record, null, 2)}
 `);
   io.print(JSON.stringify(record));
@@ -2725,7 +2804,7 @@ async function runMigrateCli(argv, io) {
   if (command === "check-build" && folder !== undefined)
     return await checkBuild(folder, reportFile, io);
   if (command === "snapshot" && folder !== undefined)
-    return await snapshot(folder, io);
+    return await snapshot(folder, io, argv.slice(2));
   if (command === "clean" && folder !== undefined)
     return await clean(folder, io);
   if (command === "check-map" && folder !== undefined)
@@ -3494,7 +3573,7 @@ function discoverFunctions(original, io) {
   return [...names].sort();
 }
 function queryId(q) {
-  return `q:${createHash("sha256").update(normalizeQuery(q)).digest("hex").slice(0, 12)}`;
+  return `q:${createHash2("sha256").update(normalizeQuery(q)).digest("hex").slice(0, 12)}`;
 }
 function normalizeQuery(sql) {
   return sql.replace(/\s+/g, " ").trim().replace(/\s*;$/, "");
@@ -4058,7 +4137,7 @@ var io = {
     writeFileSync(path, text, "utf8");
   },
   sha256: (paths) => {
-    const hash = createHash2("sha256");
+    const hash = createHash3("sha256");
     for (const path of paths)
       hash.update(readFileSync(path));
     return hash.digest("hex");

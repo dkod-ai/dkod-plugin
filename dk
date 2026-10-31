@@ -13,7 +13,7 @@
 set -eu
 umask 022
 
-DK_VERSION=1.3.0
+DK_VERSION=1.4.0
 REPO="${DKOD_PLUGIN_REPO:-dkod-ai/dkod-plugin}"
 MARKET=dkod-ai
 PLUGIN_ID="dkod@$MARKET"
@@ -385,6 +385,31 @@ graphify_version() {
 }
 
 # Recommends graphify and, with a yes, installs it with uv (else pipx). Never fails the install.
+# uv (https://docs.astral.sh/uv), from Astral's own installer, into ~/.local/bin (on Windows, its PowerShell
+# installer). dk puts ~/.local/bin on the PATH itself, so uv's installer leaves the shell files alone.
+UV_HINT="Install uv (https://docs.astral.sh/uv/getting-started/installation/), then run: uv tool install graphifyy"
+has_uv() { PATH="$PATH:$HOME/.local/bin" command -v uv >/dev/null 2>&1; }
+install_uv() {
+  step "uv: installing it from astral.sh..."
+  log=$(mktemp "${TMPDIR:-/tmp}/dk-uv.XXXXXX")
+  if on_windows; then
+    # PowerShell 7 when it is there. PSModulePath is not passed on: one inherited from PowerShell 7 stops
+    # Windows PowerShell 5.1 from loading its own modules.
+    ps=powershell.exe; command -v pwsh.exe >/dev/null 2>&1 && ps=pwsh.exe
+    env -u PSModulePath "$ps" -NoProfile -ExecutionPolicy ByPass -Command "irm https://astral.sh/uv/install.ps1 | iex" >"$log" 2>&1 || :
+  else
+    fetch https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh >"$log" 2>&1 || :
+  fi
+  if has_uv; then rm -f "$log"; ok "uv is installed."; return 0; fi
+  note "Could not install uv. $UV_HINT"
+  # The installer's own last lines say why.
+  tail -n 5 "$log" | sed 's/^/    /'
+  rm -f "$log"
+  return 1
+}
+
+# Recommends graphify and, with a yes, installs it with uv: uv first, with its own yes, when it is missing.
+# Never fails the install. DKOD_GRAPHIFY=1 answers yes to both, DKOD_GRAPHIFY=0 no.
 offer_graphify() {
   v=$(graphify_version)
   if [ -n "$v" ]; then ok "graphify $v is installed. The DKOD skill uses it to map your projects with fewer tokens."; return 0; fi
@@ -394,29 +419,39 @@ offer_graphify() {
   say "  above all when it migrates an app to DKOD. https://github.com/Graphify-Labs/graphify"
   say "  It works only on your device: no telemetry, and the DKOD skill runs it with no AI service,"
   say "  so nothing about your code is sent anywhere."
-  installer=
-  if command -v uv >/dev/null 2>&1; then installer="uv tool install graphifyy"
-  elif command -v pipx >/dev/null 2>&1; then installer="pipx install graphifyy"; fi
-  if [ -z "$installer" ]; then
-    note "To install it: install uv (https://docs.astral.sh/uv/getting-started/installation/), then run: uv tool install graphifyy"
-    say ""
-    return 0
-  fi
   case ${DKOD_GRAPHIFY:-} in
     1) want=true ;;
     0) want=false ;;
-    *) want=false; if [ -n "$TTY" ] && yes_no "Install graphify now, with $installer?" y; then want=true; fi ;;
+    *) want=false; if [ -n "$TTY" ] && yes_no "Install graphify now?" y; then want=true; fi ;;
   esac
   if [ "$want" = false ]; then
-    say "  To install it later: $installer"
+    if has_uv; then say "  To install it later: dk graphify"; else say "  To install it later: dk graphify (it installs uv first)"; fi
+    say ""
+    return 0
+  fi
+  if ! has_uv; then
+    if [ "${DKOD_GRAPHIFY:-}" = 1 ] || { [ -n "$TTY" ] && yes_no "graphify installs with uv (https://docs.astral.sh/uv), which is not on your device. Install uv now?" y; }; then
+      install_uv || :
+    fi
+  fi
+  installer=
+  if has_uv; then installer="uv tool install graphifyy"
+  elif command -v pipx >/dev/null 2>&1; then installer="pipx install graphifyy"; fi
+  if [ -z "$installer" ]; then
+    note "graphify was not installed. $UV_HINT"
     say ""
     return 0
   fi
   step "graphify: $installer..."
   # shellcheck disable=SC2086
-  if $installer >/dev/null 2>&1 && [ -n "$(graphify_version)" ]; then ok "graphify $(graphify_version) is installed."
+  if PATH="$PATH:$HOME/.local/bin" $installer >/dev/null 2>&1 && [ -n "$(graphify_version)" ]; then ok "graphify $(graphify_version) is installed."
   else note "Could not install graphify. Run it yourself: $installer"; fi
   say ""
+}
+
+cmd_graphify() {
+  open_tty
+  offer_graphify
 }
 
 # --- dk itself ----------------------------------------------------------------------------------
@@ -476,6 +511,8 @@ dk $DK_VERSION: the DKOD plugin in Claude Code, Cursor, Codex and GitHub Copilot
   dk config           Shows the agent settings dk manages. dk config cursor-allow lets Cursor run the
                       dkod tools and scripts with no approval stop; dk config cursor-cli gives the
                       Cursor CLI the dkod server. Add off to undo one.
+  dk graphify         Installs graphify, which the DKOD skill uses to spend fewer tokens (uv first,
+                      when it is missing). Each step asks first.
   dk doctor           Checks dk, graphify, each agent, the plugin versions and the DKOD server, and names any issue.
   dk uninstall        Asks what to remove: the plugin, its MCP server and skills in each agent, and dk.
   dk version          Prints the version of dk.
@@ -648,7 +685,7 @@ cmd_doctor() {
   for c in curl tar; do command -v "$c" >/dev/null 2>&1 || issue "$c is not installed. dk needs it."; done
   gv=$(graphify_version)
   if [ -n "$gv" ]; then ok "graphify $gv is installed: the DKOD skill maps your projects with it."
-  else issue "graphify is not installed. The DKOD skill needs it to spend fewer tokens: run uv tool install graphifyy (https://github.com/Graphify-Labs/graphify)."; fi
+  else issue "graphify is not installed. The DKOD skill needs it to spend fewer tokens: run dk graphify (it installs uv first when needed)."; fi
 
   say ""
   say "$(paint 36 'Versions on GitHub')"
@@ -929,6 +966,7 @@ case ${1:-help} in
   doctor) cmd_doctor ;;
   channel) shift; cmd_channel "${1:-}" ;;
   config) shift; cmd_config "${1:-}" "${2:-on}" ;;
+  graphify) cmd_graphify ;;
   version|--version|-v) say "dk $DK_VERSION" ;;
   help|--help|-h) cmd_help ;;
   __upgrade-plugins) upgrade_plugins ;;
