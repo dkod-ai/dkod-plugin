@@ -163,7 +163,7 @@ The plugin's MCP sign-in works only in the desktop app. For `cursor-agent`, add 
 ```json
 {
   "mcpServers": {
-    "dkod": { "url": "https://<your DKOD dashboard>/api/v1/dkoder/mcp" }
+    "dkod": { "url": "https://dashboard.dkod.app/api/v1/dkoder/mcp" }
   }
 }
 ```
@@ -173,10 +173,10 @@ Then, from your project folder, run `cursor-agent mcp login dkod` and sign in wi
 <details>
 <summary><b>Update the plugin</b></summary>
 
-Cursor does not update a plugin in `~/.cursor/plugins/local`. Run the install line again: it upgrades your copy. The DKOD server also tells the agent when your copy is old, and the agent runs the update from your DKOD dashboard, with no git. To run that update by hand:
+Cursor does not update a plugin in `~/.cursor/plugins/local`. Run the install line again: it upgrades your copy. The DKOD server also tells the agent when your copy is old, and the agent runs the update from dashboard.dkod.app, with no git. To run that update by hand:
 
 ```sh
-node ~/.cursor/plugins/local/dkod/skills/dkod/scripts/dkod-update.mjs ~/.cursor/plugins/local/dkod https://<your DKOD dashboard>/api/v1/dkoder/bundle/cursor.json
+node ~/.cursor/plugins/local/dkod/skills/dkod/scripts/dkod-update.mjs ~/.cursor/plugins/local/dkod https://dashboard.dkod.app/api/v1/dkoder/bundle/cursor.json
 ```
 
 With Python and no Node, run `dkod-update.py` from the same folder with `python3` and the same two arguments. Cursor loads the new plugin by itself.
