@@ -5,15 +5,15 @@
   </picture>
 </p>
 
-<p align="center">Keep using the AI agent you prefer.<br>This plugin brings your company's DKOD into Claude Code, Cursor, Codex and GitHub Copilot&nbsp;CLI.</p>
+<h2 id="install"><sub><picture><img src="assets/readme/dot-cyan.svg" width="18" height="10" alt=""></picture>Quick install</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-install-dark.svg"><img src="assets/readme/h-install-light.svg" alt="One line, any agent."></picture></h2>
 
-<p align="center">
-  <a href="#claude"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/install-claude-code-dark.svg"><img src="assets/readme/install-claude-code-light.svg" height="76" alt="Install in Claude Code"></picture></a>
-  <a href="#cursor"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/install-cursor-dark.svg"><img src="assets/readme/install-cursor-light.svg" height="76" alt="Install in Cursor"></picture></a>
-  <a href="#codex"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/install-codex-dark.svg"><img src="assets/readme/install-codex-light.svg" height="76" alt="Install in Codex"></picture></a>
-  <a href="#copilot"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/install-copilot-dark.svg"><img src="assets/readme/install-copilot-light.svg" height="76" alt="Install in Copilot"></picture></a>
-  <a href="https://dkod.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/dkod-ai-dark.svg"><img src="assets/readme/dkod-ai-light.svg" height="76" alt="dkod.ai"></picture></a>
-</p>
+**Recommended for everyone.** On macOS or Linux:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | sh
+```
+
+It installs `dk`, asks which agents get the plugin (Claude Code, Cursor, Codex, Copilot CLI), then says what to restart and how to sign in.
 
 <p align="center">
   <a href="LICENSE"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/badge-license-dark.svg"><img src="assets/readme/badge-license-light.svg" alt="License: MIT"></picture></a>
@@ -37,53 +37,26 @@
   <a href="#limits"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-limits-dark.svg"><img src="assets/readme/nav-limits-light.svg" alt="Limits"></picture></a>
 </p>
 
-<h2 id="install"><sub><picture><img src="assets/readme/dot-cyan.svg" width="18" height="10" alt=""></picture>Quick install</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-install-dark.svg"><img src="assets/readme/h-install-light.svg" alt="One line, any agent."></picture></h2>
-
-**Recommended for everyone.** On a Mac or Linux computer, run this one line. It works for Claude Code, Cursor, Codex and GitHub Copilot CLI, one of them or all of them.
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | sh
-```
-
-The script installs `dk`, the DKOD plugin manager, in `~/.local/bin`. Then it runs `dk install`, which:
-
-1. Recommends [graphify](https://github.com/Graphify-Labs/graphify) first, and installs it when you say yes. graphify maps your project's code into a graph on this computer. The DKOD skill builds that graph in your project and asks it instead of reading file after file, so your agent spends far fewer tokens and works faster, above all when it migrates an app to DKOD. It works only on this computer: graphify has no telemetry, and DKOD runs it with no AI backend, no AI key and no query log, so no file and no question is sent anywhere. Only installing it downloads it.
-2. Shows each agent, and the plugin version in it.
-3. Asks which agents to install it in or upgrade. Press Enter to upgrade the copies you have. With no copy yet, Enter means every agent it found.
-4. Asks which channel to follow. Choose **stable**, the default.
-5. Installs or upgrades, then tells you what to restart, and how to sign in.
-
-It changes nothing before you answer.
-
-| Channel | What you get |
-| -- | -- |
-| `stable` (recommended) | The latest [GitHub release](https://github.com/dkod-ai/dkod-plugin/releases) |
-| `nightly` | The newest build, published to `main` every night, before it is released |
-
-After that, `dk` does the rest:
+### `dk` does the rest
 
 | Command | What it does |
 | -- | -- |
-| `dk install` | Asks which agents and which channel, then installs or upgrades the plugin |
-| `dk upgrade` | Upgrades `dk`, then the plugin in every agent that has it |
-| `dk channel` | Shows the channel. `dk channel nightly` or `dk channel stable` moves `dk` and every installed plugin to it |
-| `dk config` | Writes the agent settings for you, so you never edit them by hand: `dk config cursor-allow` lets Cursor run the dkod tools and scripts with no approval stop, `dk config cursor-cli` gives the Cursor CLI the dkod server. Add `off` to undo one |
-| `dk doctor` | Checks `dk`, graphify, each agent, the plugin versions and the DKOD server, and names each issue |
-| `dk uninstall` | Asks what to remove: the plugin with its MCP server and skills in each agent, the marketplaces, and `dk`. `dk uninstall --all` removes everything with no question |
+| `dk install` | Install or upgrade the plugin, per agent |
+| `dk upgrade` | Upgrade `dk` and the plugin |
+| `dk channel` | Switch channel: `stable` (latest release, default) or `nightly` (newest build) |
+| `dk config` | Agent settings: `cursor-allow` (no approval prompts in Cursor), `cursor-cli` (dkod in `cursor-agent`). `off` undoes |
+| `dk doctor` | Check the setup and name each issue |
+| `dk uninstall` | Remove what you pick. `--all` removes everything |
 
-`dk` never uses `sudo`, and it does not change a copy that your company or your Cursor team installed. To answer the questions in advance, for example in a script:
+In a script: `curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | DKOD_AGENT=claude,codex DKOD_CHANNEL=stable sh` (`claude`, `cursor`, `codex`, `copilot` or `all`).
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | DKOD_AGENT=claude,codex DKOD_CHANNEL=stable sh
-```
-
-`DKOD_AGENT` is `claude`, `cursor`, `codex`, `copilot` or `all`, with commas between them. `DKOD_CHANNEL` is `stable` or `nightly`. With no terminal and no `DKOD_AGENT`, it upgrades the copies you have, each on its own channel.
+**graphify** (recommended, `dk` offers it): the DKOD skill maps your project into a [graphify](https://github.com/Graphify-Labs/graphify) code graph and asks it instead of reading file after file. Fewer tokens, faster work. It runs on your device only: no telemetry, no AI service.
 
 <h2 id="what-it-adds"><sub><picture><img src="assets/readme/dot-yellow.svg" width="18" height="10" alt=""></picture>What it adds</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-adds-dark.svg"><img src="assets/readme/h-adds-light.svg" alt="Three parts, one plugin."></picture></h2>
 
-- **MCP server** `dkod`: your org's policy, templates, Deploy questions, Deploy, build answers, Deliver and Remove.
-- **Skill** `dkod`: tells Claude how to use them, in the right order.<br>It also builds a [graphify](https://github.com/Graphify-Labs/graphify) code graph of your project, on this computer, and asks it instead of reading file after file: fewer tokens, faster work.
-- **Dkoder band and rules**: a band above the prompt shows whether you are signed in to DKOD.<br>DKOD's floor checks every command and file write, and once you sign in, so do your organization's Guard&nbsp;rules.
+- **MCP server** `dkod`: your org's policy, templates, Deploy and Deliver.
+- **Skills**: the DKOD steps, in order.
+- **Dkoder**: the rules on every command and file write, and in Claude Code a band above the prompt.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/readme/band-dark.svg">
@@ -101,34 +74,22 @@ curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh
 | <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/agent-codex-dark.svg"><img src="assets/readme/agent-codex-light.svg" width="22" height="16" alt=""></picture>A builder who uses Codex | The plugin in your own Codex CLI, with no admin | [Codex builder](#codex) |
 | <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/agent-copilot-dark.svg"><img src="assets/readme/agent-copilot-light.svg" width="22" height="16" alt=""></picture>A builder who uses GitHub Copilot CLI | The plugin in your own Copilot CLI, with no admin | [Copilot builder](#copilot) |
 
-The [quick install](#install) above is the recommended way for everyone. Use one of these only when it fits you better.
-
 <h2 id="cursor-admin"><sub><picture><img src="assets/readme/agent-cursor.svg" width="22" height="16" alt=""></picture>Cursor org admin</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-cursor-admin-dark.svg"><img src="assets/readme/h-cursor-admin-light.svg" alt="Your whole team, in Cursor."></picture></h2>
 
-**For:** the admin of a Cursor team. Every member gets the plugin from the team, and Cursor keeps it up to date. Members do not run the installer. On your own computer, use the [quick install](#install), the recommended way.
+For your own device, use the [quick install](#install), the recommended way. For your whole team:
 
-1. In the Cursor dashboard, import the GitHub repository `dkod-ai/dkod-plugin` as a team marketplace.
-2. Turn on **Enable Auto Refresh**. Then a new release reaches your team by itself.
-3. For Cursor cloud agents, open **Dashboard → Integrations & MCP** and add this MCP server for everyone:
+1. In the Cursor dashboard, import `dkod-ai/dkod-plugin` as a team marketplace and turn on **Enable Auto Refresh**.
+2. For cloud agents: **Dashboard → Integrations & MCP**, add `https://dashboard.dkod.app/api/v1/dkoder/mcp`.
+3. Members restart Cursor, then **Settings → MCP → DKOD → Connect**.
 
-   ```
-   https://dashboard.dkod.app/api/v1/dkoder/mcp
-   ```
-
-4. Tell each member to restart Cursor, then open **Settings → MCP**, find `DKOD` and choose **Connect**. They sign in with your company's own sign-in.
-
-In Cursor, the plugin gives the `dkod` MCP server, the `dkod` skill, an always-on DKOD rule and a hook that keeps a chat on the DKOD steps. The band and the Dkoder floor run only in Claude Code.
-
-To let the dkod tools run without an approval each time, each member runs `dk config cursor-allow` (see [Cursor builder](#cursor)), or you set the same allowlists for the team in the Cursor dashboard.
+To skip approval prompts, members run `dk config cursor-allow`, or you set the same allowlists in the team dashboard.
 
 <h2 id="claude-admin"><sub><picture><img src="assets/readme/agent-claude.svg" width="22" height="16" alt=""></picture>Anthropic org admin</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-claude-admin-dark.svg"><img src="assets/readme/h-claude-admin-light.svg" alt="Your whole org, in Claude."></picture></h2>
 
-**For:** the admin of a Claude Team or Enterprise organization. Every Claude Code in your company gets the plugin, and claude.ai gets the DKOD server. Members do not run the installer. On your own computer, use the [quick install](#install), the recommended way.
+For your own device, use the [quick install](#install), the recommended way. For your whole org, pick one:
 
-**Claude Code on your company's computers.** Choose one:
-
-- **Dkoder on the devices (recommended).** Install it from the DKOD dashboard, with your device management. A person cannot turn that copy off, and it updates by itself.
-- **The plugin, from managed settings.** Add this to the managed settings that your device management puts on each computer (`/Library/Application Support/ClaudeCode/managed-settings.json` on macOS, `/etc/claude-code/managed-settings.json` on Linux):
+- **Dkoder on the devices (recommended):** install it from the DKOD dashboard with your device management. It cannot be turned off and updates itself.
+- **Managed settings:** add this to `managed-settings.json` (`/Library/Application Support/ClaudeCode/` on macOS, `/etc/claude-code/` on Linux):
 
   ```json
   {
@@ -141,27 +102,19 @@ To let the dkod tools run without an approval each time, each member runs `dk co
   }
   ```
 
-  `"ref": "stable"` follows the latest release. Each member then types `/mcp` in Claude Code, picks `dkod` and chooses **Authenticate**.
+  Members then run `/mcp`, pick `dkod`, **Authenticate**.
 
-**Claude Code on the web, and the Desktop app's Cloud.** Plugins do not load in a cloud session. On claude.ai, an Owner adds a custom connector for the organization in the admin settings, under **Connectors**, with this URL:
-
-```
-https://dashboard.dkod.app/api/v1/dkoder/mcp
-```
-
-Members then connect it under **Settings → Connectors** and sign in. The server gives the agent the dkod skill and its scripts through the `dkoder.guide` tool. The default **Trusted** network reaches your organization's storage on AWS, Google Cloud and Cloudflare R2.
+**claude.ai and cloud sessions:** an Owner adds a custom connector with `https://dashboard.dkod.app/api/v1/dkoder/mcp` under **Connectors**.
 
 <h2 id="cursor"><sub><picture><img src="assets/readme/agent-cursor.svg" width="22" height="16" alt=""></picture>Cursor builder</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-cursor-dark.svg"><img src="assets/readme/h-cursor-light.svg" alt="Just you, in Cursor."></picture></h2>
 
-**For:** one builder who uses Cursor, when your team admin did not install the plugin for the team. If the plugin shows in Cursor already, your team installed it: skip to step 2.
-
-1. Install it with `dk`. On macOS or Linux:
+1. Install it with `dk`:
 
    ```sh
    curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | DKOD_AGENT=cursor sh
    ```
 
-   On Windows, `dk` does not run yet. Until it does, install the stable plugin in PowerShell:
+   Windows (`dk` does not run there yet), in PowerShell:
 
    ```powershell
    curl.exe -fsSLo "$env:TEMP\dkod-plugin.tar.gz" https://github.com/dkod-ai/dkod-plugin/archive/refs/heads/stable.tar.gz
@@ -170,34 +123,16 @@ Members then connect it under **Settings → Connectors** and sign in. The serve
    ```
 
 2. Quit Cursor fully and open it again.
-3. Open **Settings → MCP**, find `DKOD` and choose **Connect**. You sign in with your company's own sign-in.
-4. Let Cursor run the dkod tools and the DKOD scripts with no approval stop:
+3. **Settings → MCP → DKOD → Connect**.
+4. No approval prompts: `dk config cursor-allow`.
 
-   ```sh
-   dk config cursor-allow
-   ```
+**Cursor CLI:** `dk config cursor-cli` adds dkod to `~/.cursor/mcp.json`. Sign-in is per project folder: run `cursor-agent mcp login dkod` in each one.
 
-   It adds the dkod entries to `~/.cursor/permissions.json` and keeps the rest of the file. That file replaces the allowlists in Cursor's settings, so add any other tool you allowed there to it. Run Mode must be Auto-review, Allowlist or Run Everything. `dk config cursor-allow off` takes the entries out again.
+**Cloud agents:** add `https://dashboard.dkod.app/api/v1/dkoder/mcp` at [cursor.com/agents](https://cursor.com/agents).
 
-**Cursor cloud agents:** add `https://dashboard.dkod.app/api/v1/dkoder/mcp` in the MCP list at [cursor.com/agents](https://cursor.com/agents).
-
-### Cursor CLI
-
-The plugin's MCP sign-in works only in the desktop app. For `cursor-agent`, give it the dkod server:
-
-```sh
-dk config cursor-cli
-```
-
-It adds the dkod server to `~/.cursor/mcp.json` and keeps the rest of the file. The Cursor CLI signs in per project folder: `dk` offers to sign in for the folder you run it in, and in each other project folder you run `cursor-agent mcp login dkod` once, with your company's own sign-in.
-
-### Update, channel and removal
-
-Run `dk upgrade`: it upgrades `dk`, then the plugin in Cursor. The DKOD server also tells the agent when your copy is old, and the agent updates it from dashboard.dkod.app by itself. `dk channel` switches between stable and nightly, `dk doctor` checks the setup, and `dk uninstall` removes the plugin and the settings `dk` wrote.
+**Updates:** `dk upgrade`, or the agent updates it from dashboard.dkod.app by itself. Also `dk channel`, `dk doctor`, `dk uninstall`.
 
 <h2 id="claude"><sub><picture><img src="assets/readme/agent-claude.svg" width="22" height="16" alt=""></picture>Claude Code builder</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-claude-dark.svg"><img src="assets/readme/h-claude-light.svg" alt="Just you, in Claude Code."></picture></h2>
-
-**For:** one builder who uses Claude Code, when your company did not install DKOD on your computer.
 
 1. Install it with `dk`:
 
@@ -205,16 +140,14 @@ Run `dk upgrade`: it upgrades `dk`, then the plugin in Cursor. The DKOD server a
    curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | DKOD_AGENT=claude sh
    ```
 
-2. Quit Claude Code and start it again.
-3. Type `/mcp`, pick `dkod` and choose **Authenticate**. You sign in with your company's own sign-in. DKOD never sees a password.
+2. Restart Claude Code.
+3. `/mcp`, pick `dkod`, **Authenticate**. The band turns from yellow to cyan.
 
-Until you sign in, the band above the prompt is yellow. To upgrade, run `dk upgrade` and restart Claude Code. `dk channel` switches between stable and nightly, `dk doctor` checks the setup, and `dk uninstall` removes it.
+**Updates:** `dk upgrade`, then restart. Also `dk channel`, `dk doctor`, `dk uninstall`.
 
-**Claude Code on the web, or the Desktop app's Cloud:** plugins do not load there. On claude.ai, open **Settings → Connectors**, add a custom connector with `https://dashboard.dkod.app/api/v1/dkoder/mcp` and sign in.
+**claude.ai:** **Settings → Connectors**, add `https://dashboard.dkod.app/api/v1/dkoder/mcp`.
 
 <h2 id="codex"><sub><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/agent-codex-dark.svg"><img src="assets/readme/agent-codex-light.svg" width="22" height="16" alt=""></picture>Codex builder</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-codex-dark.svg"><img src="assets/readme/h-codex-light.svg" alt="Just you, in Codex."></picture></h2>
-
-**For:** one builder who uses the Codex CLI. Codex reads this repository's plugin marketplace.
 
 1. Install it with `dk`:
 
@@ -222,14 +155,12 @@ Until you sign in, the band above the prompt is yellow. To upgrade, run `dk upgr
    curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | DKOD_AGENT=codex sh
    ```
 
-2. Quit Codex and start it again. When Codex asks to trust the DKOD hook, trust it.
-3. Run `codex mcp login dkod`. You sign in with your company's own sign-in. DKOD never sees a password.
+2. Restart Codex. Trust the DKOD hook when asked.
+3. `codex mcp login dkod`.
 
-In Codex, the plugin gives the `dkod` MCP server, the `dkod` skills and the Dkoder floor hook. The band runs only in Claude Code. To upgrade, run `dk upgrade` and restart Codex. `dk channel` switches between stable and nightly, `dk doctor` checks the setup (it also says when Codex is not signed in), and `dk uninstall` removes it.
+**Updates:** `dk upgrade`, then restart. Also `dk channel`, `dk doctor`, `dk uninstall`.
 
 <h2 id="copilot"><sub><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/agent-copilot-dark.svg"><img src="assets/readme/agent-copilot-light.svg" width="22" height="16" alt=""></picture>Copilot builder</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-copilot-dark.svg"><img src="assets/readme/h-copilot-light.svg" alt="Just you, in Copilot."></picture></h2>
-
-**For:** one builder who uses GitHub Copilot CLI. Copilot reads this repository's plugin marketplace.
 
 1. Install it with `dk`:
 
@@ -237,39 +168,35 @@ In Codex, the plugin gives the `dkod` MCP server, the `dkod` skills and the Dkod
    curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | DKOD_AGENT=copilot sh
    ```
 
-2. Quit Copilot CLI and start it again.
-3. Type `/mcp` and check `dkod`. When it asks you to sign in, use your company's own sign-in.
+2. Restart Copilot CLI.
+3. `/mcp`, check `dkod`, sign in when asked. If your org's Copilot policy blocks third-party MCP servers, ask your GitHub admin.
 
-In Copilot, the plugin gives the `dkod` MCP server, the `dkod` skills and the Dkoder floor hook. The band runs only in Claude Code. If your organization's Copilot policy blocks third-party MCP servers, ask your GitHub admin to allow DKOD. To upgrade, run `dk upgrade` and restart Copilot CLI. `dk channel` switches between stable and nightly, `dk doctor` checks the setup, and `dk uninstall` removes it.
+**Updates:** `dk upgrade`, then restart. Also `dk channel`, `dk doctor`, `dk uninstall`.
 
 <h2 id="dkoder-and-guard"><sub><picture><img src="assets/readme/dot-mint.svg" width="18" height="10" alt=""></picture>Dkoder and Guard</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-guard-dark.svg"><img src="assets/readme/h-guard-light.svg" alt="The floor, plus your rules."></picture></h2>
 
 | | Dkoder | Guard |
 | -- | -- | -- |
-| What | This plugin, in your agent | Your organization's policy, as rules |
-| Rules | The floor, the same for every organization | Your organization's own, from its governance repository |
-| Needs | Nothing. Works signed out; the band asks you to sign in | Sign-in through `/mcp`, or your company's device install |
+| What | This plugin | Your org's policy, as rules |
+| Rules | DKOD's floor, same for every org | Your org's own, from its governance repo |
+| Needs | Nothing | Sign-in, or your company's device install |
 
 <h2 id="what-the-rules-check"><sub><picture><img src="assets/readme/dot-pink.svg" width="18" height="10" alt=""></picture>What the rules check</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-rules-dark.svg"><img src="assets/readme/h-rules-light.svg" alt="App code ships through Deliver."></picture></h2>
 
-The rules need to know your org: which GitHub owners are yours, which repository is the governance repository, and the org's own blocked commands. Dkoder gets those facts from DKOD when you sign in through `/mcp`, if your organization turned Guard on. Your company can also install Dkoder on its devices from the DKOD dashboard; that copy cannot be turned off. Then, in the org's repositories, the floor refuses:
+In your org's repositories, the floor refuses:
 
-- `git push`, `gh pr merge` and GitHub API writes to an app repository. App code ships through Deliver.
-- A secret value (private keys, cloud keys, vendor tokens) written into a file.
+- `git push`, `gh pr merge` and GitHub API writes to an app repo. App code ships through Deliver.
+- A secret written into a file.
 - Skipped git hooks (`--no-verify`, `core.hooksPath`).
 
-Guard adds your organization's own rules on top, such as blocked commands. A refusal says which one refused: the Dkoder floor, or a Guard rule of your organization.
-
-Before you sign in, nothing names your org, so a repository with a remote is left alone. A folder with no remote still gets the secret check. This plugin sends no events and needs no install file.
+Guard adds your org's own rules. Before sign-in, repos with a remote are left alone; the secret check still runs. No events are sent.
 
 <h2 id="limits"><sub><picture><img src="assets/readme/dot-coral.svg" width="18" height="10" alt=""></picture>Limits</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-limits-dark.svg"><img src="assets/readme/h-limits-light.svg" alt="Guide rails, not a lock."></picture></h2>
 
 > [!IMPORTANT]
-> The rules keep Claude on the Deliver path. They are not a security boundary against a person.
+> The rules keep the agent on the Deliver path. They are not a security boundary against a person.
 
-To stop direct pushes for real, protect the app repository on GitHub (branch protection or rulesets). DKOD's Deliver does not need a person to push.
-
-<br>
+To block direct pushes for real, protect the app repo on GitHub (branch protection or rulesets).
 
 <p align="center">
   <a href="https://dkod.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/dkod-dark.svg"><img src="assets/readme/dkod-light.svg" height="30" alt="DKOD"></picture></a>

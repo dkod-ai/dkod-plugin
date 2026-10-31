@@ -1858,6 +1858,71 @@ async function checkFolder(pack, dir, io) {
   };
 }
 
+var LOCAL_HOST = "(?:localhost|127(?:[.]\\d+){3}|0[.]0[.]0[.]0|\\[?::1\\]?|redis|valkey|memcached)";
+var STORE_KEY = /^(?:export\s+)?(REDIS\w*|KV_\w*|CACHE_\w*|MEMCACHE\w*|VALKEY\w*)\s*[=:]\s*(.*)$/;
+var LOCAL_URL = new RegExp(`^["']?(?:\\w+://)?(?:[^@/\\s]*@)?${LOCAL_HOST}(?:[:/"']|$)`, "i");
+var LOCAL_BLOB_KEY = /^(?:export\s+)?(STORAGE_DRIVER|FILE_STORAGE\w*|BLOB_DRIVER|BLOB_STORAGE\w*|UPLOAD_DRIVER)\s*[=:]\s*["']?(local|fs|file|disk|filesystem)["']?\s*$/i;
+var CODE_HOST = "(?:localhost|127(?:[.]\\d+){3}|0[.]0[.]0[.]0|::1|redis)\\b";
+var LOCAL_STORE_CODE = [
+  /\bredis-server\b/,
+  new RegExp(`\\bnew\\s+(?:Redis|IORedis)\\s*\\(\\s*(?:\\{[^)]*\\bhost\\s*:\\s*)?["'\`](?:\\w+://)?${CODE_HOST}`),
+  /\bnew\s+(?:Redis|IORedis)\s*\(\s*\)/,
+  new RegExp(`\\bcreateClient\\s*\\([^)]*["'\`](?:redis://)?${CODE_HOST}`),
+  new RegExp(`\\bredis://${CODE_HOST}`),
+  /\b(?:mkdir|mkdirSync|writeFile|writeFileSync|createWriteStream|appendFile|appendFileSync)\s*\([^)]*["'`][^"'`]*\b(?:uploads?|storage)\//
+];
+var ADVICE = "follow the migration.yaml cache/blob policy (stub, keep or refuse) and never start a local store.";
+var ENV_FILE = /^\.env(?:\..+)?$/;
+var COMPOSE = /(?:^|\/)(?:docker-)?compose[^/]*\.ya?ml$/i;
+var SOURCE2 = /(?:\.[cm]?[jt]sx?|\.py|\.rb|\.sh)$|(?:^|\/)Dockerfile[^/]*$/;
+var SELECTOR_KEY = /_(?:DRIVER|STORE|CLIENT|PREFIX|TYPE|PROVIDER)$/i;
+var base = (p) => p.split("/").pop() ?? p;
+var stripComments = (text) => text.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/.*$/gm, "$1");
+function localStoreProblems(sources, read) {
+  const problems = [];
+  for (const f of sources) {
+    if (f.startsWith("tests/") || f.startsWith(".dkod/"))
+      continue;
+    if (ENV_FILE.test(base(f))) {
+      for (const raw of read(f).split(`
+`)) {
+        const line = raw.trim();
+        if (line === "" || line.startsWith("#"))
+          continue;
+        const store = STORE_KEY.exec(line);
+        if (store !== null && !SELECTOR_KEY.test(store[1] ?? "") && LOCAL_URL.test((store[2] ?? "").trim()))
+          problems.push(`${f}: ${store[1]} points at a local store (value masked). ${ADVICE[0].toUpperCase()}${ADVICE.slice(1)}`);
+        const blob = LOCAL_BLOB_KEY.exec(line);
+        if (blob !== null)
+          problems.push(`${f}: ${blob[1]} is a local file store (value masked). ${ADVICE[0].toUpperCase()}${ADVICE.slice(1)}`);
+      }
+      continue;
+    }
+    let code;
+    if (base(f) === "package.json") {
+      try {
+        const pkg = JSON.parse(read(f));
+        code = Object.values(pkg.scripts ?? {}).filter((v) => typeof v === "string").join(`
+`);
+      } catch {
+        continue;
+      }
+    } else if (COMPOSE.test(f)) {
+      code = read(f).replace(/(^|\s)#.*$/gm, "$1");
+      if (/^\s*image:\s*["']?(?:redis|valkey|memcached|minio)\b/im.test(code))
+        problems.push(`${f}: a compose service runs a local store image. ${ADVICE[0].toUpperCase()}${ADVICE.slice(1)}`);
+      continue;
+    } else if (SOURCE2.test(f))
+      code = stripComments(read(f));
+    else
+      continue;
+    const hit = LOCAL_STORE_CODE.map((re) => re.exec(code)).find((m) => m !== null);
+    if (hit)
+      problems.push(`${f}: starts or connects to a local store (${hit[0].trim().slice(0, 60)}). ${ADVICE[0].toUpperCase()}${ADVICE.slice(1)}`);
+  }
+  return problems;
+}
+
 var join3 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var TEST_FILE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
 var TITLE = /\b(?:test|it)(?:\.(?:only|fixme|slow))?\(\s*(["'`])((?:\\.|(?!\1)[^\\])*)\1/g;
@@ -2114,7 +2179,7 @@ var STARTER_PACK = {
 };
 var join4 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var SKIP = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".dkod"];
-var SOURCE2 = /\.[cm]?[jt]sx?$/;
+var SOURCE3 = /\.[cm]?[jt]sx?$/;
 var DATA = /\.(?:sqlite|sqlite3|db|db3)$/i;
 var IMAGE = /\.(?:png|jpe?g|webp|gif)$/i;
 var HTML = /\.html?$/i;
@@ -2130,7 +2195,7 @@ var DESTRUCTIVE_SEED = [
   /\.destroy\s*\(\s*\{/i,
   /\.del\s*\(/i
 ];
-var stripComments = (text) => text.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/.*$/gm, "$1").replace(/(^|\s)--.*$/gm, "$1");
+var stripComments2 = (text) => text.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/.*$/gm, "$1").replace(/(^|\s)--.*$/gm, "$1");
 var SEED_FILE = /\.(?:[cm]?[jt]s|sql|py)$/i;
 var NEXT_MARKERS = ["__NEXT_DATA__", "/_next/static/", "next-route-announcer"];
 var isRec5 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -2141,7 +2206,7 @@ var json3 = (text) => {
     return null;
   }
 };
-var base = (p) => p.split("/").pop() ?? p;
+var base2 = (p) => p.split("/").pop() ?? p;
 function ignoresEnvLocal(text) {
   return text.split(`
 `).some((raw) => {
@@ -2208,7 +2273,7 @@ async function checkBuild(folder, reportFile, io) {
   const map = json3(io.readFile(join4(dir, ".dkod/map/app-map.json")));
   const tables = isRec5(map) && Array.isArray(map.tables) ? map.tables.filter(isRec5).flatMap((t) => typeof t.name === "string" ? [t.name] : []) : [];
   if (tables.length > 0) {
-    const text = sources.filter((f) => SOURCE2.test(f) && !/^(?:tests|migrations)\//.test(f)).map((f) => io.readFile(join4(dir, f)) ?? "").join(`
+    const text = sources.filter((f) => SOURCE3.test(f) && !/^(?:tests|migrations)\//.test(f)).map((f) => io.readFile(join4(dir, f)) ?? "").join(`
 `);
     for (const name of tables) {
       const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -2228,11 +2293,11 @@ async function checkBuild(folder, reportFile, io) {
       const named = seedCmd.split(/\s+/).map((t) => t.replace(/^\.\//, "")).filter((t) => SEED_FILE.test(t) && sources.includes(t));
       const seeds = new Set([
         ...named,
-        ...sources.filter((f) => SEED_FILE.test(f) && !f.startsWith("tests/") && !f.startsWith(".dkod/") && (/^seed/i.test(base(f)) || /(^|\/)seeders?\/|(^|\/)seeds\//.test(f)))
+        ...sources.filter((f) => SEED_FILE.test(f) && !f.startsWith("tests/") && !f.startsWith(".dkod/") && (/^seed/i.test(base2(f)) || /(^|\/)seeders?\/|(^|\/)seeds\//.test(f)))
       ]);
       for (const f of seeds) {
         const text = io.readFile(join4(dir, f)) ?? "";
-        const code = stripComments(/\.py$/i.test(f) ? text.replace(/(^|\s)#.*$/gm, "$1") : text);
+        const code = stripComments2(/\.py$/i.test(f) ? text.replace(/(^|\s)#.*$/gm, "$1") : text);
         const hit = DESTRUCTIVE_SEED.map((re) => re.exec(code)).find((m) => m !== null);
         if (hit)
           problems.push(`${f}: db:seed deletes, truncates or drops rows (${hit[0].trim()}). Dev is shared by every builder in the org and CI runs db:seed too: insert the original's rows idempotently (insert ... on conflict do nothing, or skip a table that already has rows) and never delete, truncate or update rows.`);
@@ -2242,6 +2307,7 @@ async function checkBuild(folder, reportFile, io) {
   for (const f of sources)
     if (DATA.test(f))
       problems.push(`${f}: a file database in the dk- folder. The data lives in the Dev data service.`);
+  problems.push(...localStoreProblems(sources, (f) => io.readFile(join4(dir, f)) ?? ""));
   const assets = json3(io.readFile(join4(dir, ".dkod/map/assets/assets.json")));
   if (Array.isArray(assets)) {
     for (const a of assets.filter(isRec5)) {
@@ -2253,7 +2319,7 @@ async function checkBuild(folder, reportFile, io) {
         continue;
       }
       const want = io.sha256([source]);
-      const same = sources.some((f) => base(f) === base(a.path) && io.sha256([join4(dir, f)]) === want);
+      const same = sources.some((f) => base2(f) === base2(a.path) && io.sha256([join4(dir, f)]) === want);
       if (!same)
         problems.push(`asset ${a.path}: no byte-identical copy in the dk- folder. Copy the file as it is; never redraw it.`);
     }
@@ -2275,13 +2341,13 @@ async function checkBuild(folder, reportFile, io) {
   }
   for (const f of sources) {
     const infra = f === "Dockerfile" || f === ".dockerignore" || f === "package.json" || /^\.github\/workflows\//.test(f);
-    if (!infra && !(SOURCE2.test(f) && !f.startsWith("tests/")))
+    if (!infra && !(SOURCE3.test(f) && !f.startsWith("tests/")))
       continue;
     const line = templateTokenLine(io.readFile(join4(dir, f)) ?? "");
     if (line !== null)
       problems.push(`${f}: still has template text ({{...}} at line ${String(line)}). Render the template with dkod-migrate.mjs render; never copy its source.`);
   }
-  const appName = base((dir === "." ? io.cwd : dir).replace(/[\\/]+$/, ""));
+  const appName = base2((dir === "." ? io.cwd : dir).replace(/[\\/]+$/, ""));
   if (appName.startsWith("dk-") && sources.includes("package.json") && !sources.includes("bun.lock")) {
     problems.push("bun.lock: missing. Run `bun install` in the dk- folder and keep bun.lock; without it the deploy installs without a lock file.");
   }
@@ -2300,7 +2366,7 @@ async function checkBuild(folder, reportFile, io) {
     }
   }
   for (const f of sources) {
-    if (/(^|\/)_next(\/|$)/.test(f) || /(^|\/)webpack-[^/]*\.js$/.test(f) || /(^|\/)chunks\//.test(f) || base(f).includes("buildManifest")) {
+    if (/(^|\/)_next(\/|$)/.test(f) || /(^|\/)webpack-[^/]*\.js$/.test(f) || /(^|\/)chunks\//.test(f) || base2(f).includes("buildManifest")) {
       problems.push(`${f}: the original's build output in the dk- folder. Never copy build output; rebuild every page on the stack.`);
     }
   }
@@ -3319,15 +3385,15 @@ var ENV_READS = [
   /\bos\.getenv\(\s*(["'])([A-Za-z_]\w*)\1/g
 ];
 var VITE_BUILTIN = new Set(["MODE", "DEV", "PROD", "SSR", "BASE_URL"]);
-var ENV_FILE = /^(?:.*\.)?env(?:\..+)?$|\.example$/;
+var ENV_FILE2 = /^(?:.*\.)?env(?:\..+)?$|\.example$/;
 var ENV_SCHEMA = /^env\.[cm]?[jt]s$/;
 function discoverSettings(original, io) {
   const names = new Set;
   for (const f of io.walk(original, SKIP3)) {
     const base = f.split("/").pop();
-    if (IS_TEST.test(f) && ENV_FILE.test(base))
+    if (IS_TEST.test(f) && ENV_FILE2.test(base))
       continue;
-    if (ENV_FILE.test(base) && !CODE2.test(base) && !PY.test(base) && !VUE.test(base)) {
+    if (ENV_FILE2.test(base) && !CODE2.test(base) && !PY.test(base) && !VUE.test(base)) {
       for (const line of (io.readFile(join7(original, f)) ?? "").split(/\r?\n/)) {
         const key = /^\s*(?:export\s+)?([A-Za-z_]\w*)\s*=/.exec(line)?.[1];
         if (key !== undefined)
@@ -3552,7 +3618,7 @@ function discoverServices(original, io) {
   for (const f of io.walk(original, SKIP3)) {
     const isPkg = f === "package.json" || f.endsWith("/package.json");
     const py = PY.test(f);
-    const plain = HOST_FILE.test(f) || ENV_FILE.test(f.split("/").pop()) && !CODE2.test(f) && !py;
+    const plain = HOST_FILE.test(f) || ENV_FILE2.test(f.split("/").pop()) && !CODE2.test(f) && !py;
     if (IS_TEST.test(f) || !isPkg && !plain && !CODE2.test(f) && !py)
       continue;
     const raw = io.readFile(join7(original, f));
