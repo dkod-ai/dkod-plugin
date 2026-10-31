@@ -47,7 +47,7 @@ curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh
 
 The script installs `dk`, the DKOD plugin manager, in `~/.local/bin`. Then it runs `dk install`, which:
 
-1. Recommends [graphify](https://github.com/Graphify-Labs/graphify) first, and installs it when you say yes. graphify maps your project's code into a graph on this computer. The DKOD skill builds that graph in your project and asks it instead of reading file after file, so your agent spends far fewer tokens and works faster, above all when it migrates an app to DKOD. Only the code is read, by graphify's local parser: nothing is sent to an AI service.
+1. Recommends [graphify](https://github.com/Graphify-Labs/graphify) first, and installs it when you say yes. graphify maps your project's code into a graph on this computer. The DKOD skill builds that graph in your project and asks it instead of reading file after file, so your agent spends far fewer tokens and works faster, above all when it migrates an app to DKOD. It works only on this computer: graphify has no telemetry, and DKOD runs it with no AI backend, no AI key and no query log, so no file and no question is sent anywhere. Only installing it downloads it.
 2. Shows each agent, and the plugin version in it.
 3. Asks which agents to install it in or upgrade. Press Enter to upgrade the copies you have. With no copy yet, Enter means every agent it found.
 4. Asks which channel to follow. Choose **stable**, the default.
