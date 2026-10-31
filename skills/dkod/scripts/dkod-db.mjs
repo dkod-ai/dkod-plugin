@@ -1,7 +1,9 @@
 // Built by packages/dkoder-plugin/scripts/build-db.ts from dkod-app. Do not edit: run `bun run --cwd packages/dkoder-plugin build:db`.
 import { randomUUID } from "node:crypto";
 import { spawn as spawn2 } from "node:child_process";
-import { closeSync, existsSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir as tmpdir2 } from "node:os";
+import { join as join2 } from "node:path";
 
 import { createHash as createHash3, randomBytes as randomBytes2 } from "node:crypto";
 import net2 from "node:net";
@@ -396,7 +398,7 @@ var FLAGS = {
   explain: [],
   import: ["app", "from", "dir", "port"]
 };
-var BOOLEAN_FLAGS = { up: ["detach"] };
+var BOOLEAN_FLAGS = { up: ["detach"], down: ["all"] };
 function parseArgs(argv) {
   const [command, ...rest] = argv;
   if (!command || !(command in FLAGS))
@@ -419,7 +421,7 @@ function parseArgs(argv) {
 var USAGE = [
   "Usage:",
   "  node dkod-db.mjs up --app <app key> [--port 6543] [--dir <app folder>] [--wait <seconds>] [--detach]",
-  "  node dkod-db.mjs down [--dir <app folder>]",
+  "  node dkod-db.mjs down [--dir <app folder>] [--all]",
   "  node dkod-db.mjs migrate [--dir <app folder>] [--port 6543]",
   "  node dkod-db.mjs import --app <app key> --from <local postgres URL | snapshot> [--dir <app folder>] [--port 6543]"
 ].join(`
@@ -1287,6 +1289,18 @@ var READY_LINE = /Dev database on 127\.0\.0\.1:(\d+)/;
 async function isOurTunnel(io, state) {
   return io.alive(state.pid) && state.port !== undefined && await probe(state.port);
 }
+async function liveTunnels(io) {
+  const live = [];
+  for (const path of io.listStates()) {
+    const state = readState(io, path);
+    if (state && await isOurTunnel(io, state))
+      live.push({ path, state });
+    else
+      io.remove(path);
+  }
+  return live;
+}
+var describeTunnel = (t) => ({ app: t.app, pid: t.pid, port: t.port, dir: t.dir });
 async function stopTunnel(io, state) {
   io.kill(state.pid, "SIGTERM");
   for (let waited = 0;waited < 5000; waited += POLL_MS) {
@@ -1321,6 +1335,15 @@ async function runUpDetached(flags, io) {
     await stopTunnel(io, old);
   }
   io.remove(paths.state);
+  const wanted = portOf(flags.get("port"), DEFAULT_PORT);
+  if (wanted !== null && wanted !== 0) {
+    const holder = (await liveTunnels(io)).find((t) => t.path !== paths.state && t.state.port === wanted);
+    if (holder) {
+      const h = holder.state;
+      say(`Port ${wanted} is held by the dkod-db tunnel for app ${h.app} (pid ${h.pid}) started in ${h.dir}. Stop it with: node dkod-db.mjs down --dir ${h.dir} (or down --all), then run this again.`);
+      return 3;
+    }
+  }
   const args = ["up"];
   for (const [name, value] of flags)
     if (name !== "detach")
@@ -1355,11 +1378,21 @@ async function runUpDetached(flags, io) {
   }
 }
 async function runDown(flags, io) {
+  if (flags.has("all")) {
+    const live = await liveTunnels(io);
+    for (const t of live)
+      await stopTunnel(io, t.state);
+    for (const path of io.listStates())
+      io.remove(path);
+    io.print(JSON.stringify({ ok: true, stopped: live.length > 0, tunnels: live.map((t) => describeTunnel(t.state)) }));
+    return 0;
+  }
   const paths = statePaths(flags.get("dir") ?? io.cwd);
   const state = readState(io, paths.state);
   if (!state || !await isOurTunnel(io, state)) {
     io.remove(paths.state);
-    io.print(JSON.stringify({ ok: true, stopped: false }));
+    const others = (await liveTunnels(io)).filter((t) => t.path !== paths.state).map((t) => describeTunnel(t.state));
+    io.print(JSON.stringify({ ok: true, stopped: false, ...others.length > 0 ? { others } : {} }));
     return 0;
   }
   await stopTunnel(io, state);
@@ -1476,5 +1509,19 @@ process.exitCode = await runDbCli(process.argv.slice(2), {
     try {
       rmSync(path, { force: true });
     } catch {}
+  },
+  listStates: () => {
+    try {
+      const uid = process.getuid?.();
+      return readdirSync(tmpdir2()).filter((name) => /^dkod-db-[0-9a-f]{16}\.json$/.test(name)).map((name) => join2(tmpdir2(), name)).filter((path) => {
+        try {
+          return uid === undefined || statSync(path).uid === uid;
+        } catch {
+          return false;
+        }
+      });
+    } catch {
+      return [];
+    }
   }
 });

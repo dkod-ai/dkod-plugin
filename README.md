@@ -23,7 +23,7 @@ It installs `dk`, asks which agents get the plugin (Claude Code, Cursor, Codex, 
 
 <p align="center">
   <a href="LICENSE"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/badge-license-dark.svg"><img src="assets/readme/badge-license-light.svg" alt="License: MIT"></picture></a>
-  <a href="https://github.com/dkod-ai/dkod-plugin/commits/main"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/badge-version-dark.svg"><img src="assets/readme/badge-version-light.svg" alt="Plugin version"></picture></a>
+  <a href="https://github.com/dkod-ai/dkod-plugin/releases"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/badge-version-dark.svg"><img src="assets/readme/badge-version-light.svg" alt="Nightly version"></picture></a>
   <a href="#install"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/badge-agents-dark.svg"><img src="assets/readme/badge-agents-light.svg" alt="Works in Claude Code, Cursor, Codex and Copilot"></picture></a>
   <a href="#what-the-rules-check"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/badge-events-dark.svg"><img src="assets/readme/badge-events-light.svg" alt="Events: none sent"></picture></a>
   <a href="https://dashboard.dkod.app/docs"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/badge-docs-dark.svg"><img src="assets/readme/badge-docs-light.svg" alt="Docs: in the DKOD dashboard"></picture></a>
@@ -49,7 +49,7 @@ It installs `dk`, asks which agents get the plugin (Claude Code, Cursor, Codex, 
 | -- | -- |
 | `dk install` | Install or upgrade the plugin, per agent |
 | `dk upgrade` | Upgrade `dk` and the plugin |
-| `dk channel` | Switch channel: `stable` (latest release, default) or `nightly` (newest build) |
+| `dk channel` | Switch channel: `stable` (the release marked Latest, default) or `nightly` (newest build, a pre-release; the badge shows it) |
 | `dk config` | Agent settings: `cursor-allow` (no approval prompts in Cursor), `cursor-cli` (dkod in `cursor-agent`). `off` undoes |
 | `dk doctor` | Check the setup and name each issue |
 | `dk uninstall` | Remove what you pick. `--all` removes everything |
