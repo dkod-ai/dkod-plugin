@@ -48,10 +48,10 @@
 
 | You are | You want | Read |
 | -- | -- | -- |
-| <picture><img src="assets/readme/agent-cursor.svg" width="22" height="16" alt=""></picture> A Cursor team admin | The plugin for every member of your Cursor team, with no step on their side | [Cursor org admin](#cursor-admin) |
-| <picture><img src="assets/readme/agent-claude.svg" width="22" height="16" alt=""></picture> An admin of a Claude Team or Enterprise org | The plugin in every Claude Code of your company, and the DKOD server in claude.ai | [Anthropic org admin](#claude-admin) |
-| <picture><img src="assets/readme/agent-cursor.svg" width="22" height="16" alt=""></picture> A builder who uses Cursor | The plugin in your own Cursor, with no admin | [Cursor builder](#cursor) |
-| <picture><img src="assets/readme/agent-claude.svg" width="22" height="16" alt=""></picture> A builder who uses Claude Code | The plugin in your own Claude Code, with no admin | [Claude Code builder](#claude) |
+| <picture><img src="assets/readme/agent-cursor.svg" width="22" height="16" alt=""></picture>A Cursor team admin | The plugin for every member of your Cursor team, with no step on their side | [Cursor org admin](#cursor-admin) |
+| <picture><img src="assets/readme/agent-claude.svg" width="22" height="16" alt=""></picture>An admin of a Claude Team or Enterprise org | The plugin in every Claude Code of your company, and the DKOD server in claude.ai | [Anthropic org admin](#claude-admin) |
+| <picture><img src="assets/readme/agent-cursor.svg" width="22" height="16" alt=""></picture>A builder who uses Cursor | The plugin in your own Cursor, with no admin | [Cursor builder](#cursor) |
+| <picture><img src="assets/readme/agent-claude.svg" width="22" height="16" alt=""></picture>A builder who uses Claude Code | The plugin in your own Claude Code, with no admin | [Claude Code builder](#claude) |
 
 Not sure? Run the [quick install](#install). It asks the questions.
 
