@@ -1,10 +1,10 @@
 name: release
-# One GitHub release per plugin version, tagged on the commit of main that first carried it. The newest
-# release is marked latest, and the `stable` branch moves to it: the stable channel of install.sh, and a
-# Claude Code marketplace added as dkod-ai/dkod-plugin@stable, follow it.
+# Promotes nightly to stable. main is the nightly channel: dkod-app publishes to it every night. Run this
+# workflow by hand (Actions, release, Run workflow; or `gh workflow run release.yml --repo dkod-ai/dkod-plugin`)
+# to release main's plugin version: it tags the commit of main that first carried that version, marks the
+# release latest, and moves the `stable` branch to it. The stable channel (install.sh, dk, and a Claude Code
+# marketplace added as dkod-ai/dkod-plugin@stable) follows that branch.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 permissions:
   contents: write
@@ -19,26 +19,28 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - name: Tag and release every new version
+      - name: Release main's version
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" = "$1" ]; }
-          top=0.0.0; top_sha=
-          for sha in $(git log --first-parent --reverse --format=%H HEAD -- .claude-plugin/plugin.json); do
-            v=$(git show "$sha:.claude-plugin/plugin.json" | sed -nE 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' | head -n 1)
-            [ -n "$v" ] && newer "$v" "$top" || continue
-            top=$v; top_sha=$sha
-            if gh release view "v$v" >/dev/null 2>&1; then continue; fi
-            # GitHub makes the tag. The CI token may not create a ref whose workflow files differ from main's,
-            # so an old version's tag needs a person's token; a new version on main has main's workflows.
-            gh release create "v$v" --target "$sha" --title "v$v" --generate-notes --latest=false
-            echo "released v$v at $sha"
+          version_at() { git show "$1:.claude-plugin/plugin.json" | sed -nE 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' | head -n 1; }
+          v=$(version_at HEAD)
+          [ -n "$v" ] || { echo "main has no plugin version"; exit 1; }
+          # The first commit of main that carried this version.
+          sha=
+          for c in $(git log --first-parent --reverse --format=%H HEAD -- .claude-plugin/plugin.json); do
+            if [ "$(version_at "$c")" = "$v" ]; then sha=$c; break; fi
           done
-          [ -n "$top_sha" ] || exit 0
-          gh release edit "v$top" --latest
+          if gh release view "v$v" >/dev/null 2>&1; then
+            echo "v$v is released already"
+          else
+            # GitHub makes the tag. The CI token may not create a ref whose workflow files differ from main's.
+            gh release create "v$v" --target "$sha" --title "v$v" --generate-notes --latest
+            echo "released v$v at $sha"
+          fi
+          gh release edit "v$v" --latest
           # The stable branch only moves forward along main: the update is never forced.
-          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/stable" -f sha="$top_sha" >/dev/null 2>&1 \
-            || gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref=refs/heads/stable -f sha="$top_sha" >/dev/null
-          echo "stable is v$top"
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/stable" -f sha="$sha" >/dev/null 2>&1 \
+            || gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref=refs/heads/stable -f sha="$sha" >/dev/null
+          echo "stable is v$v"
