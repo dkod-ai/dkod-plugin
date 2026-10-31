@@ -7,12 +7,13 @@
 #   nightly  the newest commit on main, published from DKOD's source every night
 # Questions come from the terminal (/dev/tty), so they work under `curl | sh` too. With no terminal, set:
 #   DKOD_AGENT=claude,cursor,codex,copilot or all   DKOD_CHANNEL=stable|nightly
+# DKOD_GRAPHIFY=1 installs graphify with no question, DKOD_GRAPHIFY=0 skips it.
 # DKOD_NONINTERACTIVE=1 never asks, even with a terminal (for a script or a device rollout).
 # dk never uses sudo, and it never touches a copy your company installed on this device.
 set -eu
 umask 022
 
-DK_VERSION=1.0.0
+DK_VERSION=1.1.0
 REPO="${DKOD_PLUGIN_REPO:-dkod-ai/dkod-plugin}"
 MARKET=dkod-ai
 PLUGIN_ID="dkod@$MARKET"
@@ -370,6 +371,47 @@ next_steps() {
   fi
 }
 
+# --- graphify -----------------------------------------------------------------------------------
+# graphify (https://github.com/Graphify-Labs/graphify) maps a project's code into a graph on this computer.
+# The dkod skill makes the graph in the builder's project and asks it instead of reading file after file.
+
+graphify_version() {
+  PATH="$PATH:$HOME/.local/bin" graphify --version 2>/dev/null | sed -nE 's/.*([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -n 1
+}
+
+# Recommends graphify and, with a yes, installs it with uv (else pipx). Never fails the install.
+offer_graphify() {
+  v=$(graphify_version)
+  if [ -n "$v" ]; then ok "graphify $v is installed. The DKOD skill uses it to map your projects with fewer tokens."; return 0; fi
+  say "$(paint 36 'Recommended first: graphify')"
+  say "  graphify maps your project's code into a graph, on this computer. The DKOD skill asks the graph"
+  say "  instead of reading file after file, so your agent spends far fewer tokens and works faster,"
+  say "  above all when it migrates an app to DKOD. https://github.com/Graphify-Labs/graphify"
+  installer=
+  if command -v uv >/dev/null 2>&1; then installer="uv tool install graphifyy"
+  elif command -v pipx >/dev/null 2>&1; then installer="pipx install graphifyy"; fi
+  if [ -z "$installer" ]; then
+    note "To install it: install uv (https://docs.astral.sh/uv/getting-started/installation/), then run: uv tool install graphifyy"
+    say ""
+    return 0
+  fi
+  case ${DKOD_GRAPHIFY:-} in
+    1) want=true ;;
+    0) want=false ;;
+    *) want=false; if [ -n "$TTY" ] && yes_no "Install graphify now, with $installer?" y; then want=true; fi ;;
+  esac
+  if [ "$want" = false ]; then
+    say "  To install it later: $installer"
+    say ""
+    return 0
+  fi
+  step "graphify: $installer..."
+  # shellcheck disable=SC2086
+  if $installer >/dev/null 2>&1 && [ -n "$(graphify_version)" ]; then ok "graphify $(graphify_version) is installed."
+  else note "Could not install graphify. Run it yourself: $installer"; fi
+  say ""
+}
+
 # --- dk itself ----------------------------------------------------------------------------------
 
 dk_version_of() { sed -nE 's/^DK_VERSION=([0-9.]+).*/\1/p' "$1" | head -n 1; }
@@ -433,8 +475,9 @@ EOF
 cmd_install() {
   open_tty
   show_wordmark
-  detect
   say ""
+  offer_graphify
+  detect
   status_table
   say ""
 
@@ -591,6 +634,9 @@ cmd_doctor() {
   else issue "dk is not installed in $DK_BIN. Run: curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh"; fi
   if on_path; then ok "$BIN_DIR is on your PATH."; else issue "$BIN_DIR is not on your PATH, so the dk command is not found. Add: export PATH=\"$BIN_DIR:\$PATH\""; fi
   for c in curl tar; do command -v "$c" >/dev/null 2>&1 || issue "$c is not installed. dk needs it."; done
+  gv=$(graphify_version)
+  if [ -n "$gv" ]; then ok "graphify $gv is installed: the DKOD skill maps your projects with it."
+  else issue "graphify is not installed. The DKOD skill needs it to spend fewer tokens: run uv tool install graphifyy (https://github.com/Graphify-Labs/graphify)."; fi
 
   say ""
   say "$(paint 36 'Versions on GitHub')"
