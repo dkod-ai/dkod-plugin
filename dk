@@ -13,7 +13,7 @@
 set -eu
 umask 022
 
-DK_VERSION=1.1.0
+DK_VERSION=1.1.1
 REPO="${DKOD_PLUGIN_REPO:-dkod-ai/dkod-plugin}"
 MARKET=dkod-ai
 PLUGIN_ID="dkod@$MARKET"
@@ -387,6 +387,8 @@ offer_graphify() {
   say "  graphify maps your project's code into a graph, on this computer. The DKOD skill asks the graph"
   say "  instead of reading file after file, so your agent spends far fewer tokens and works faster,"
   say "  above all when it migrates an app to DKOD. https://github.com/Graphify-Labs/graphify"
+  say "  It works only on this computer: no telemetry, and the DKOD skill runs it with no AI service,"
+  say "  so nothing about your code is sent anywhere."
   installer=
   if command -v uv >/dev/null 2>&1; then installer="uv tool install graphifyy"
   elif command -v pipx >/dev/null 2>&1; then installer="pipx install graphifyy"; fi
