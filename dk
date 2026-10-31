@@ -13,7 +13,7 @@
 set -eu
 umask 022
 
-DK_VERSION=1.2.1
+DK_VERSION=1.3.0
 REPO="${DKOD_PLUGIN_REPO:-dkod-ai/dkod-plugin}"
 MARKET=dkod-ai
 PLUGIN_ID="dkod@$MARKET"
@@ -69,7 +69,9 @@ TTY=
 open_tty() {
   [ -z "${DKOD_NONINTERACTIVE:-}" ] || return 0
   tty_path=${DKOD_TTY:-/dev/tty}
-  if [ -r "$tty_path" ] && (exec <"$tty_path") 2>/dev/null; then exec 3<"$tty_path"; TTY=$tty_path; fi
+  if [ -r "$tty_path" ] && (exec <"$tty_path") 2>/dev/null; then exec 3<"$tty_path"; TTY=$tty_path
+  # Windows (Git Bash started from PowerShell or cmd) may have no /dev/tty: the console is stdin then.
+  elif [ -z "${DKOD_TTY:-}" ] && [ -t 0 ]; then exec 3<&0; TTY=/dev/stdin; fi
 }
 # The answer to a question. $1 is the default, used for an empty answer and when there is no terminal.
 ask() {
@@ -92,6 +94,9 @@ json_version() { sed -nE 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"([^"
 label() {
   case $1 in claude) printf 'Claude Code' ;; cursor) printf 'Cursor' ;; codex) printf 'Codex' ;; copilot) printf 'GitHub Copilot CLI' ;; esac
 }
+# Git Bash on Windows (install.ps1 runs dk there).
+on_windows() { case $(uname -s 2>/dev/null) in MINGW*|MSYS*|CYGWIN*) return 0 ;; esac; return 1; }
+
 # Reads a per-agent variable: get claude version -> $claude_version.
 get() { eval "printf '%s' \"\${$1_$2:-}\""; }
 has() { case " $1 " in *" $2 "*) return 0 ;; esac; return 1; }
@@ -126,7 +131,7 @@ has_marketplace() { "$1" plugin marketplace list --json 2>/dev/null | grep -q "\
 detect() {
   claude_app=false; command -v claude >/dev/null 2>&1 && claude_app=true
   cursor_app=false
-  if command -v cursor >/dev/null 2>&1 || command -v cursor-agent >/dev/null 2>&1 || [ -d "$HOME/.cursor" ] || [ -d /Applications/Cursor.app ]; then cursor_app=true; fi
+  if command -v cursor >/dev/null 2>&1 || command -v cursor-agent >/dev/null 2>&1 || [ -d "$HOME/.cursor" ] || [ -d /Applications/Cursor.app ] || { [ -n "${LOCALAPPDATA:-}" ] && [ -d "$LOCALAPPDATA/Programs/cursor" ]; }; then cursor_app=true; fi
   codex_app=false; command -v codex >/dev/null 2>&1 && codex_app=true
   copilot_app=false; command -v copilot >/dev/null 2>&1 && copilot_app=true
 
@@ -437,6 +442,8 @@ on_path() { case ":$PATH:" in *":$BIN_DIR:"*) return 0 ;; esac; return 1; }
 # Offers to put ~/.local/bin on the PATH in the shell's startup file.
 ensure_path() {
   on_path && return 0
+  # On Windows install.ps1 puts dk.cmd on the user PATH; a new terminal finds it.
+  if on_windows; then note "Open a new terminal to use dk."; return 0; fi
   case ${SHELL:-} in
     */zsh) rc="$HOME/.zshrc" ;;
     */bash) if [ "$(uname)" = Darwin ]; then rc="$HOME/.bash_profile"; else rc="$HOME/.bashrc"; fi ;;
@@ -740,15 +747,16 @@ let j = {};
 try { j = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) { if (e.code !== "ENOENT") { console.error(`${file} is not valid JSON: fix it first.`); process.exit(2); } }
 const MCP = mcp.split(" ").filter(Boolean);
 const list = (k) => (Array.isArray(j[k]) ? j[k] : []);
-const has = () => MCP.every((x) => list("mcpAllowlist").includes(x)) && (arg === "" || list("terminalAllowlist").includes(arg));
+const ENTRIES = arg.split("\n").filter(Boolean);
+const has = () => MCP.every((x) => list("mcpAllowlist").includes(x)) && ENTRIES.every((x) => list("terminalAllowlist").includes(x));
 if (op === "allow-has") process.exit(has() ? 0 : 1);
 if (op === "cli-has") process.exit(j.mcpServers && j.mcpServers.dkod ? 0 : 1);
 if (op === "allow-on") {
   j.mcpAllowlist = [...new Set([...list("mcpAllowlist"), ...MCP])];
-  if (arg) j.terminalAllowlist = [...new Set([...list("terminalAllowlist"), arg])];
+  if (ENTRIES.length) j.terminalAllowlist = [...new Set([...list("terminalAllowlist"), ...ENTRIES])];
 } else if (op === "allow-off") {
   j.mcpAllowlist = list("mcpAllowlist").filter((x) => !MCP.includes(x));
-  j.terminalAllowlist = list("terminalAllowlist").filter((x) => !(x === arg || /^node .*\/dkod-$/.test(x)));
+  j.terminalAllowlist = list("terminalAllowlist").filter((x) => !(ENTRIES.includes(x) || /^node .*[\\/]dkod-$/.test(x)));
 } else if (op === "cli-on") {
   j.mcpServers = { ...(j.mcpServers || {}), dkod: { url: arg } };
 } else if (op === "cli-off") {
@@ -769,15 +777,16 @@ if os.path.exists(file):
         print(f"{file} is not valid JSON: fix it first.", file=sys.stderr); sys.exit(2)
 MCP = [x for x in mcp.split(" ") if x]
 lst = lambda k: j[k] if isinstance(j.get(k), list) else []
-has = lambda: all(x in lst("mcpAllowlist") for x in MCP) and (arg == "" or arg in lst("terminalAllowlist"))
+ENTRIES = [x for x in arg.split("\n") if x]
+has = lambda: all(x in lst("mcpAllowlist") for x in MCP) and all(x in lst("terminalAllowlist") for x in ENTRIES)
 if op == "allow-has": sys.exit(0 if has() else 1)
 if op == "cli-has": sys.exit(0 if isinstance(j.get("mcpServers"), dict) and "dkod" in j["mcpServers"] else 1)
 if op == "allow-on":
     j["mcpAllowlist"] = list(dict.fromkeys(lst("mcpAllowlist") + MCP))
-    if arg: j["terminalAllowlist"] = list(dict.fromkeys(lst("terminalAllowlist") + [arg]))
+    if ENTRIES: j["terminalAllowlist"] = list(dict.fromkeys(lst("terminalAllowlist") + ENTRIES))
 elif op == "allow-off":
     j["mcpAllowlist"] = [x for x in lst("mcpAllowlist") if x not in MCP]
-    j["terminalAllowlist"] = [x for x in lst("terminalAllowlist") if not (x == arg or re.match(r"^node .*/dkod-$", x))]
+    j["terminalAllowlist"] = [x for x in lst("terminalAllowlist") if not (x in ENTRIES or re.match(r"^node .*[\\/]dkod-$", x))]
 elif op == "cli-on":
     j.setdefault("mcpServers", {})["dkod"] = {"url": arg}
 elif op == "cli-off":
@@ -791,7 +800,16 @@ open(file, "w").write(json.dumps(j, indent=2) + "\n")
   fi
 }
 
-allow_entry() { s=$(cursor_scripts) && printf 'node %s/dkod-' "$s"; }
+# The allowlist entries for the DKOD scripts: one per line. On Windows Cursor's agent writes the scripts
+# folder as C:\Users\... or C:/Users/..., never Git Bash's /c/Users/..., so both Windows forms go in.
+allow_entry() {
+  s=$(cursor_scripts) || return 1
+  if on_windows && command -v cygpath >/dev/null 2>&1; then
+    printf 'node %s\\dkod-\nnode %s/dkod-' "$(cygpath -w "$s")" "$(cygpath -m "$s")"
+  else
+    printf 'node %s/dkod-' "$s"
+  fi
+}
 
 config_status() {
   if [ -f "$CURSOR_PERMISSIONS" ] && json_edit "$CURSOR_PERMISSIONS" allow-has "$(allow_entry || :)" 2>/dev/null; then st=on; else st=off; fi
@@ -861,7 +879,7 @@ remove_item() {
     copilot-plugin) copilot plugin uninstall "$PLUGIN_ID" >/dev/null ;;
     copilot-market) copilot plugin marketplace remove "$MARKET" --force >/dev/null ;;
     skill:*) rm -rf "${1#skill:}" ;;
-    dk) rm -f "$DK_BIN"; rm -rf "$CONFIG_DIR" ;;
+    dk) rm -f "$DK_BIN" "$DK_BIN.cmd"; rm -rf "$CONFIG_DIR" ;;
   esac
 }
 

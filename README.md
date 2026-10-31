@@ -13,6 +13,12 @@
 curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | sh
 ```
 
+On Windows, in PowerShell (needs [Git for Windows](https://git-scm.com/download/win)):
+
+```powershell
+irm https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.ps1 | iex
+```
+
 It installs `dk`, asks which agents get the plugin (Claude Code, Cursor, Codex, Copilot CLI), then says what to restart and how to sign in.
 
 <p align="center">
@@ -114,12 +120,10 @@ For your own device, use the [quick install](#install), the recommended way. For
    curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | DKOD_AGENT=cursor sh
    ```
 
-   Windows (`dk` does not run there yet), in PowerShell:
+   On Windows, in PowerShell:
 
    ```powershell
-   curl.exe -fsSLo "$env:TEMP\dkod-plugin.tar.gz" https://github.com/dkod-ai/dkod-plugin/archive/refs/heads/stable.tar.gz
-   mkdir -Force "$env:USERPROFILE\.cursor\plugins\local\dkod"
-   tar.exe -xzf "$env:TEMP\dkod-plugin.tar.gz" --strip-components 1 -C "$env:USERPROFILE\.cursor\plugins\local\dkod"
+   $env:DKOD_AGENT = "cursor"; irm https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.ps1 | iex
    ```
 
 2. Quit Cursor fully and open it again.
