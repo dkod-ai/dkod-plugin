@@ -13,7 +13,7 @@
 set -eu
 umask 022
 
-DK_VERSION=1.4.0
+DK_VERSION=1.5.0
 REPO="${DKOD_PLUGIN_REPO:-dkod-ai/dkod-plugin}"
 MARKET=dkod-ai
 PLUGIN_ID="dkod@$MARKET"
@@ -72,6 +72,7 @@ open_tty() {
   if [ -r "$tty_path" ] && (exec <"$tty_path") 2>/dev/null; then exec 3<"$tty_path"; TTY=$tty_path
   # Windows (Git Bash started from PowerShell or cmd) may have no /dev/tty: the console is stdin then.
   elif [ -z "${DKOD_TTY:-}" ] && [ -t 0 ]; then exec 3<&0; TTY=/dev/stdin; fi
+  menu_init
 }
 # The answer to a question. $1 is the default, used for an empty answer and when there is no terminal.
 ask() {
@@ -79,7 +80,115 @@ ask() {
   read -r answer <&3 || answer=
   printf '%s' "${answer:-$1}"
 }
+# --- Checkbox menus ---------------------------------------------------------------------------------
+# On a real terminal every question is a list of checkboxes: up/down (or k/j) move, space ticks, a ticks
+# all, enter confirms. Elsewhere (a script, CI, an answers file in DKOD_TTY) the questions take typed
+# answers instead. DKOD_NO_MENU=1 asks for typed answers on a terminal too.
+MENU=false
+ESC=$(printf '\033')
+CR=$(printf '\r')
+NL='
+'
+menu_init() {
+  MENU=false
+  case $TTY in /dev/tty|/dev/stdin) ;; *) return 0 ;; esac
+  [ -t 1 ] && [ "${TERM:-dumb}" != dumb ] && [ -z "${DKOD_NO_MENU:-}" ] || return 0
+  STTY_SAVED=$(stty -g <&3 2>/dev/null) || return 0
+  MENU=true
+}
+menu_reset() { M_N=0; M_CUR=0; }
+# menu_add <label> <ticked 0|1> [<locked 0|1>]: a locked item shows [-] and cannot be ticked.
+menu_add() {
+  M_N=$((M_N + 1))
+  eval "M_L$M_N=\$1; M_C$M_N=\$2; M_D$M_N=\${3:-0}"
+}
+menu_draw() {
+  i=1
+  while [ "$i" -le "$M_N" ]; do
+    eval "l=\$M_L$i; c=\$M_C$i; d=\$M_D$i"
+    if [ "$d" = 1 ]; then box='[-]'; elif [ "$c" = 1 ]; then box='[x]'; else box='[ ]'; fi
+    if [ "$i" = "$M_CUR" ]; then line=$(paint 36 "> $box $l"); else line="  $box $l"; fi
+    printf '\033[2K  %s\n' "$line"
+    i=$((i + 1))
+  done
+}
+menu_key() {
+  k=$(dd bs=1 count=1 <&3 2>/dev/null; printf .)
+  k=${k%.}
+  case $k in
+    "$ESC")
+      k2=$(dd bs=1 count=2 <&3 2>/dev/null)
+      case $k2 in '[A'|OA) echo up ;; '[B'|OB) echo down ;; *) echo other ;; esac ;;
+    ' ') echo space ;;
+    "$NL"|"$CR"|'') echo enter ;;
+    k|K) echo up ;;
+    j|J) echo down ;;
+    a|A) echo all ;;
+    *) echo other ;;
+  esac
+}
+menu_restore() { stty "$STTY_SAVED" <&3 2>/dev/null || :; printf '\033[?25h'; trap - INT TERM; }
+# menu <multi|single>: the items from menu_add; the answer is left in M_C1..M_CN. In single mode the tick
+# follows the cursor.
+menu() {
+  mode=$1
+  M_CUR=1
+  i=1
+  while [ "$i" -le "$M_N" ]; do
+    eval "c=\$M_C$i; d=\$M_D$i"
+    if [ "$d" != 1 ] && { [ "$mode" = multi ] || [ "$c" = 1 ]; }; then M_CUR=$i; break; fi
+    i=$((i + 1))
+  done
+  if [ "$mode" = multi ]; then hint="up/down move, space tick, a all, enter confirm"; else hint="up/down move, enter choose"; fi
+  printf '  %s\n' "$(paint 90 "$hint")"
+  trap 'menu_restore; printf "\n"; exit 130' INT TERM
+  stty -icanon -echo min 1 time 0 <&3 2>/dev/null || :
+  printf '\033[?25l'
+  menu_draw
+  while :; do
+    key=$(menu_key)
+    case $key in
+      up) if [ "$M_CUR" -gt 1 ]; then M_CUR=$((M_CUR - 1)); fi ;;
+      down) if [ "$M_CUR" -lt "$M_N" ]; then M_CUR=$((M_CUR + 1)); fi ;;
+      space)
+        eval "d=\$M_D$M_CUR; c=\$M_C$M_CUR"
+        if [ "$d" != 1 ] && [ "$mode" = multi ]; then
+          if [ "$c" = 1 ]; then eval "M_C$M_CUR=0"; else eval "M_C$M_CUR=1"; fi
+        fi ;;
+      all)
+        if [ "$mode" = multi ]; then
+          every=1; i=1
+          while [ "$i" -le "$M_N" ]; do eval "d=\$M_D$i; c=\$M_C$i"; if [ "$d" != 1 ] && [ "$c" != 1 ]; then every=0; fi; i=$((i + 1)); done
+          i=1
+          while [ "$i" -le "$M_N" ]; do eval "d=\$M_D$i"; if [ "$d" != 1 ]; then if [ "$every" = 1 ]; then eval "M_C$i=0"; else eval "M_C$i=1"; fi; fi; i=$((i + 1)); done
+        fi ;;
+    esac
+    if [ "$mode" = single ]; then
+      eval "d=\$M_D$M_CUR"
+      if [ "$d" != 1 ]; then i=1; while [ "$i" -le "$M_N" ]; do eval "M_C$i=0"; i=$((i + 1)); done; eval "M_C$M_CUR=1"; fi
+    fi
+    printf '\033[%dA' "$M_N"
+    if [ "$key" = enter ]; then M_CUR=0; menu_draw; break; fi
+    menu_draw
+  done
+  menu_restore
+}
+# The ticked items' numbers, separated by spaces.
+menu_ticked() {
+  out=; i=1
+  while [ "$i" -le "$M_N" ]; do eval "c=\$M_C$i"; if [ "$c" = 1 ]; then out="$out $i"; fi; i=$((i + 1)); done
+  printf '%s' "${out# }"
+}
+
 yes_no() { # $1 the question, $2 the default (y or n)
+  if [ "$MENU" = true ]; then
+    say "$1"
+    menu_reset
+    if [ "$2" = y ]; then menu_add "Yes" 1; else menu_add "Yes" 0; fi
+    menu multi
+    [ "$M_C1" = 1 ]
+    return
+  fi
   if [ "$2" = y ]; then printf '%s [Y/n]: ' "$1"; else printf '%s [y/N]: ' "$1"; fi
   case $(ask "$2") in y|Y|yes|Yes) return 0 ;; esac
   return 1
@@ -527,8 +636,8 @@ cmd_install() {
   say ""
   offer_graphify
   detect
-  status_table
-  say ""
+  # With checkboxes, the agent list itself shows each agent's state.
+  if [ "$MENU" = false ] || [ -n "${DKOD_AGENT:-}" ]; then status_table; say ""; fi
 
   agent=$(printf '%s' "${DKOD_AGENT:-}" | tr ',' ' ')
   channel=${DKOD_CHANNEL:-}
@@ -549,6 +658,27 @@ cmd_install() {
     [ -n "$installed" ] || fail "No terminal to ask in. Run it again with DKOD_AGENT=claude, cursor, codex, copilot or all."
     chosen=$installed
     own_channel=true
+  elif [ -z "$chosen" ] && [ "$MENU" = true ]; then
+    default=${installed:-$present}
+    say "Which agents should get the DKOD plugin? It installs it, or upgrades the copy you have."
+    menu_reset
+    for a in $AGENTS; do
+      v=$(get "$a" version); locked=$(get "$a" locked)
+      if [ -n "$v" ]; then status="dkod $v ($(get "$a" channel))"
+      elif [ -n "$locked" ]; then status=$locked
+      elif [ "$(get "$a" app)" = true ]; then status="not installed"
+      else status="not on your device"; fi
+      off=0; [ -n "$locked" ] && off=1
+      [ "$(get "$a" app)" = true ] || [ -n "$v" ] || off=1
+      tick=0; has "$default" "$a" && tick=1
+      menu_add "$(printf '%-20s %s' "$(label "$a")" "$status")" "$tick" "$off"
+    done
+    menu multi
+    say ""
+    for n in $(menu_ticked); do
+      i=0; for a in $AGENTS; do i=$((i + 1)); [ "$i" = "$n" ] && chosen="$chosen $a"; done
+    done
+    [ -n "$chosen" ] || { ok "Nothing chosen. Nothing was changed."; return 0; }
   elif [ -z "$chosen" ]; then
     default=${installed:-$present}
     numbers=
@@ -585,7 +715,15 @@ cmd_install() {
       done
       [ "$any" = true ] && [ "$all_nightly" = true ] && default=2
     fi
-    if [ -n "$TTY" ]; then
+    if [ "$MENU" = true ]; then
+      say "Which channel?"
+      menu_reset
+      if [ "$default" = 1 ]; then menu_add "stable   the latest release (recommended)" 1; menu_add "nightly  the newest build, published every night" 0
+      else menu_add "stable   the latest release (recommended)" 0; menu_add "nightly  the newest build, published every night" 1; fi
+      menu single
+      say ""
+      if [ "$M_C2" = 1 ]; then channel=nightly; else channel=stable; fi
+    elif [ -n "$TTY" ]; then
       say "Which channel?"
       say "  1) stable   the latest release $(paint 32 '(recommended)')"
       say "  2) nightly  the newest build, published every night"
@@ -929,11 +1067,22 @@ cmd_uninstall() {
   case ${1:-} in --all|all) all=true ;; '') ;; *) fail "dk uninstall takes no argument, or --all." ;; esac
   if [ "$all" = false ] && [ -z "$TTY" ]; then fail "No terminal to ask in. Run dk uninstall --all to remove everything."; fi
   say "What should dk remove?"
-  printf '%s\n' "$list" | awk -F'|' '{ printf "  %d) %s\n", NR, $2 }'
   count=$(printf '%s\n' "$list" | wc -l | tr -d ' ')
-  if [ "$all" = true ]; then
+  if [ "$all" = false ] && [ "$MENU" = true ]; then
+    menu_reset
+    while IFS= read -r line; do menu_add "${line#*|}" 0; done <<EOF
+$list
+EOF
+    menu multi
+    picks=$(menu_ticked)
+    say ""
+    [ -n "$picks" ] || { ok "Nothing removed."; return 0; }
+    yes_no "Remove $(printf '%s\n' $picks | wc -l | tr -d ' ') item(s)?" n || { ok "Nothing removed."; return 0; }
+  elif [ "$all" = true ]; then
+    printf '%s\n' "$list" | awk -F'|' '{ printf "  %d) %s\n", NR, $2 }'
     picks=$(seq 1 "$count" | tr '\n' ' ')
   else
+    printf '%s\n' "$list" | awk -F'|' '{ printf "  %d) %s\n", NR, $2 }'
     say "Type the numbers with spaces between them, or all. Enter removes nothing."
     printf 'Remove: '
     picks=$(ask "")
