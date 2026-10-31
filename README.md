@@ -69,7 +69,7 @@ Not sure? Run the [quick install](#install). It asks the questions.
 curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | sh
 ```
 
-The script:
+The script installs `dk`, the DKOD plugin manager, in `~/.local/bin`. Then it runs `dk install`, which:
 
 1. Shows each agent, and the plugin version in it.
 2. Asks which agents to install it in or upgrade. Press Enter to upgrade the copies you have. With no copy yet, Enter means every agent it found.
@@ -81,9 +81,19 @@ It changes nothing before you answer.
 | Channel | What you get |
 | -- | -- |
 | `stable` (recommended) | The latest [GitHub release](https://github.com/dkod-ai/dkod-plugin/releases) |
-| `nightly` | The newest commit on `main`, before it is released |
+| `nightly` | The newest build, published to `main` every night, before it is released |
 
-Run the same line again to upgrade. It never uses `sudo`, and it does not change a copy that your company or your Cursor team installed. To answer the questions in advance, for example in a script:
+After that, `dk` does the rest:
+
+| Command | What it does |
+| -- | -- |
+| `dk install` | Asks which agents and which channel, then installs or upgrades the plugin |
+| `dk upgrade` | Upgrades `dk`, then the plugin in every agent that has it |
+| `dk channel` | Shows the channel. `dk channel nightly` or `dk channel stable` moves `dk` and every installed plugin to it |
+| `dk doctor` | Checks `dk`, each agent, the plugin versions and the DKOD server, and names each issue |
+| `dk uninstall` | Asks what to remove: the plugin with its MCP server and skills in each agent, the marketplaces, and `dk`. `dk uninstall --all` removes everything with no question |
+
+`dk` never uses `sudo`, and it does not change a copy that your company or your Cursor team installed. To answer the questions in advance, for example in a script:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | DKOD_AGENT=claude,codex DKOD_CHANNEL=stable sh
@@ -181,7 +191,7 @@ Then, from your project folder, run `cursor-agent mcp login dkod` and sign in wi
 <details>
 <summary><b>Update the plugin</b></summary>
 
-Cursor does not update a plugin in `~/.cursor/plugins/local`. Run the install line again: it upgrades your copy. The DKOD server also tells the agent when your copy is old, and the agent runs the update from dashboard.dkod.app, with no git. To run that update by hand:
+Cursor does not update a plugin in `~/.cursor/plugins/local`. Run `dk upgrade`: it upgrades your copy. The DKOD server also tells the agent when your copy is old, and the agent runs the update from dashboard.dkod.app, with no git. To run that update by hand:
 
 ```sh
 node ~/.cursor/plugins/local/dkod/skills/dkod/scripts/dkod-update.mjs ~/.cursor/plugins/local/dkod https://dashboard.dkod.app/api/v1/dkoder/bundle/cursor.json
@@ -229,7 +239,7 @@ This list replaces the MCP allowlist in Cursor's settings, so copy those entries
 2. Quit Claude Code and start it again.
 3. Type `/mcp`, pick `dkod` and choose **Authenticate**. You sign in with your company's own sign-in. DKOD never sees a password.
 
-Until you sign in, the band above the prompt is yellow. To upgrade, run the install line again, or run `claude plugin update dkod@dkod-ai` and restart Claude Code.
+Until you sign in, the band above the prompt is yellow. To upgrade, run `dk upgrade`, or run `claude plugin update dkod@dkod-ai` and restart Claude Code.
 
 **Claude Code on the web, or the Desktop app's Cloud:** plugins do not load there. On claude.ai, open **Settings → Connectors**, add a custom connector with `https://dashboard.dkod.app/api/v1/dkoder/mcp` and sign in.
 
@@ -256,7 +266,7 @@ Until you sign in, the band above the prompt is yellow. To upgrade, run the inst
 2. Quit Codex and start it again. When Codex asks to trust the DKOD hook, trust it.
 3. Run `codex mcp login dkod`. You sign in with your company's own sign-in. DKOD never sees a password.
 
-In Codex, the plugin gives the `dkod` MCP server, the `dkod` skills and the Dkoder floor hook. The band runs only in Claude Code. To upgrade, run the install line again, or run `codex plugin marketplace upgrade dkod-ai`, then `codex plugin add dkod@dkod-ai`.
+In Codex, the plugin gives the `dkod` MCP server, the `dkod` skills and the Dkoder floor hook. The band runs only in Claude Code. To upgrade, run `dk upgrade`, or run `codex plugin marketplace upgrade dkod-ai`, then `codex plugin add dkod@dkod-ai`.
 
 <h2 id="copilot"><sub><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/agent-copilot-dark.svg"><img src="assets/readme/agent-copilot-light.svg" width="22" height="16" alt=""></picture>Copilot builder</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-copilot-dark.svg"><img src="assets/readme/h-copilot-light.svg" alt="Just you, in Copilot."></picture></h2>
 
@@ -281,7 +291,7 @@ In Codex, the plugin gives the `dkod` MCP server, the `dkod` skills and the Dkod
 2. Quit Copilot CLI and start it again.
 3. Type `/mcp` and check `dkod`. When it asks you to sign in, use your company's own sign-in.
 
-In Copilot, the plugin gives the `dkod` MCP server, the `dkod` skills and the Dkoder floor hook. The band runs only in Claude Code. If your organization's Copilot policy blocks third-party MCP servers, ask your GitHub admin to allow DKOD. To upgrade, run the install line again, or run `copilot plugin update dkod@dkod-ai`.
+In Copilot, the plugin gives the `dkod` MCP server, the `dkod` skills and the Dkoder floor hook. The band runs only in Claude Code. If your organization's Copilot policy blocks third-party MCP servers, ask your GitHub admin to allow DKOD. To upgrade, run `dk upgrade`, or run `copilot plugin update dkod@dkod-ai`.
 
 <h2 id="dkoder-and-guard"><sub><picture><img src="assets/readme/dot-mint.svg" width="18" height="10" alt=""></picture>Dkoder and Guard</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-guard-dark.svg"><img src="assets/readme/h-guard-light.svg" alt="The floor, plus your rules."></picture></h2>
 
