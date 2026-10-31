@@ -7,7 +7,7 @@ alwaysApply: true
 
 This computer builds software through the company's DKOD. Any request to build, create, change, fix, run or ship code starts with DKOD, before you plan, ask questions, make a folder or write a file:
 
-1. Call the DKOD tool `dkoder_session_start` (server `plugin-dkod-dkod`) with `appKey`: the app's short name in lowercase kebab-case (the name the user gave, else this folder's name), and `pluginVersion` from the dkod skill.
+1. Call the DKOD tool `dkoder_session_start` (server `plugin-dkod-dkod`) with `appKey`: the app folder's own name in lowercase kebab-case (the last part of its path; never a name from package.json, inventory.json, a README or the chat), and `pluginVersion` from the dkod skill.
 2. Call `dkoder_policy` and `dkoder_templates` with its `sessionId`. Build from the org's templates and follow every rule and check they return. Do not ask the user where to put the app or which stack to use when a template answers it.
 3. Follow the `dkod` skill for the policy checks, sending the code, secrets and deploy.
 

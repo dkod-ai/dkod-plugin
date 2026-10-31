@@ -204,6 +204,47 @@ function tokenize(line, subs) {
   flush();
   return out;
 }
+function heredocBodies(script) {
+  const found = [];
+  const lines = script.split(`
+`);
+  for (let i = 0;i < lines.length; i += 1) {
+    const line = lines[i];
+    let q = null;
+    let m = null;
+    for (let k = 0;k < line.length && m === null; k += 1) {
+      const c = line[k];
+      if (q !== null) {
+        if (c === q)
+          q = null;
+        else if (c === "\\" && q === '"')
+          k += 1;
+      } else if (c === "'" || c === '"')
+        q = c;
+      else if (c === "\\")
+        k += 1;
+      else if (line.startsWith("<<", k) && line[k + 2] !== "<") {
+        m = /^<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([A-Za-z0-9_.-]+))/.exec(line.slice(k));
+        if (m === null)
+          k += 1;
+      }
+    }
+    if (m === null)
+      continue;
+    const delim = m[2] ?? m[3] ?? m[4] ?? "";
+    const body = [];
+    let j = i + 1;
+    while (j < lines.length && (m[1] === "-" ? lines[j].replace(/^\t+/, "") : lines[j]) !== delim) {
+      body.push(lines[j]);
+      j += 1;
+    }
+    found.push({ opener: `${line}
+${delim}`, body: body.join(`
+`) });
+    i = j;
+  }
+  return found;
+}
 var ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 function programName(word) {
   const slash = word.lastIndexOf("/");
@@ -3649,6 +3690,13 @@ function originalRefusal(original) {
     message: `The original app at ${original} is read only while a migration is open: you read it, you never change it or its data. Build in the dk- app's folder; to run the original's own tests, start it with the snapshot (dkod-migrate.mjs snapshot).`
   };
 }
+var NON_BUN_MANAGERS = new Set(["npm", "npx", "yarn", "pnpm", "corepack"]);
+function packageManagerRefusal(program) {
+  return {
+    rule: "blocked-command",
+    message: `${program} is not allowed: use bun. bun install installs (it reads any package.json, also one with a yarn or npm lockfile), bun run <script> runs a script, bun test runs the tests, bunx <tool> runs a tool once.`
+  };
+}
 function parityRefusal() {
   return {
     rule: "parity-frozen",
@@ -3853,6 +3901,94 @@ function asksDirectShip(text) {
   return SHIP_VERB.test(t) && SHIP_DIRECT.test(t);
 }
 
+var ACCEPT = [
+  "application/vnd.oci.image.index.v1+json",
+  "application/vnd.docker.distribution.manifest.list.v2+json",
+  "application/vnd.oci.image.manifest.v1+json",
+  "application/vnd.docker.distribution.manifest.v2+json"
+].join(", ");
+var REGISTRY = "https://registry-1.docker.io/v2";
+var TIMEOUT_MS = 5000;
+var isRec = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+function fromDigests(text) {
+  const out = [];
+  const stages = new Set;
+  text.split(`
+`).forEach((raw, i) => {
+    const m = /^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?/i.exec(raw);
+    if (m === null)
+      return;
+    const image = m[1] ?? "";
+    if (m[2] !== undefined)
+      stages.add(m[2].toLowerCase());
+    if (image.toLowerCase() === "scratch" || stages.has(image.toLowerCase()) && !image.includes("@"))
+      return;
+    const d = /^(.+?)(?::[^/@:]+)?@(sha256:[0-9a-f]{64})$/i.exec(image);
+    if (d === null)
+      return;
+    let repo = d[1] ?? "";
+    if (/^[^/]*(?:\.|:)|^localhost\//.test(repo))
+      return;
+    if (!repo.includes("/"))
+      repo = `library/${repo}`;
+    out.push({ line: i + 1, image, repo, digest: d[2] ?? "" });
+  });
+  return out;
+}
+async function getJson(fetchFn, url, headers, timeoutMs) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${url}: no answer in ${String(timeoutMs)} ms`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([fetchJson(fetchFn, url, headers, timeoutMs), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function fetchJson(fetchFn, url, headers, timeoutMs) {
+  const res = await fetchFn(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+  if (res.status !== 200)
+    throw new Error(`${url}: HTTP ${String(res.status)}`);
+  const body = await res.json();
+  if (!isRec(body))
+    throw new Error(`${url}: not a JSON object`);
+  return body;
+}
+async function hasAmd64(fetchFn, repo, digest, t) {
+  const tokenRes = await getJson(fetchFn, `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull`, {}, t);
+  const token = typeof tokenRes.token === "string" ? tokenRes.token : typeof tokenRes.access_token === "string" ? tokenRes.access_token : "";
+  const headers = { Accept: ACCEPT, ...token === "" ? {} : { Authorization: `Bearer ${token}` } };
+  const manifest = await getJson(fetchFn, `${REGISTRY}/${repo}/manifests/${digest}`, headers, t);
+  if (Array.isArray(manifest.manifests)) {
+    return manifest.manifests.some((m) => isRec(m) && isRec(m.platform) && m.platform.os === "linux" && m.platform.architecture === "amd64");
+  }
+  if (isRec(manifest.config) && typeof manifest.config.digest === "string") {
+    const config = await getJson(fetchFn, `${REGISTRY}/${repo}/blobs/${manifest.config.digest}`, headers, t);
+    return config.os === "linux" && config.architecture === "amd64";
+  }
+  throw new Error(`${repo}@${digest}: not an index or an image manifest`);
+}
+async function checkFromArch(dockerfileText, fetchFn, path = "Dockerfile", timeoutMs = TIMEOUT_MS) {
+  const result = { problems: [], warnings: [] };
+  const cache = new Map;
+  for (const f of fromDigests(dockerfileText)) {
+    const key = `${f.repo}@${f.digest}`;
+    let p = cache.get(key);
+    if (p === undefined) {
+      p = hasAmd64(fetchFn, f.repo, f.digest, timeoutMs);
+      cache.set(key, p);
+    }
+    try {
+      if (!await p)
+        result.problems.push(`${path}:${String(f.line)}: pinned-base-images: FROM ${f.image} digest has no linux/amd64; pin the multi-arch index digest`);
+    } catch (e) {
+      result.warnings.push(`${path}:${String(f.line)}: FROM ${f.image}: architecture not checked (${e instanceof Error ? e.message : String(e)})`);
+    }
+  }
+  return result;
+}
+
 var POLICY_CHECK_TOOL = "policy_check";
 var POLICY_CHECK_TOOL_FULL = `mcp__dkod__${POLICY_CHECK_TOOL}`;
 var POLICY_CHECK_SPEC = {
@@ -3870,6 +4006,19 @@ var POLICY_CHECK_SPEC = {
 var MAX_FOLDER_FILES = 5000;
 var MAX_READ_BYTES = 64 * 1024 * 1024;
 var MAX_SHOWN = 50;
+var DOCKERFILE = /(^|\/)Dockerfile(\.[^/]+)?$/;
+var DEV_DOCKERFILE = /(^|\/)Dockerfile\.dev$/;
+function archFinding(text, level) {
+  const m = /^(.+?):(\d+): (?:pinned-base-images: )?(.*)$/.exec(text);
+  return {
+    rule: "pinned-base-images",
+    check: "dockerfile.from_digest",
+    level,
+    path: m?.[1] ?? null,
+    line: m?.[2] === undefined ? null : Number(m[2]),
+    message: m?.[3] ?? text
+  };
+}
 var refuse2 = (error, message) => ({ ok: false, error, message });
 function packSummary(pack) {
   const lines = [];
@@ -3921,6 +4070,18 @@ async function checkFolder(pack, dir, io) {
     files.push({ path, text });
   }
   const result = evaluate(pack, files, { stage: "build", folder, folderPath: base });
+  const fetchFn = io.fetch ?? globalThis.fetch;
+  for (const f of files) {
+    if (!DOCKERFILE.test(f.path) || DEV_DOCKERFILE.test(f.path) || f.text === "")
+      continue;
+    const arch = await checkFromArch(f.text, fetchFn, f.path);
+    for (const p of arch.problems)
+      result.findings.push(archFinding(p, "block"));
+    for (const w of arch.warnings)
+      result.findings.push(archFinding(w, "warn"));
+    if (arch.problems.length > 0)
+      result.blocked = true;
+  }
   const blocks = result.findings.filter((f) => f.level === "block").length;
   const next = blocks > 0 ? `Fix the ${String(blocks)} block finding${blocks === 1 ? "" : "s"}, then run this check again before you deploy.` : result.findings.length > 0 ? "No block finding. Tell the person about each warn finding." : "Every check passed.";
   return {
@@ -3982,6 +4143,7 @@ async function runReal(host, argv, init, known) {
   return host.run(argv, init);
 }
 
+var SHELL_PROGRAMS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 var EMPTY = { owners: [], governanceRepo: null, gitopsRepo: null, appRepos: [], guard: null };
 var strings = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
 var str = (v) => typeof v === "string" && v.length > 0 ? v : null;
@@ -4276,12 +4438,67 @@ Do not try another way to run it. Tell the person why, and offer the allowed way
     }
   };
   const recordFile = async (io) => `${(await io.cwd()).replace(/\/$/, "")}/.dkod/migration.json`;
-  const migration = async (io) => {
-    return migrationRecord(await readOrNull(io, await recordFile(io)));
+  const migrationAt = async (io) => {
+    const ownFile = await recordFile(io);
+    const own = migrationRecord(await readOrNull(io, ownFile));
+    if (own !== null)
+      return { record: own, file: ownFile };
+    const cwd = (await io.cwd()).replace(/\/+$/, "");
+    const name = cwd.slice(cwd.lastIndexOf("/") + 1);
+    if (name === "" || name.startsWith("dk-"))
+      return null;
+    const siblingFile = `${dirname(cwd)}/dk-${name}/.dkod/migration.json`;
+    const sibling = migrationRecord(await readOrNull(io, siblingFile));
+    return sibling !== null && sibling.original.replace(/\/+$/, "") === cwd ? { record: sibling, file: siblingFile } : null;
   };
+  const migration = async (io) => (await migrationAt(io))?.record ?? null;
   const frozenSuite = async (io) => {
     const cwd = (await io.cwd()).replace(/\/$/, "");
     return await readOrNull(io, `${cwd}/.dkod/parity/freeze.json`) === null ? null : `${cwd}/tests/parity`;
+  };
+  const BUILD_FILE = /(^|\/)(Dockerfile[^/]*|Makefile|[^/]+\.sh|\.github\/workflows\/[^/]+\.ya?ml)$/;
+  const managerInText = (text) => {
+    for (const raw of text.split(`
+`)) {
+      let line = raw.trim().replace(/^(?:-\s*)?(?:run:|RUN\b|CMD\b)\s*/, "");
+      if (line === "" || line.startsWith("#"))
+        continue;
+      if (line.startsWith("[") && line.endsWith("]")) {
+        try {
+          const arr = JSON.parse(line);
+          if (Array.isArray(arr) && arr.every((x) => typeof x === "string"))
+            line = arr.join(" ");
+        } catch {}
+      }
+      const found = parseCommands(line).map((c) => programName(c.argv[0] ?? "")).find((p) => NON_BUN_MANAGERS.has(p));
+      if (found !== undefined)
+        return found;
+    }
+    return;
+  };
+  const managerInWrites = (command) => {
+    for (const h2 of heredocBodies(command)) {
+      const cmds = parseCommands(h2.opener);
+      if (cmds.some((c) => SHELL_PROGRAMS.has(programName(c.argv[0] ?? "")))) {
+        const inner = parseCommands(h2.body).map((c) => programName(c.argv[0] ?? "")).find((p) => NON_BUN_MANAGERS.has(p));
+        if (inner !== undefined)
+          return inner;
+      }
+      if (cmds.some((c) => (c.writes ?? []).some((w) => BUILD_FILE.test(w)))) {
+        const found = managerInText(h2.body);
+        if (found !== undefined)
+          return found;
+      }
+    }
+    for (const c of parseCommands(command)) {
+      if (!/^(echo|printf)$/.test(programName(c.argv[0] ?? "")) || !(c.writes ?? []).some((w) => BUILD_FILE.test(w)))
+        continue;
+      const found = managerInText(c.argv.slice(1).filter((a) => !/^-[en]+$/.test(a)).join(" ").replace(/\\n/g, `
+`));
+      if (found !== undefined)
+        return found;
+    }
+    return;
   };
   const checkWrite = async (io, e, seen = []) => {
     const shape = writeShape(e);
@@ -4293,9 +4510,10 @@ Do not try another way to run it. Tell the person why, and offer the allowed way
       const suite = await frozenSuite(io);
       if (suite !== null && insideFolder(suite, path))
         return [parityRefusal()];
-      if (await migration(io) === null)
+      const at = await migrationAt(io);
+      if (at === null)
         return [];
-      return insideFolder(dirname(await recordFile(io)), path) ? [recordRefusal()] : [];
+      return insideFolder(dirname(at.file), path) && !insideFolder(`${dirname(at.file)}/map`, path) ? [recordRefusal()] : [];
     }
     const { target, content, edits, cell } = shape;
     const cfg = await load(io);
@@ -4306,17 +4524,24 @@ Do not try another way to run it. Tell the person why, and offer the allowed way
     const suite = await frozenSuite(io);
     if (suite !== null && insideFolder(suite, path))
       return [parityRefusal()];
-    const record = await migration(io);
+    const at = await migrationAt(io);
+    const record = at?.record ?? null;
     if (record !== null && insideFolder(record.original, path))
       return [originalRefusal(record.original)];
-    if (record !== null) {
-      const file = await recordFile(io);
+    if (at !== null && record !== null) {
+      const file = at.file;
       if (normalizePath(path) === normalizePath(file)) {
         const next = content === null ? null : migrationRecord(content);
         if (next === null || next.original !== record.original)
           return [recordRefusal()];
-      } else if (insideFolder(dirname(file), path))
+      } else if (insideFolder(dirname(file), path) && !insideFolder(`${dirname(file)}/map`, path))
         return [recordRefusal()];
+    }
+    if (BUILD_FILE.test(path)) {
+      const found = managerInText(content ?? edits.map((ed) => ed.new_string).join(`
+`));
+      if (found !== undefined)
+        return [packageManagerRefusal(found)];
     }
     const root = await rootOf(io, path);
     const remotes = root === null ? [] : await resolver(io).repoRemotes(root);
@@ -4418,16 +4643,23 @@ Do not try another way to run it. Tell the person why, and offer the allowed way
   const bashCheck = async (io, command) => {
     const cfg = await load(io);
     const cmds = parseCommands(command);
+    const manager = cmds.map((c) => programName(c.argv[0] ?? "")).find((p) => NON_BUN_MANAGERS.has(p));
+    if (manager !== undefined)
+      return refuse(io, "Bash", [packageManagerRefusal(manager)], "command");
+    const written = managerInWrites(command);
+    if (written !== undefined)
+      return refuse(io, "Bash", [packageManagerRefusal(written)], "command");
     const suite = await frozenSuite(io);
     if (suite !== null && changesOriginal(suite, await io.cwd(), await io.home() ?? "", cmds))
       return refuse(io, "Bash", [parityRefusal()], "write");
-    const record = await migration(io);
-    if (record !== null) {
+    const at = await migrationAt(io);
+    const record = at?.record ?? null;
+    if (at !== null && record !== null) {
       const base = await io.cwd();
       const home = await io.home() ?? "";
       if (changesOriginal(record.original, base, home, cmds))
         return refuse(io, "Bash", [originalRefusal(record.original)], "write");
-      if (changesOriginal(dirname(await recordFile(io)), base, home, cmds))
+      if (changesOriginal(dirname(at.file), base, home, cmds, `${dirname(at.file)}/map`))
         return refuse(io, "Bash", [recordRefusal()], "write");
     }
     const seen = [];
@@ -4542,11 +4774,11 @@ var runsInstall = (program, args) => {
     }
     return INSTALL_WORDS.has(a);
   }
-  return false;
+  return program === "yarn";
 };
 var GIT_LOOK = new Set(["status", "log", "diff", "show", "rev-parse", "ls-files"]);
-function changesOriginal(original, base, home, cmds) {
-  const inside = (path) => insideFolder(original, path);
+function changesOriginal(original, base, home, cmds, except = null) {
+  const inside = (path) => insideFolder(original, path) && !(except !== null && insideFolder(except, path));
   const full = (cd, word) => {
     const here = cd === "" ? base : cd.startsWith("/") ? cd : cd.startsWith("~") ? `${home}${cd.slice(1)}` : `${base.replace(/\/$/, "")}/${cd}`;
     if (word.startsWith("/"))

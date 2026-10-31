@@ -5,7 +5,11 @@
 # headers, same sha256); keep the four in step.
 #
 #   sh dkod-pack.sh pack [<folder>]                    -> {"file","sha256","bytes","files"[,"git"]}
-#   sh dkod-pack.sh put <file> <url> ["Name: value"...] -> {"ok":true,"status":200}
+#   sh dkod-pack.sh put <file> --ticket <ticket>       -> {"ok":true,"status":200}
+#
+# DKO-1382: the agent holds only the one-use upload_ticket from dkoder.source.target. `put` trades
+# it at POST /api/v1/dkoder/source/put-args for put_args (single-quoted words, the URL first, then
+# 'Name: value' headers), so the signed URL never reaches the agent's screen. No URL, --args or stdin.
 #
 # The headers are written here with printf rather than by the system tar: GNU tar and bsdtar
 # cannot both be told to write the same bytes (mtime 0, sorted, empty owner names, no padding to
@@ -18,7 +22,11 @@ set -f
 MAX_FILES=20000
 MAX_FILE_BYTES=4194304
 MAX_TOTAL_BYTES=67108864
-USAGE='usage: dkod-pack pack [<folder>] | put <file> <url> ["Name: value"...]'
+USAGE='usage: dkod-pack pack [<folder>] | put <file> --ticket <upload_ticket>'
+NO_PUT='refused: use --ticket <upload_ticket> from dkoder.source.target; an upload URL, --args and stdin are not accepted'
+BAD_TICKET='refused: the upload ticket is not valid; call dkoder.source.target again'
+EXPIRED='upload failed: the upload ticket expired or was already used. Call dkoder.source.target again for a new one, then run put with the new --ticket.'
+BAD_ARGS='refused: put_args must be single-quoted words, the URL first'
 TMPW=
 
 die() {
@@ -59,7 +67,7 @@ sha256_of() {
 walk() {
   find . \( -type d \( -name .git -o -name node_modules -o -name dist -o -name build -o -name .next \
     -o -name out -o -name .turbo -o -name .cache -o -name coverage -o -name venv -o -name .venv \
-    -o -name __pycache__ \) -prune \) -o "$@"
+    -o -name __pycache__ -o -name test-results -o -name playwright-report -o -name graphify-out \) -prune \) -o "$@"
 }
 
 # n in octal, zero-padded to $2 digits, into O; D is the sum of its digit values. No fork.
@@ -82,6 +90,53 @@ real_git() {
   d=$(xcode-select -p 2>/dev/null) && [ -n "$d" ] && [ -x "$d/usr/bin/git" ]
 }
 
+# DKO-1407: outside git, drop what the root .gitignore ($1) names from the paths in $2: plain names,
+# `dir/`, `/anchored`, `a/b`, `*` and `?`. No negation, no `**`, no nested .gitignore. A name matches
+# any segment; a `dir/` pattern only a folder (a non-final segment); an anchored one a leading run
+# of segments.
+ignore_filter() {
+  awk '
+    function rx(s,   i, c, r) {
+      r = "^"
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == "*") r = r "[^/]*"
+        else if (c == "?") r = r "[^/]"
+        else if (index("\\.[](){}|^$+", c) > 0) r = r "\\" c
+        else r = r c
+      }
+      return r "$"
+    }
+    FILENAME == ARGV[1] {
+      line = $0
+      gsub(/^[ \t\r]+|[ \t\r]+$/, "", line)
+      if (line == "" || substr(line, 1, 1) == "#" || substr(line, 1, 1) == "!") next
+      d = (substr(line, length(line), 1) == "/")
+      t = line; sub(/\/+$/, "", t)
+      a = (index(t, "/") > 0)
+      k = split(line, raw, "/"); n = 0
+      for (i = 1; i <= k; i++) if (raw[i] != "") { n++; pat[nr + 1, n] = rx(raw[i]) }
+      if (n == 0) next
+      nr++; dir[nr] = d; anc[nr] = a; cnt[nr] = n
+      next
+    }
+    {
+      m = split($0, seg, "/"); hit = 0
+      for (r = 1; r <= nr && !hit; r++) {
+        if (!anc[r]) {
+          for (i = 1; i <= m; i++) if ((!dir[r] || i < m) && seg[i] ~ pat[r, 1]) { hit = 1; break }
+          continue
+        }
+        if (dir[r] ? cnt[r] >= m : cnt[r] > m) continue
+        ok = 1
+        for (i = 1; i <= cnt[r]; i++) if (seg[i] !~ pat[r, i]) { ok = 0; break }
+        if (ok) hit = 1
+      }
+      if (!hit) print
+    }
+  ' "$1" "$2"
+}
+
 # Candidate paths, one per line, relative with forward slashes, into $1.
 candidates() {
   if real_git && [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; then
@@ -93,6 +148,10 @@ candidates() {
 *' -print | wc -l)
     [ "$nl" -eq 0 ] || die "path not allowed: a file name holds a line break"
     walk -type f -print | sed 's|^\./||' > "$1"
+    if [ -f .gitignore ]; then
+      ignore_filter .gitignore "$1" > "$1.kept" || die "cannot read .gitignore"
+      mv "$1.kept" "$1"
+    fi
   fi
 }
 
@@ -204,8 +263,43 @@ pack() {
   printf '{"file":%s,"sha256":"%s","bytes":%s,"files":%s%s}\n' "$(json_str "$out")" "$sha" "$bytes" "$count" "$GIT"
 }
 
+# DKO-1382: put_args are the words the put-args route answers for the ticket ('<host>~<org>~<slot>~<secret>'):
+# each one in single quotes, split by spaces. The ticket, the URL and the body are never echoed.
 put() {
-  file=$1; url=$2; shift 2
+  file=$1
+  ticket=$2
+  command -v curl >/dev/null 2>&1 || die "curl is not installed"
+  [ -z "$(printf '%s' "$ticket" | tr -d 'A-Za-z0-9._:~-')" ] || die "$BAD_TICKET"
+  thost=${ticket%%~*}
+  [ "$thost" != "$ticket" ] && [ -n "$thost" ] || die "$BAD_TICKET"
+  case "$(printf '%s' "$ticket" | tr -cd '~')" in '~~~') ;; *) die "$BAD_TICKET" ;; esac
+  case "$thost" in
+    127.0.0.1|127.0.0.1:*|localhost|localhost:*) tscheme=http ;;
+    *) tscheme=https ;;
+  esac
+  # The ticket goes to curl on stdin, not argv.
+  resp=$(printf 'url = "%s://%s/api/v1/dkoder/source/put-args"\nheader = "Content-Type: application/json"\ndata = "{\\"ticket\\":\\"%s\\"}"\n' "$tscheme" "$thost" "$ticket" | curl -s -w '\n%{http_code}' --max-time 60 -K -) || resp=000
+  tcode=$(printf '%s\n' "$resp" | tail -n 1)
+  case "$tcode" in
+    200) ;;
+    000) die "upload failed: could not connect" ;;
+    404|410) die "$EXPIRED" ;;
+    *) die "upload failed: HTTP $tcode" ;;
+  esac
+  text=$(printf '%s\n' "$resp" | sed '$d')
+  set --
+  text=${text#"${text%%[![:space:]]*}"}
+  while [ -n "$text" ]; do
+    case "$text" in "'"*) ;; *) die "$BAD_ARGS" ;; esac
+    text=${text#\'}
+    case "$text" in *\'*) ;; *) die "$BAD_ARGS" ;; esac
+    word=${text%%\'*}
+    text=${text#*\'}
+    set -- "$@" "$word"
+    text=${text#"${text%%[![:space:]]*}"}
+  done
+  [ $# -ge 1 ] || die "$BAD_ARGS"
+  url=$1; shift
   case "$url" in
     https://*|HTTPS://*) rest=${url#*://} ;;
     http://*|HTTP://*)
@@ -225,7 +319,6 @@ put() {
     '') die "refused: the upload URL is not a valid URL" ;;
   esac
   [ -f "$file" ] && [ -r "$file" ] || die "cannot read $file"
-  command -v curl >/dev/null 2>&1 || die "curl is not installed"
   # The URL and the headers go to curl on stdin, not argv, so they stay out of the process list.
   cfg() {
     printf 'url = "%s"\n' "$(printf '%s' "$url" | sed 's/\\/\\\\/g; s/"/\\"/g')"
@@ -248,7 +341,7 @@ put() {
     2??) ;;
     000) die "upload failed: could not connect" ;;
     # A 403 from S3 means the presigned link no longer works: it expired, or it was used.
-    403) die "upload failed: the upload link expired or was already used. Call dkoder.source.target again for a new one, then run put with the new put_args." ;;
+    403) die "$EXPIRED" ;;
     *) die "upload failed: HTTP $code" ;;
   esac
   rm -f "$file"
@@ -265,9 +358,9 @@ case "$1" in
     pack "${2:-.}"
     ;;
   put)
-    [ $# -ge 3 ] || die "$USAGE"
-    shift
-    put "$@"
+    [ $# -ge 2 ] || die "$USAGE"
+    [ $# -eq 4 ] && [ "$3" = --ticket ] || die "$NO_PUT"
+    put "$2" "$4"
     ;;
   *) die "$USAGE" ;;
 esac

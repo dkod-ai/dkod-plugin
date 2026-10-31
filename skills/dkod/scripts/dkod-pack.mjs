@@ -4,7 +4,11 @@
 // the same thing byte for byte (same files, same headers, same sha256); keep the four in step.
 //
 //   node dkod-pack.mjs pack [<folder>]                 -> {"file","sha256","bytes","files"[,"git"]}
-//   node dkod-pack.mjs put <file> <url> ["Name: value"...] -> {"ok":true,"status":200}
+//   node dkod-pack.mjs put <file> --ticket <ticket>     -> {"ok":true,"status":200}
+//
+// DKO-1382: the agent holds only the one-use upload_ticket from dkoder.source.target. `put` trades
+// it at POST /api/v1/dkoder/source/put-args for put_args (single-quoted words, the URL first, then
+// 'Name: value' headers), so the signed URL never reaches the agent's screen. No URL, --args or stdin.
 //
 // The archive holds regular files only, sorted by UTF-8 bytes, with mtime 0 and uid/gid 0, so the
 // same folder always gives the same sha256. The upload URL is a signed credential: never printed.
@@ -24,7 +28,7 @@ if (process.argv[2] === "put" && (process.env.HTTPS_PROXY || process.env.https_p
 const MAX_FILES = 20000;
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
-const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", ".next", "out", ".turbo", ".cache", "coverage", "venv", ".venv", "__pycache__"]);
+const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", ".next", "out", ".turbo", ".cache", "coverage", "venv", ".venv", "__pycache__", "test-results", "playwright-report", "graphify-out"]);
 const WINDOWS = process.platform === "win32";
 
 class Refusal extends Error {}
@@ -77,6 +81,42 @@ function gitFacts(root) {
   return `{"folder":${jsonString(basename(root))},"branch":${jsonString(branch)},"head":"${head.trim()}","head_at":${headAt},"dirty":${dirty}}`;
 }
 
+/**
+ * DKO-1407: outside git, the root .gitignore: plain names, `dir/`, `/anchored`, `a/b`, `*` and `?`.
+ * No negation, no `**`, no nested .gitignore. A name matches any segment; a `dir/` pattern only a
+ * folder (a non-final segment); an anchored one a leading run of segments.
+ */
+function globRegex(s) {
+  let re = "";
+  for (const c of s) re += c === "*" ? "[^/]*" : c === "?" ? "[^/]" : c.replace(/[^A-Za-z0-9_\s]/, "\\$&");
+  return new RegExp(`^${re}$`, "s");
+}
+
+function ignoreRules(root) {
+  let text = "";
+  try { text = readFileSync(join(root, ".gitignore"), "utf8"); } catch { return []; }
+  const rules = [];
+  for (const raw of text.split("\n")) {
+    let line = raw.replace(/^[ \t\r]+|[ \t\r]+$/g, "");
+    if (line === "" || line.startsWith("#") || line.startsWith("!")) continue;
+    const dirOnly = line.endsWith("/");
+    const anchored = line.replace(/\/+$/, "").includes("/");
+    const parts = line.split("/").filter((s) => s !== "").map(globRegex);
+    if (parts.length > 0) rules.push({ dirOnly, anchored, parts });
+  }
+  return rules;
+}
+
+function ignored(path, rules) {
+  const segs = path.split("/");
+  return rules.some((r) => {
+    if (!r.anchored) return segs.some((s, i) => (!r.dirOnly || i < segs.length - 1) && r.parts[0].test(s));
+    const k = r.parts.length;
+    if (r.dirOnly ? k >= segs.length : k > segs.length) return false;
+    return r.parts.every((re, i) => re.test(segs[i]));
+  });
+}
+
 /** Candidate paths, relative to root with forward slashes, before the common filters. */
 function candidates(root) {
   if (inGitTree(root)) {
@@ -96,7 +136,8 @@ function candidates(root) {
     }
   };
   walk(root, "");
-  return out;
+  const rules = ignoreRules(root);
+  return rules.length === 0 ? out : out.filter((p) => !ignored(p, rules));
 }
 
 function checkPath(path) {
@@ -202,6 +243,47 @@ function checkUrl(raw) {
   fail("refused: only https upload URLs are allowed");
 }
 
+const NO_PUT = "refused: use --ticket <upload_ticket> from dkoder.source.target; an upload URL, --args and stdin are not accepted";
+const BAD_TICKET = "refused: the upload ticket is not valid; call dkoder.source.target again";
+const EXPIRED = "upload failed: the upload ticket expired or was already used. Call dkoder.source.target again for a new one, then run put with the new --ticket.";
+const BAD_ARGS = "refused: put_args must be single-quoted words, the URL first";
+
+/** The words of a put_args string: each one in single quotes, split by spaces. Never echoes the input. */
+function splitPutArgs(text) {
+  const words = [];
+  const s = text.trim();
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] !== "'") fail(BAD_ARGS);
+    const end = s.indexOf("'", i + 1);
+    if (end < 0) fail(BAD_ARGS);
+    words.push(s.slice(i + 1, end));
+    i = end + 1;
+    while (i < s.length && /\s/.test(s[i])) i += 1;
+  }
+  if (words.length === 0) fail(BAD_ARGS);
+  return words;
+}
+
+/** DKO-1382: trades the ticket ('<host>~<org>~<slot>~<secret>') for put_args. Never prints the ticket, the URL or the body. */
+async function tradeTicket(ticket) {
+  const parts = ticket.split("~");
+  const host = parts[0];
+  if (parts.length !== 4 || !/^[A-Za-z0-9.:\[\]-]+$/.test(host)) fail(BAD_TICKET);
+  const local = /^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host);
+  let res;
+  try {
+    res = await fetch(`${local ? "http" : "https"}://${host}/api/v1/dkoder/source/put-args`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ticket }), redirect: "manual" });
+  } catch {
+    fail("upload failed: could not connect");
+  }
+  if (res.status === 404 || res.status === 410) fail(EXPIRED);
+  if (res.status !== 200) fail(`upload failed: HTTP ${res.status}`);
+  let text;
+  try { text = await res.text(); } catch { fail("upload failed: could not connect"); }
+  return splitPutArgs(text);
+}
+
 async function put(file, url, headerArgs) {
   checkUrl(url);
   const headers = new Headers();
@@ -222,7 +304,7 @@ async function put(file, url, headerArgs) {
     fail("upload failed: could not connect");
   }
   // A 403 from S3 means the presigned link no longer works: it expired, or it was used.
-  if (res.status === 403) fail("upload failed: the upload link expired or was already used. Call dkoder.source.target again for a new one, then run put with the new put_args.");
+  if (res.status === 403) fail(EXPIRED);
   if (res.status < 200 || res.status > 299) fail(`upload failed: HTTP ${res.status}`);
   unlinkSync(file);
   const dir = dirname(resolve(file));
@@ -232,12 +314,16 @@ async function put(file, url, headerArgs) {
   return `{"ok":true,"status":${res.status}}`;
 }
 
-const USAGE = 'usage: dkod-pack pack [<folder>] | put <file> <url> ["Name: value"...]';
+const USAGE = "usage: dkod-pack pack [<folder>] | put <file> --ticket <upload_ticket>";
 
 async function main(argv) {
   const [cmd, ...rest] = argv;
   if (cmd === "pack" && rest.length <= 1) return pack(rest[0] ?? ".");
-  if (cmd === "put" && rest.length >= 2) return put(rest[0], rest[1], rest.slice(2));
+  if (cmd === "put" && rest.length >= 1) {
+    if (rest.length !== 3 || rest[1] !== "--ticket") fail(NO_PUT);
+    const words = await tradeTicket(rest[2]);
+    return put(rest[0], words[0], words.slice(1));
+  }
   fail(USAGE);
 }
 

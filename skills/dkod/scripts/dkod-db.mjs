@@ -1,9 +1,12 @@
 // Built by packages/dkoder-plugin/scripts/build-db.ts from dkod-app. Do not edit: run `bun run --cwd packages/dkoder-plugin build:db`.
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn as spawn2 } from "node:child_process";
+import { closeSync, existsSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
+import { createHash as createHash2 } from "node:crypto";
 import net2 from "node:net";
+import { tmpdir } from "node:os";
+import { resolve as resolvePath } from "node:path";
 
 import { createHash, randomBytes } from "node:crypto";
 import net from "node:net";
@@ -283,22 +286,111 @@ function connectWebSocket(rawUrl, headers, handlers) {
   };
 }
 
+var PG_SETTINGS = "SET TimeZone='UTC'; SET DateStyle='ISO, YMD'; SET extra_float_digits=1; SET bytea_output='hex'; SET IntervalStyle='postgres';";
+var quoteIdent = (name) => `"${name.replace(/"/g, '""')}"`;
+var quoteLit = (text) => `'${text.replace(/'/g, "''")}'`;
+var isRec = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var json = (text) => {
+  try {
+    return JSON.parse(text ?? "");
+  } catch {
+    return null;
+  }
+};
+var hashSql = (t) => {
+  const cols = t.cols.map(quoteIdent).join(", ");
+  const text = "convert_to(r::text,'UTF8')";
+  return `SELECT count(*), md5(coalesce(string_agg(${text}, '\\x0a'::bytea ORDER BY ${text}), ''::bytea)) FROM (SELECT ${cols} FROM public.${quoteIdent(t.name)}) r;`;
+};
+function parseTallies(stdout) {
+  const out = [];
+  for (const l of stdout.split(`
+`)) {
+    const m = /^(\d+)[|\t]([0-9a-f]{32})$/.exec(l.trim());
+    if (m)
+      out.push({ rows: Number(m[1]), md5: m[2] });
+  }
+  return out;
+}
+function readMapTables(text) {
+  let map = null;
+  try {
+    map = JSON.parse(text ?? "null");
+  } catch {
+    return [];
+  }
+  const m = map;
+  if (!m || !Array.isArray(m.tables))
+    return [];
+  const nonSql = new Set;
+  for (const s of Array.isArray(m.stores) ? m.stores : []) {
+    if (typeof s.name === "string" && typeof s.engine === "string" && !/postgres|sql/i.test(s.engine))
+      nonSql.add(s.name);
+  }
+  const names = [];
+  for (const t of m.tables) {
+    if (typeof t.name !== "string" || typeof t.store === "string" && nonSql.has(t.store))
+      continue;
+    if (!names.includes(t.name))
+      names.push(t.name);
+  }
+  return names;
+}
+var PSQL = ["-X", "-q", "-At", "-F", "\t", "-v", "ON_ERROR_STOP=1"];
+async function tallies(url, tables, env, run, cwd = ".") {
+  if (tables.length === 0)
+    return {};
+  const args = [...PSQL, "--dbname", url, "-c", PG_SETTINGS, ...tables.flatMap((t) => ["-c", hashSql(t)])];
+  const res = await run("psql", args, env, cwd);
+  if (res.status !== 0)
+    return null;
+  const got = parseTallies(res.stdout);
+  if (got.length !== tables.length)
+    return null;
+  const out = {};
+  tables.forEach((t, i) => {
+    out[t.name] = got[i];
+  });
+  return out;
+}
+var same = (a, b) => a.rows === b.rows && a.md5 === b.md5;
+function changedTables(before, now) {
+  return Object.keys(before).filter((n) => now[n] === undefined || !same(before[n], now[n]));
+}
+function readFreezeData(text) {
+  const f = json(text);
+  const d = isRec(f) ? f.data : null;
+  if (!isRec(d) || !isRec(d.tables) || !Array.isArray(d.suite_writes))
+    return null;
+  const tablesOut = {};
+  for (const [n, t] of Object.entries(d.tables)) {
+    if (!isRec(t) || typeof t.rows !== "number" || typeof t.md5 !== "string")
+      return null;
+    tablesOut[n] = { rows: t.rows, md5: t.md5 };
+  }
+  return { database: typeof d.database === "string" ? d.database : "", tables: tablesOut, suite_writes: d.suite_writes.filter((s) => typeof s === "string") };
+}
+
 var DB_APP_KEY = /^[a-z0-9][a-z0-9-]{0,62}$/;
 var DEFAULT_PORT = 6543;
 var WAIT_LIMIT_MS = 10 * 60000;
 var CHECK_TIMEOUT_MS = 15000;
 var CHECK_RETRY_MS = 1e4;
 var UNKNOWN_APP = "unknown_app";
+var GATEWAY_LOAD_BUDGET_MS = 6 * 60000;
+var PHASE_LABEL = { gateway_loading: "gateway loading", database_making: "database being made", not_answering: "not answering" };
 var PENDING_CAP = 1 << 20;
 var RENEW_BEFORE_MS = 5 * 60000;
 var RENEW_MIN_MS = 30000;
 var RETRY_STEPS_MS = [30000, 60000, 120000, 300000];
 var FLAGS = {
   up: ["app", "port", "dir", "gateway", "config", "wait"],
+  down: ["dir"],
   migrate: ["dir", "port"],
   explain: [],
-  import: []
+  import: ["app", "from", "dir", "port"]
 };
+var BOOLEAN_FLAGS = { up: ["detach"] };
 function parseArgs(argv) {
   const [command, ...rest] = argv;
   if (!command || !(command in FLAGS))
@@ -306,6 +398,11 @@ function parseArgs(argv) {
   const flags = new Map;
   for (let i = 0;i < rest.length; i += 2) {
     const name = rest[i]?.startsWith("--") ? rest[i].slice(2) : null;
+    if (name !== null && BOOLEAN_FLAGS[command]?.includes(name)) {
+      flags.set(name, "true");
+      i--;
+      continue;
+    }
     const value = rest[i + 1];
     if (name === null || value === undefined || !FLAGS[command].includes(name))
       return { error: "usage" };
@@ -315,8 +412,10 @@ function parseArgs(argv) {
 }
 var USAGE = [
   "Usage:",
-  "  node dkod-db.mjs up --app <app key> [--port 6543] [--dir <app folder>] [--wait <seconds>]",
-  "  node dkod-db.mjs migrate [--dir <app folder>] [--port 6543]"
+  "  node dkod-db.mjs up --app <app key> [--port 6543] [--dir <app folder>] [--wait <seconds>] [--detach]",
+  "  node dkod-db.mjs down [--dir <app folder>]",
+  "  node dkod-db.mjs migrate [--dir <app folder>] [--port 6543]",
+  "  node dkod-db.mjs import --app <app key> --from <local postgres URL | snapshot> [--dir <app folder>] [--port 6543]"
 ].join(`
 `);
 function portOf(raw, fallback) {
@@ -450,15 +549,18 @@ function checkDatabase(gateway, app, token, io) {
           buf = buf.subarray(len + 1);
           if (type === "E") {
             let code = "";
+            let message = "";
             for (let i = 0;i < body.length && body[i] !== 0; ) {
               const end = body.indexOf(0, i + 1);
               if (end < 0)
                 break;
               if (String.fromCharCode(body[i]) === "C")
                 code = body.subarray(i + 1, end).toString();
+              else if (String.fromCharCode(body[i]) === "M")
+                message = body.subarray(i + 1, end).toString();
               i = end + 1;
             }
-            finish({ kind: code === "3D000" ? "no_database" : "not_open" });
+            finish(code === "3D000" ? { kind: "no_database" } : { kind: "not_open", detail: `${code} ${message}`.trim() });
           } else if (type === "Z") {
             if (!asked) {
               asked = true;
@@ -565,6 +667,29 @@ async function startUp(flags, io, cwd) {
   };
   let retriedAfterRefusal = false;
   let sawSyncing = false;
+  const spent = { gateway_loading: 0, database_making: 0, not_answering: 0 };
+  let phase = null;
+  let phaseSince = startedAt;
+  let warnedOverBudget = false;
+  const enter = (next) => {
+    const at = io.now();
+    if (phase !== null)
+      spent[phase] += at - phaseSince;
+    if (next !== phase)
+      io.print(`dkod-db: ${PHASE_LABEL[next]} (${Math.round((at - startedAt) / 1000)} s)`);
+    phase = next;
+    phaseSince = at;
+  };
+  const breakdown = () => {
+    const at = io.now();
+    const parts = Object.keys(spent).map((p) => [p, spent[p] + (p === phase ? at - phaseSince : 0)]).filter(([, ms]) => ms > 0);
+    return parts.map(([p, ms]) => `${PHASE_LABEL[p]} ${Math.round(ms / 1000)} s`).join(", ");
+  };
+  const withBreakdown = (sentence) => {
+    const b = breakdown();
+    return b ? `${sentence} (after ${Math.round((io.now() - startedAt) / 1000)} s: ${b})` : sentence;
+  };
+  let lastDetail = "";
   for (;; ) {
     let checked = { kind: "not_open" };
     let renewed = "ok";
@@ -579,6 +704,7 @@ async function startUp(flags, io, cwd) {
         if (again instanceof Error)
           return fail(2, again.message);
         sawSyncing = true;
+        enter("gateway_loading");
         checked = { kind: "not_open" };
       } else if (checked.kind === "refused") {
         if (retriedAfterRefusal)
@@ -590,19 +716,35 @@ async function startUp(flags, io, cwd) {
           retriedAfterRefusal = true;
           continue;
         }
+        lastDetail = checked.reason;
         checked = { kind: "not_open" };
       } else {
         retriedAfterRefusal = false;
       }
     }
-    if (checked.kind === "ready")
+    if (checked.kind === "not_open" && checked.detail)
+      lastDetail = checked.detail;
+    if (checked.kind === "ready") {
+      const total = Math.round((io.now() - startedAt) / 1000);
+      if (phase !== null) {
+        enter(phase);
+        io.print(`dkod-db: ready after ${total} s (${breakdown()})`);
+      }
       break;
-    if (checked.kind === "no_database")
+    }
+    if (checked.kind === "no_database") {
       sawNoDatabase = true;
+      enter("database_making");
+    } else if (phase !== "gateway_loading")
+      enter("not_answering");
     const elapsed = io.now() - startedAt;
     if (elapsed + CHECK_RETRY_MS > waitMs)
-      return fail(1, sawNoDatabase ? missingDb(app) : sawSyncing ? notSynced(app) : notReachable(app));
-    io.print(sawSyncing && !sawNoDatabase ? `dkod-db: waiting for the Dev database gateway to load ${app}; DKOD has made it, the gateway gets it within a few minutes (${Math.round(elapsed / 1000)} s of ${Math.round(waitMs / 1000)} s)` : `dkod-db: waiting for DKOD to make the ${app} Dev database (${Math.round(elapsed / 1000)} s of ${Math.round(waitMs / 1000)} s)`);
+      return fail(1, withBreakdown(sawNoDatabase ? missingDb(app) : sawSyncing ? notSynced(app) : notReachable(app)));
+    io.print(sawSyncing && !sawNoDatabase ? `dkod-db: waiting for the Dev database gateway to load ${app}; DKOD has made it, the gateway gets it within a few minutes (${Math.round(elapsed / 1000)} s of ${Math.round(waitMs / 1000)} s)` : phase === "not_answering" ? `dkod-db: the Dev database gateway for ${app} is reached but refuses or does not answer the login${lastDetail ? `: ${lastDetail}` : ""} (${Math.round(elapsed / 1000)} s of ${Math.round(waitMs / 1000)} s)` : `dkod-db: waiting for DKOD to make the ${app} Dev database (${Math.round(elapsed / 1000)} s of ${Math.round(waitMs / 1000)} s)`);
+    if (phase === "gateway_loading" && !warnedOverBudget && spent.gateway_loading + (io.now() - phaseSince) > GATEWAY_LOAD_BUDGET_MS) {
+      warnedOverBudget = true;
+      io.print(`dkod-db: the gateway has not loaded ${app} for longer than the usual sync (about ${GATEWAY_LOAD_BUDGET_MS / 60000} min). Check that Argo CD synced platform/dkod-devdb/access.yaml for the dkod-devdb-gateway Application, and that the gateway reloaded access.`);
+    }
     await new Promise((resolve) => {
       io.schedule(CHECK_RETRY_MS, resolve);
     });
@@ -789,6 +931,428 @@ ${result.stderr}`.split(`
   }
   return result.status === 0 ? 0 : 1;
 }
+var IMPORT_LOCAL_ONLY = "import reads a local Postgres only: give --from a postgres:// URL on this computer (127.0.0.1, localhost or ::1), or `snapshot` for the migration's scratch database.";
+var DEV_WARNING = "Dev is shared by every builder in the org (each app has its own database) and keeps 1 day of backups.";
+var LOCAL_HOSTS = ["127.0.0.1", "localhost", "::1", "[::1]"];
+function fkOrder(tables, edges) {
+  const names = new Set(tables);
+  const parents = new Map(tables.map((t) => [t, new Set]));
+  for (const e of edges)
+    if (e.child !== e.parent && names.has(e.child) && names.has(e.parent))
+      parents.get(e.child).add(e.parent);
+  const order = [];
+  const done = new Set;
+  while (order.length < tables.length) {
+    const next = tables.find((t) => !done.has(t) && [...parents.get(t)].every((p) => done.has(p)));
+    if (next === undefined)
+      return { cycle: tables.filter((t) => !done.has(t)) };
+    done.add(next);
+    order.push(next);
+  }
+  return { order };
+}
+function safeErrors(stderr) {
+  const out = [];
+  for (const l of stderr.split(`
+`)) {
+    const m = /ERROR:\s+(.*)$/.exec(l);
+    if (m)
+      out.push(`ERROR: ${m[1].replace(/["'].*$/, "…")}`);
+    else if (/^psql: error: /.test(l))
+      out.push(l.replace(/["'].*$/, "…"));
+    const c = /\bCOPY (\S+?),/.exec(l);
+    if (c && /^CONTEXT:/.test(l))
+      out.push(`ERROR: in table ${c[1]}`);
+  }
+  return out;
+}
+async function runImport(flags, io, cwd) {
+  const say = (line) => io.print(`dkod-db: ${line}`);
+  const app = flags.get("app") ?? "";
+  if (!DB_APP_KEY.test(app)) {
+    say("Give the app's key with --app: lowercase letters, digits and dashes.");
+    return 2;
+  }
+  const from = flags.get("from");
+  if (!from) {
+    say(`Give --from. ${IMPORT_LOCAL_ONLY}`);
+    return 2;
+  }
+  const dir = flags.get("dir") ?? cwd;
+  const snapshotFile = join(dir, ".dkod/snapshot.json");
+  let sourceRaw = from;
+  let snapshotMode = false;
+  if (!/^postgres(ql)?:\/\//i.test(from)) {
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(from) || from !== "snapshot" && !/\.json$/i.test(from)) {
+      say(IMPORT_LOCAL_ONLY);
+      return 2;
+    }
+    let rec = null;
+    try {
+      rec = JSON.parse(io.readFile(from === "snapshot" ? snapshotFile : /^([/\\]|[a-z]:[/\\])/i.test(from) ? from : join(dir, from)) ?? "null");
+    } catch {}
+    const r = rec;
+    const dbs = r && r.mode === "snapshot" && Array.isArray(r.databases) ? r.databases : [];
+    const found = dbs.map((d) => d.url).find((u) => typeof u === "string" && /^postgres(ql)?:\/\//i.test(u));
+    if (!found) {
+      say(`The snapshot has no Postgres scratch database. ${IMPORT_LOCAL_ONLY}`);
+      return 2;
+    }
+    sourceRaw = found;
+    snapshotMode = true;
+  }
+  let source;
+  try {
+    source = new URL(sourceRaw);
+  } catch {
+    say(IMPORT_LOCAL_ONLY);
+    return 2;
+  }
+  if (!LOCAL_HOSTS.includes(source.hostname)) {
+    say(IMPORT_LOCAL_ONLY);
+    return 2;
+  }
+  let sourcePassword = source.password;
+  try {
+    sourcePassword = decodeURIComponent(sourcePassword);
+  } catch {
+    say(`The source password has a malformed percent escape. ${IMPORT_LOCAL_ONLY}`);
+    return 2;
+  }
+  const password = sourcePassword || io.env.PGPASSWORD || "";
+  source.password = "";
+  const sourceUrl = source.toString();
+  const devRaw = readDatabaseUrl(io.readFile(join(dir, ".env.local")));
+  if (!devRaw) {
+    say("There is no DATABASE_URL in .env.local. Run `node dkod-db.mjs up --app <app key>` first, in the background.");
+    return 2;
+  }
+  let dev;
+  try {
+    dev = new URL(devRaw);
+  } catch {
+    say("DATABASE_URL in .env.local is not a URL. Run `node dkod-db.mjs up --app <app key>` first, in the background.");
+    return 2;
+  }
+  const port = portOf(flags.get("port"), Number(dev.port) || DEFAULT_PORT);
+  if (port === null) {
+    say("--port must be a number from 0 to 65535.");
+    return 2;
+  }
+  if (!await probe(port)) {
+    say("The Dev database is not up. Run `node dkod-db.mjs up --app <app key>` first, in the background.");
+    return 2;
+  }
+  dev.port = String(port);
+  dev.password = "";
+  const devUrl = dev.toString();
+  const freezeText = io.readFile(join(dir, ".dkod/parity/freeze.json"));
+  if (freezeText === null) {
+    say("There is no .dkod/parity/freeze.json. Freeze the parity suite (step 3 of the dkod-migrate skill) before the import.");
+    return 2;
+  }
+  const frozenData = readFreezeData(freezeText);
+  if (frozenData === null) {
+    say("freeze.json records no data identity (no Postgres scratch database was frozen on). Run `dkod-migrate.mjs snapshot`, rerun the suite and freeze again.");
+    return 1;
+  }
+  const baseEnv = {};
+  for (const name of ["PATH", "HOME", "USER", "USERPROFILE", "TMPDIR", "TEMP", "SystemRoot", "LANG"])
+    if (io.env[name] !== undefined)
+      baseEnv[name] = io.env[name];
+  const srcEnv = password ? { ...baseEnv, PGPASSWORD: password } : baseEnv;
+  const devEnv = { ...baseEnv, PGSSLMODE: "disable" };
+  const psql = (url, env, extra, input) => io.run("psql", ["-X", "-q", "-At", "-F", "\t", "-v", "ON_ERROR_STOP=1", "--dbname", url, ...extra], env, dir, input);
+  const failed = (what, stderr) => {
+    say(what);
+    for (const l of safeErrors(stderr))
+      io.print(l);
+    return 1;
+  };
+  const mapped = readMapTables(io.readFile(join(dir, ".dkod/map/app-map.json")));
+  if (mapped.length === 0) {
+    say("The migration map has no tables to import (.dkod/map/app-map.json).");
+    return 2;
+  }
+  const colsQuery = (names) => `SELECT c.table_name, c.column_name FROM information_schema.columns c JOIN information_schema.tables t ON t.table_schema=c.table_schema AND t.table_name=c.table_name AND t.table_type='BASE TABLE' WHERE c.table_schema='public' AND c.is_generated='NEVER' AND c.table_name IN (${names.map(quoteLit).join(",")}) ORDER BY c.table_name, c.ordinal_position`;
+  const readCols = (stdout) => {
+    const m = new Map;
+    for (const l of stdout.split(`
+`)) {
+      const [t, c] = l.split("\t");
+      if (t && c)
+        m.set(t, [...m.get(t) ?? [], c]);
+    }
+    return m;
+  };
+  const srcCols = await psql(sourceUrl, srcEnv, ["-c", colsQuery(mapped)]);
+  if (srcCols.status !== 0)
+    return failed("Could not read the original's tables.", srcCols.stderr);
+  const sourceCols = readCols(srcCols.stdout);
+  const checked = Object.keys(frozenData.tables).filter((n) => !frozenData.suite_writes.includes(n));
+  const frozenRefs = checked.filter((n) => sourceCols.has(n)).map((name) => ({ name, cols: sourceCols.get(name) }));
+  const sourceNow = await tallies(sourceUrl, frozenRefs, srcEnv, io.run, dir);
+  if (sourceNow === null)
+    return failed("Could not hash the original's rows.", "");
+  const unlike = changedTables(Object.fromEntries(checked.map((n) => [n, frozenData.tables[n]])), sourceNow);
+  if (unlike.length > 0) {
+    for (const n of unlike)
+      say(`the --from source is not the data the suite was frozen on: ${n} (${sourceNow[n] === undefined ? "missing" : `${String(sourceNow[n].rows)} rows`}, frozen on ${String(frozenData.tables[n].rows)})`);
+    io.print(JSON.stringify({ ok: false, app, tables: unlike.map((n) => ({ name: n, source: sourceNow[n] ?? null, frozen: frozenData.tables[n] })), imported: false }));
+    return 1;
+  }
+  const present = mapped.filter((t) => sourceCols.has(t));
+  const skippedTables = mapped.filter((t) => !sourceCols.has(t));
+  const droppedColumns = {};
+  if (present.length === 0) {
+    say("None of the map's tables is in the original's public schema. Nothing to import.");
+    return 2;
+  }
+  const devCols = await psql(devUrl, devEnv, ["-c", colsQuery(present)]);
+  if (devCols.status !== 0)
+    return failed("Could not read the Dev database's tables.", devCols.stderr);
+  const devCols2 = readCols(devCols.stdout);
+  const tables = [];
+  for (const name of present) {
+    const have = devCols2.get(name);
+    if (!have) {
+      say(`Table ${name} is not in the Dev database. Run the app's db:migrate first.`);
+      return 2;
+    }
+    const cols = sourceCols.get(name).filter((c) => have.includes(c));
+    if (cols.length === 0) {
+      say(`Table ${name} shares no column with the Dev database.`);
+      return 2;
+    }
+    const dropped = sourceCols.get(name).filter((c) => !have.includes(c));
+    if (dropped.length > 0)
+      droppedColumns[name] = dropped;
+    tables.push({ name, cols });
+  }
+  if (skippedTables.length > 0)
+    say(`warning: these mapped tables are not in the original, so they were not imported: ${skippedTables.join(", ")}.`);
+  for (const [n, c] of Object.entries(droppedColumns))
+    say(`warning: table ${n} has columns the Dev database lacks, so they were not imported: ${c.join(", ")}.`);
+  const edgesRes = await psql(sourceUrl, srcEnv, ["-c", "SELECT cl.relname, pl.relname FROM pg_constraint k JOIN pg_class cl ON cl.oid=k.conrelid JOIN pg_namespace n ON n.oid=cl.relnamespace JOIN pg_class pl ON pl.oid=k.confrelid JOIN pg_namespace pn ON pn.oid=pl.relnamespace WHERE k.contype='f' AND n.nspname='public' AND pn.nspname='public'"]);
+  if (edgesRes.status !== 0)
+    return failed("Could not read the original's foreign keys.", edgesRes.stderr);
+  const edges = edgesRes.stdout.split(`
+`).map((l) => l.split("\t")).filter((p) => p.length === 2).map(([child, parent]) => ({ child, parent }));
+  const ordered = fkOrder(tables.map((t) => t.name), edges);
+  if ("cycle" in ordered) {
+    say(`These tables reference each other in a cycle, so no copy order exists: ${ordered.cycle.join(", ")}.`);
+    return 2;
+  }
+  const byName = new Map(tables.map((t) => [t.name, t]));
+  const inOrder = ordered.order.map((n) => byName.get(n));
+  const srcHash = await psql(sourceUrl, srcEnv, ["-f", "-"], `${PG_SETTINGS}
+${inOrder.map(hashSql).join(`
+`)}
+`);
+  if (srcHash.status !== 0)
+    return failed("Could not hash the original's rows.", srcHash.stderr);
+  const expected = parseTallies(srcHash.stdout);
+  if (expected.length !== inOrder.length)
+    return failed("Could not hash the original's rows.", srcHash.stderr);
+  const devHash = await psql(devUrl, devEnv, ["-f", "-"], `${PG_SETTINGS}
+${inOrder.map(hashSql).join(`
+`)}
+`);
+  const before = parseTallies(devHash.stdout);
+  if (devHash.status !== 0 || before.length !== inOrder.length)
+    return failed("Could not hash the Dev database's rows.", devHash.stderr);
+  const alreadyPresent = [];
+  const toCopy = [];
+  const differing = [];
+  inOrder.forEach((t, i) => {
+    const b = before[i];
+    if (b.rows === 0)
+      toCopy.push(t);
+    else if (b.rows === expected[i].rows && b.md5 === expected[i].md5)
+      alreadyPresent.push(t.name);
+    else
+      differing.push(t.name);
+  });
+  if (differing.length > 0) {
+    for (const n of differing)
+      say(`Dev table ${n} already has rows that differ from the original's: the dk- app's own migrations insert rows in ${n} that differ from the original's. Change those migrations to insert exactly the original's rows (or none), then drop and remake Dev, run db:migrate and import again. Never delete or edit Dev rows by hand; import never overwrites.`);
+    const refused = inOrder.map((t, i) => ({ name: t.name, source: expected[i], dev: before[i], match: before[i].rows === expected[i].rows && before[i].md5 === expected[i].md5 }));
+    io.print(JSON.stringify({ ok: false, app, tables: refused, already_present: alreadyPresent, imported: false }));
+    return 1;
+  }
+  say(`warning: ${DEV_WARNING}`);
+  if (alreadyPresent.length > 0)
+    say(`these tables already hold the original's rows, so they were not copied: ${alreadyPresent.join(", ")}.`);
+  let script = `${PG_SETTINGS}
+`;
+  if (toCopy.length > 0)
+    script += `DO $$ BEGIN
+${toCopy.map((t) => `IF EXISTS (SELECT 1 FROM public.${quoteIdent(t.name)}) THEN RAISE EXCEPTION 'dkod-import: Dev table ${t.name.replace(/'/g, "''").replace(/%/g, "%%")} already has rows; import never overwrites'; END IF;`).join(`
+`)}
+END $$;
+`;
+  for (const t of toCopy) {
+    const cols = t.cols.map(quoteIdent).join(", ");
+    const data = await psql(sourceUrl, srcEnv, ["-c", PG_SETTINGS, "-c", `COPY (SELECT ${cols} FROM public.${quoteIdent(t.name)}) TO STDOUT`]);
+    if (data.status !== 0)
+      return failed(`Could not read table ${t.name} from the original.`, data.stderr);
+    script += `COPY public.${quoteIdent(t.name)} (${cols}) FROM STDIN;
+${data.stdout}${data.stdout === "" || data.stdout.endsWith(`
+`) ? "" : `
+`}\\.
+`;
+  }
+  for (const t of inOrder)
+    for (const c of t.cols) {
+      const tc = `public.${quoteIdent(t.name)}`;
+      script += `DO $$ DECLARE s text; BEGIN s := pg_get_serial_sequence(${quoteLit(tc)}, ${quoteLit(c)}); IF s IS NOT NULL THEN PERFORM setval(s, coalesce((SELECT max(${quoteIdent(c)}) FROM ${tc}), 1), (SELECT max(${quoteIdent(c)}) FROM ${tc}) IS NOT NULL); END IF; END $$;
+`;
+    }
+  script += `${inOrder.map(hashSql).join(`
+`)}
+`;
+  script += `DO $$ DECLARE got record; BEGIN
+${inOrder.map((t, i) => `SELECT count(*) AS n, md5(coalesce(string_agg(convert_to(r::text,'UTF8'), '\\x0a'::bytea ORDER BY convert_to(r::text,'UTF8')), ''::bytea)) AS h INTO got FROM (SELECT ${t.cols.map(quoteIdent).join(", ")} FROM public.${quoteIdent(t.name)}) r;
+IF got.n <> ${expected[i].rows} OR got.h <> ${quoteLit(expected[i].md5)} THEN RAISE EXCEPTION 'dkod-import: table ${t.name.replace(/'/g, "''").replace(/%/g, "%%")} does not match the original'; END IF;`).join(`
+`)}
+END $$;
+`;
+  const devRun = await psql(devUrl, devEnv, ["--single-transaction", "-f", "-"], script);
+  const actual = parseTallies(devRun.stdout);
+  const report = inOrder.map((t, i) => {
+    const d = actual[i] ?? null;
+    return { name: t.name, source: expected[i], dev: d, match: devRun.status === 0 && d !== null && d.rows === expected[i].rows && d.md5 === expected[i].md5 };
+  });
+  const ok = devRun.status === 0 && report.every((r) => r.match);
+  if (!ok) {
+    if (devRun.status !== 0)
+      say("Dev was rolled back: nothing was imported.");
+    else
+      say("The row counts and hashes could not be read or do not match. Dev may hold rows.");
+    for (const l of safeErrors(devRun.stderr))
+      io.print(l);
+    io.print(JSON.stringify({ ok: false, app, tables: report, already_present: alreadyPresent, imported: false }));
+    return 1;
+  }
+  const importedTables = {};
+  inOrder.forEach((t, i) => {
+    importedTables[t.name] = { cols: t.cols, rows: report[i].dev.rows, md5: report[i].dev.md5 };
+  });
+  const marks = { imported: true, imported_tables: importedTables, dev_url: devUrl };
+  let record = null;
+  try {
+    record = JSON.parse(io.readFile(snapshotFile) ?? "null");
+  } catch {}
+  if (record && record.mode === "snapshot")
+    io.writeFile(snapshotFile, `${JSON.stringify({ ...record, ...marks }, null, 2)}
+`);
+  else if (!snapshotMode && record === null)
+    io.writeFile(snapshotFile, `${JSON.stringify({ ok: true, mode: "snapshot", scratch: "", files: [], databases: [], env: {}, ...marks }, null, 2)}
+`);
+  io.print(JSON.stringify({ ok: true, app, tables: report, already_present: alreadyPresent, imported: true, skipped_tables: skippedTables, dropped_columns: droppedColumns }));
+  return 0;
+}
+function statePaths(dir) {
+  const resolved = resolvePath(dir);
+  const base = join(tmpdir(), `dkod-db-${createHash2("sha256").update(resolved).digest("hex").slice(0, 16)}`);
+  return { state: `${base}.json`, log: `${base}.log`, dir: resolved };
+}
+function readState(io, path) {
+  try {
+    const parsed = JSON.parse(io.readFile(path) ?? "null");
+    return parsed && typeof parsed.pid === "number" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+var sleep = (io, ms) => new Promise((resolve) => {
+  io.schedule(ms, resolve);
+});
+var POLL_MS = 250;
+var READY_LINE = /Dev database on 127\.0\.0\.1:(\d+)/;
+async function isOurTunnel(io, state) {
+  return io.alive(state.pid) && state.port !== undefined && await probe(state.port);
+}
+async function stopTunnel(io, state) {
+  io.kill(state.pid, "SIGTERM");
+  for (let waited = 0;waited < 5000; waited += POLL_MS) {
+    if (!io.alive(state.pid) && (state.port === undefined || !await probe(state.port)))
+      break;
+    await sleep(io, POLL_MS);
+  }
+  if (io.alive(state.pid))
+    io.kill(state.pid, "SIGKILL");
+}
+async function runUpDetached(flags, io) {
+  const app = flags.get("app") ?? "";
+  const paths = statePaths(flags.get("dir") ?? io.cwd);
+  const say = (sentence) => io.print(`dkod-db: ${sentence}`);
+  if (!DB_APP_KEY.test(app)) {
+    say("Give the app's key with --app: lowercase letters, digits and dashes.");
+    return 2;
+  }
+  const waitRaw = flags.get("wait");
+  if (waitRaw !== undefined && !/^\d{1,6}$/.test(waitRaw)) {
+    say("--wait must be a number of seconds.");
+    return 2;
+  }
+  const waitMs = waitRaw === undefined ? WAIT_LIMIT_MS : Number(waitRaw) * 1000;
+  const old = readState(io, paths.state);
+  if (old && await isOurTunnel(io, old)) {
+    const wantedPort = flags.get("port");
+    if (old.app === app && (wantedPort === undefined || Number(wantedPort) === 0 || Number(wantedPort) === old.port)) {
+      io.print(JSON.stringify({ ok: true, app: old.app, port: old.port, pid: old.pid, log: old.log }));
+      return 0;
+    }
+    await stopTunnel(io, old);
+  }
+  io.remove(paths.state);
+  const args = ["up"];
+  for (const [name, value] of flags)
+    if (name !== "detach")
+      args.push(`--${name}`, value);
+  if (!flags.has("dir"))
+    args.push("--dir", paths.dir);
+  const pid = io.spawnDetached(args, paths.log);
+  io.writeFile(paths.state, JSON.stringify({ pid, app, dir: paths.dir, log: paths.log }));
+  const startedAt = io.now();
+  for (;; ) {
+    await sleep(io, POLL_MS);
+    const log = io.readFile(paths.log) ?? "";
+    const port = Number(READY_LINE.exec(log)?.[1] ?? 0);
+    if (port > 0 && readDatabaseUrl(io.readFile(join(paths.dir, ".env.local"))) !== null && await probe(port)) {
+      io.writeFile(paths.state, JSON.stringify({ pid, app, dir: paths.dir, log: paths.log, port }));
+      io.print(JSON.stringify({ ok: true, app, port, pid, log: paths.log }));
+      return 0;
+    }
+    if (!io.alive(pid)) {
+      const last = (io.readFile(paths.log) ?? log).split(`
+`).filter((l) => l.startsWith("dkod-db:")).pop();
+      io.print(last ?? "dkod-db: The Dev database tunnel stopped before it answered.");
+      io.remove(paths.state);
+      return 1;
+    }
+    if (io.now() - startedAt > waitMs + 5000) {
+      io.kill(pid, "SIGTERM");
+      io.remove(paths.state);
+      say(`The Dev database did not answer within ${Math.round(waitMs / 1000)} s, so the tunnel was stopped. Run this again.`);
+      return 1;
+    }
+  }
+}
+async function runDown(flags, io) {
+  const paths = statePaths(flags.get("dir") ?? io.cwd);
+  const state = readState(io, paths.state);
+  if (!state || !await isOurTunnel(io, state)) {
+    io.remove(paths.state);
+    io.print(JSON.stringify({ ok: true, stopped: false }));
+    return 0;
+  }
+  await stopTunnel(io, state);
+  io.remove(paths.state);
+  io.print(JSON.stringify({ ok: true, stopped: true, ...state.port === undefined ? {} : { port: state.port } }));
+  return 0;
+}
 async function runDbCli(argv, io) {
   const args = parseArgs(argv);
   if ("error" in args) {
@@ -797,6 +1361,8 @@ async function runDbCli(argv, io) {
   }
   switch (args.command) {
     case "up": {
+      if (args.flags.has("detach"))
+        return await runUpDetached(args.flags, io);
       const started = await startUp(args.flags, io, io.cwd);
       if ("exit" in started)
         return started.exit;
@@ -804,17 +1370,42 @@ async function runDbCli(argv, io) {
       await started.handle.stop();
       return 0;
     }
+    case "down":
+      return await runDown(args.flags, io);
     case "migrate":
       return await runMigrate(args.flags, io, io.cwd, io.exists);
     case "explain":
       io.print("dkod-db: explain is coming in DKO-1052");
       return 2;
     default:
-      io.print("dkod-db: import is coming in DKO-1053");
-      return 2;
+      return await runImport(args.flags, io, io.cwd);
   }
 }
 
+import { spawn } from "node:child_process";
+function runProcess(cmd, args, env, cwd, input) {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, { env, cwd, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
+    if (input !== undefined) {
+      child.stdin.on("error", () => {});
+      child.stdin.end(input);
+    }
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    let stdout = "", stderr = "";
+    child.stdout.on("data", (d) => {
+      stdout += d;
+    });
+    child.stderr.on("data", (d) => {
+      stderr += d;
+    });
+    child.on("error", () => resolve({ status: 127, stdout, stderr: `${stderr}Could not start ${cmd}.
+` }));
+    child.on("close", (code) => resolve({ status: code ?? 1, stdout, stderr }));
+  });
+}
+
+var exited = new Set;
 process.exitCode = await runDbCli(process.argv.slice(2), {
   env: process.env,
   cwd: process.cwd(),
@@ -836,21 +1427,40 @@ process.exitCode = await runDbCli(process.argv.slice(2), {
     return () => clearTimeout(t);
   },
   uuid: () => randomUUID(),
-  run: (cmd, args, env, cwd) => new Promise((resolve) => {
-    const child = spawn(cmd, args, { env, cwd, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "", stderr = "";
-    child.stdout.on("data", (d) => {
-      stdout += d.toString();
-    });
-    child.stderr.on("data", (d) => {
-      stderr += d.toString();
-    });
-    child.on("error", () => resolve({ status: 127, stdout, stderr: `${stderr}Could not start ${cmd}.
-` }));
-    child.on("close", (code) => resolve({ status: code ?? 1, stdout, stderr }));
-  }),
+  run: runProcess,
   onStop: (fn) => {
     process.once("SIGINT", fn);
     process.once("SIGTERM", fn);
+  },
+  spawnDetached: (args, logPath) => {
+    const log = openSync(logPath, "w");
+    const child = spawn2(process.execPath, [process.argv[1], ...args], { detached: true, stdio: ["ignore", log, log], env: process.env });
+    closeSync(log);
+    child.on("exit", () => {
+      if (child.pid !== undefined)
+        exited.add(child.pid);
+    });
+    child.unref();
+    return child.pid ?? 0;
+  },
+  alive: (pid) => {
+    if (exited.has(pid))
+      return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  kill: (pid, signal) => {
+    try {
+      process.kill(pid, signal);
+    } catch {}
+  },
+  remove: (path) => {
+    try {
+      rmSync(path, { force: true });
+    } catch {}
   }
 });

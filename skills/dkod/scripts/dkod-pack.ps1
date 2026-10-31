@@ -4,7 +4,11 @@
 # sha256); keep the four in step. ASCII only: 5.1 reads a file without a BOM as ANSI.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File dkod-pack.ps1 pack [<folder>]
-#   powershell -NoProfile -ExecutionPolicy Bypass -File dkod-pack.ps1 put <file> <url> ["Name: value"...]
+#   powershell -NoProfile -ExecutionPolicy Bypass -File dkod-pack.ps1 put <file> --ticket <ticket>
+#
+# DKO-1382: the agent holds only the one-use upload_ticket from dkoder.source.target. `put` trades
+# it at POST /api/v1/dkoder/source/put-args for put_args (single-quoted words, the URL first, then
+# 'Name: value' headers), so the signed URL never reaches the agent's screen. No URL, --args or stdin.
 #
 # The upload URL is a signed credential: never printed.
 $ErrorActionPreference = 'Stop'
@@ -13,10 +17,14 @@ Set-StrictMode -Version 2
 $MaxFiles = 20000
 $MaxFileBytes = 4 * 1024 * 1024
 $MaxTotalBytes = 64 * 1024 * 1024
-$SkipDirs = @('.git', 'node_modules', 'dist', 'build', '.next', 'out', '.turbo', '.cache', 'coverage', 'venv', '.venv', '__pycache__')
+$SkipDirs = @('.git', 'node_modules', 'dist', 'build', '.next', 'out', '.turbo', '.cache', 'coverage', 'venv', '.venv', '__pycache__', 'test-results', 'playwright-report', 'graphify-out')
 $OnWindows = ($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
-$Usage = 'usage: dkod-pack pack [<folder>] | put <file> <url> ["Name: value"...]'
+$Usage = 'usage: dkod-pack pack [<folder>] | put <file> --ticket <upload_ticket>'
+$NoPut = 'refused: use --ticket <upload_ticket> from dkoder.source.target; an upload URL, --args and stdin are not accepted'
+$BadTicket = 'refused: the upload ticket is not valid; call dkoder.source.target again'
+$Expired = 'upload failed: the upload ticket expired or was already used. Call dkoder.source.target again for a new one, then run put with the new --ticket.'
+$BadArgs = 'refused: put_args must be single-quoted words, the URL first'
 
 class Refusal : System.Exception {
   Refusal([string]$message) : base($message) {}
@@ -114,6 +122,56 @@ function GitFacts([string]$root) {
   return '{"folder":' + (JsonString (Split-Path -Leaf $root)) + ',"branch":' + (JsonString $branch) + ',"head":"' + $h + '","head_at":' + $t + ',"dirty":' + $dirty + '}'
 }
 
+# DKO-1407: outside git, the root .gitignore: plain names, `dir/`, `/anchored`, `a/b`, `*` and `?`.
+# No negation, no `**`, no nested .gitignore. A name matches any segment; a `dir/` pattern only a
+# folder (a non-final segment); an anchored one a leading run of segments.
+function GlobRegex([string]$s) {
+  $sb = New-Object System.Text.StringBuilder
+  [void]$sb.Append('^')
+  foreach ($c in $s.ToCharArray()) {
+    if ($c -eq '*') { [void]$sb.Append('[^/]*') }
+    elseif ($c -eq '?') { [void]$sb.Append('[^/]') }
+    else { [void]$sb.Append([regex]::Escape([string]$c)) }
+  }
+  [void]$sb.Append('$')
+  return New-Object System.Text.RegularExpressions.Regex($sb.ToString(), [System.Text.RegularExpressions.RegexOptions]::Singleline)
+}
+
+function IgnoreRules([string]$root) {
+  $rules = New-Object System.Collections.Generic.List[object]
+  $file = Join-Path $root '.gitignore'
+  if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return ,$rules }
+  try { $text = $Utf8.GetString([System.IO.File]::ReadAllBytes($file)) } catch { return ,$rules }
+  foreach ($raw in $text.Split("`n")) {
+    $line = $raw.Trim(" `t`r")
+    if ($line -eq '' -or $line.StartsWith('#') -or $line.StartsWith('!')) { continue }
+    $dirOnly = $line.EndsWith('/')
+    $anchored = $line.TrimEnd('/').Contains('/')
+    $parts = New-Object System.Collections.Generic.List[object]
+    foreach ($s in $line.Split('/')) { if ($s -ne '') { $parts.Add((GlobRegex $s)) } }
+    if ($parts.Count -gt 0) { $rules.Add(@{ DirOnly = $dirOnly; Anchored = $anchored; Parts = $parts }) }
+  }
+  return ,$rules
+}
+
+function IsIgnored([string]$path, $rules) {
+  $segs = $path.Split('/')
+  foreach ($r in $rules) {
+    if (-not $r.Anchored) {
+      for ($i = 0; $i -lt $segs.Length; $i++) {
+        if ((-not $r.DirOnly -or $i -lt $segs.Length - 1) -and $r.Parts[0].IsMatch($segs[$i])) { return $true }
+      }
+      continue
+    }
+    $k = $r.Parts.Count
+    if ($r.DirOnly) { if ($k -ge $segs.Length) { continue } } elseif ($k -gt $segs.Length) { continue }
+    $all = $true
+    for ($i = 0; $i -lt $k; $i++) { if (-not $r.Parts[$i].IsMatch($segs[$i])) { $all = $false; break } }
+    if ($all) { return $true }
+  }
+  return $false
+}
+
 # Candidate paths, relative to root with forward slashes, before the common filters.
 function Candidates([string]$root) {
   $list = New-Object System.Collections.Generic.List[string]
@@ -137,7 +195,11 @@ function Candidates([string]$root) {
       } else { $list.Add($rel) }
     }
   }
-  return ,$list
+  $rules = IgnoreRules $root
+  if ($rules.Count -eq 0) { return ,$list }
+  $kept = New-Object System.Collections.Generic.List[string]
+  foreach ($p in $list) { if (-not (IsIgnored $p $rules)) { $kept.Add($p) } }
+  return ,$kept
 }
 
 function CheckPath([string]$path) {
@@ -257,6 +319,54 @@ function Pack([string]$folder) {
   return '{"file":' + (JsonString $out) + ',"sha256":"' + $hex + '","bytes":' + $bytes + ',"files":' + $entryArr.Length + $tail + '}'
 }
 
+# The words of a put_args string: each one in single quotes, split by spaces. Never echoes the input.
+function SplitPutArgs([string]$text) {
+  $s = $text.Trim()
+  $words = @()
+  $i = 0
+  while ($i -lt $s.Length) {
+    if ($s[$i] -ne [char]39) { Fail $BadArgs }
+    $end = $s.IndexOf([char]39, $i + 1)
+    if ($end -lt 0) { Fail $BadArgs }
+    $words += $s.Substring($i + 1, $end - $i - 1)
+    $i = $end + 1
+    while ($i -lt $s.Length -and [char]::IsWhiteSpace($s[$i])) { $i += 1 }
+  }
+  if ($words.Count -eq 0) { Fail $BadArgs }
+  return , $words
+}
+
+# DKO-1382: trades the ticket ('<host>~<org>~<slot>~<secret>') for put_args. Never prints the ticket, the URL or the body.
+function TradeTicket([string]$ticket) {
+  $parts = $ticket.Split([char]126)
+  $hostPart = $parts[0]
+  if ($ticket -notmatch '^[A-Za-z0-9._:~\[\]-]+$') { Fail $BadTicket }
+  if ($parts.Count -ne 4 -or $hostPart -notmatch '^[A-Za-z0-9.:\[\]-]+$') { Fail $BadTicket }
+  $scheme = if ($hostPart -match '^(127\.0\.0\.1|localhost)(:\d+)?$') { 'http' } else { 'https' }
+  if ($PSVersionTable.PSVersion.Major -lt 6) {
+    Add-Type -AssemblyName System.Net.Http
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  }
+  $handler = New-Object System.Net.Http.HttpClientHandler
+  $handler.AllowAutoRedirect = $false
+  $client = New-Object System.Net.Http.HttpClient($handler)
+  $client.Timeout = [TimeSpan]::FromSeconds(60)
+  try {
+    $json = '{"ticket":"' + $ticket + '"}'
+    $content = New-Object System.Net.Http.StringContent($json, $Utf8, 'application/json')
+    try { $res = $client.PostAsync($scheme + '://' + $hostPart + '/api/v1/dkoder/source/put-args', $content).GetAwaiter().GetResult() } catch { Fail 'upload failed: could not connect' }
+    $status = [int]$res.StatusCode
+    $text = ''
+    try { $text = $res.Content.ReadAsStringAsync().GetAwaiter().GetResult() } catch { }
+    $res.Dispose()
+  } finally {
+    $client.Dispose()
+  }
+  if ($status -eq 404 -or $status -eq 410) { Fail $Expired }
+  if ($status -ne 200) { Fail "upload failed: HTTP $status" }
+  return , (SplitPutArgs $text)
+}
+
 function Put([string]$file, [string]$url, [string[]]$headerArgs) {
   $u = $null
   if (-not [Uri]::TryCreate($url, [UriKind]::Absolute, [ref]$u)) { Fail 'refused: the upload URL is not a valid URL' }
@@ -301,7 +411,7 @@ function Put([string]$file, [string]$url, [string[]]$headerArgs) {
     $client.Dispose()
   }
   # A 403 from S3 means the presigned link no longer works: it expired, or it was used.
-  if ($status -eq 403) { Fail 'upload failed: the upload link expired or was already used. Call dkoder.source.target again for a new one, then run put with the new put_args.' }
+  if ($status -eq 403) { Fail $Expired }
   if ($status -lt 200 -or $status -gt 299) { Fail "upload failed: HTTP $status" }
   [System.IO.File]::Delete($full)
   $dir = [System.IO.Path]::GetDirectoryName($full)
@@ -315,10 +425,12 @@ try {
   if ($args.Count -ge 1 -and $args[0] -eq 'pack' -and $args.Count -le 2) {
     $folder = if ($args.Count -eq 2) { [string]$args[1] } else { '.' }
     $line = Pack $folder
-  } elseif ($args.Count -ge 3 -and $args[0] -eq 'put') {
+  } elseif ($args.Count -ge 2 -and $args[0] -eq 'put') {
+    if (-not (($args.Count -eq 4) -and ([string]$args[2] -eq '--ticket'))) { Fail $NoPut }
+    $words = [string[]](TradeTicket ([string]$args[3]))
     $rest = @()
-    if ($args.Count -gt 3) { $rest = [string[]]($args[3..($args.Count - 1)]) }
-    $line = Put ([string]$args[1]) ([string]$args[2]) $rest
+    if ($words.Count -gt 1) { $rest = [string[]]($words[1..($words.Count - 1)]) }
+    $line = Put ([string]$args[1]) $words[0] $rest
   } else {
     Fail $Usage
   }

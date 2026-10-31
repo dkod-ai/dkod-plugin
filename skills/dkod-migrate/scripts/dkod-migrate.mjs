@@ -1,9 +1,11 @@
 // Built by packages/dkoder-plugin/scripts/build-migrate.ts from dkod-app. Do not edit: run `bun run --cwd packages/dkoder-plugin build:migrate`.
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join as join7 } from "node:path";
+import { dirname, join as join8 } from "node:path";
+
+import { createHash } from "node:crypto";
 
 var APP_MAP = {
   kind: "app.map",
@@ -91,537 +93,205 @@ function isSettingName(s) {
   return !s.split("_").some((part) => /[0-9]{8}/.test(part) || part.length >= 16 && /[0-9]/.test(part) && /[A-Za-z]/.test(part));
 }
 
+var PG_SETTINGS = "SET TimeZone='UTC'; SET DateStyle='ISO, YMD'; SET extra_float_digits=1; SET bytea_output='hex'; SET IntervalStyle='postgres';";
+var quoteIdent = (name) => `"${name.replace(/"/g, '""')}"`;
+var quoteLit = (text) => `'${text.replace(/'/g, "''")}'`;
 var join = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
-var SKIP = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".dkod", "__pycache__"];
-var ASSET_KINDS = ["css", "font", "icon", "image"];
-var TEXT_MAX2 = 200;
-var QUERY_MAX = 4000;
-var LOCAL_KEYS = ["tables", "queries", "functions", "design"];
 var isRec = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-var CONTROL_ANY = new RegExp("[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]");
-function safeFile(s) {
-  if (s.length === 0 || s.length > 512 || CONTROL_ANY.test(s) || s.startsWith("/") || s.includes("\\"))
-    return false;
-  return s.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
-}
-function validateMap(json) {
-  const problems = [];
-  const bad = (path, why) => {
-    problems.push(`${path}: ${why}`);
-  };
-  if (!isRec(json))
-    return ["app-map.json: must be a JSON object"];
-  const text = (v, path, opts = {}) => {
-    if (typeof v !== "string")
-      return bad(path, "must be a string");
-    if (v.length > TEXT_MAX2)
-      bad(path, `must be at most ${TEXT_MAX2} characters`);
-    else if (CONTROL_ANY.test(v))
-      bad(path, "must be one line");
-    else if (!opts.empty && v.trim() === "")
-      bad(path, "must not be empty");
-  };
-  const file = (v, path) => {
-    if (v === null)
-      return;
-    if (typeof v !== "string" || !safeFile(v))
-      bad(path, "must be null or a path inside the original, with no '..' and no leading '/'");
-  };
-  const pick = (v, values, path) => {
-    if (typeof v !== "string" || !values.includes(v))
-      bad(path, `must be one of ${values.join(", ")}`);
-  };
-  const bool = (v, path) => {
-    if (typeof v !== "boolean")
-      bad(path, "must be true or false");
-  };
-  const array = (v, path, max, min = 0) => {
-    if (!Array.isArray(v)) {
-      bad(path, "must be a list");
-      return [];
-    }
-    if (v.length > max)
-      bad(path, `must have at most ${max} items`);
-    if (v.length < min)
-      bad(path, `must have at least ${min} item${min === 1 ? "" : "s"}`);
-    return v;
-  };
-  const texts = (v, path, max, min = 0) => {
-    array(v, path, max, min).forEach((t, i) => text(t, `${path}[${i}]`));
-  };
-  const names = (v, path, max) => {
-    array(v, path, max).forEach((n, i) => {
-      if (typeof n !== "string" || !isSettingName(n))
-        bad(`${path}[${i}]`, "must be a setting NAME (letters, digits, _), never a value");
-    });
-  };
-  const items = (key, max, each) => {
-    array(json[key], key, max).forEach((r, i) => {
-      if (!isRec(r))
-        return bad(`${key}[${i}]`, "must be an object");
-      each(r, `${key}[${i}]`);
-    });
-  };
-  const fields = (r, path, allowed) => {
-    for (const k of allowed)
-      if (!(k in r))
-        bad(`${path}.${k}`, "is missing");
-    for (const k of Object.keys(r))
-      if (!allowed.includes(k))
-        bad(`${path}.${k}`, "is not a field of the app map");
-  };
-  const keys = ["summary", "routes", "stores", "services", "settings", "background", "local_only", "flows", "pages"];
-  for (const k of keys)
-    if (!(k in json))
-      bad(k, "is missing");
-  for (const k of Object.keys(json))
-    if (!keys.includes(k) && !LOCAL_KEYS.includes(k))
-      bad(k, "is not a field of the app map");
-  const max = APP_MAP.max;
-  if ("summary" in json)
-    texts(json.summary, "summary", max.summary, 1);
-  if ("routes" in json) {
-    items("routes", max.routes, (r, p) => {
-      fields(r, p, ["kind", "method", "path", "does", "reads", "writes", "file"]);
-      pick(r.kind, APP_MAP.routeKinds, `${p}.kind`);
-      pick(r.method, APP_MAP.methods, `${p}.method`);
-      text(r.path, `${p}.path`);
-      text(r.does, `${p}.does`, { empty: true });
-      texts(r.reads, `${p}.reads`, max.routeRefs);
-      texts(r.writes, `${p}.writes`, max.routeRefs);
-      file(r.file, `${p}.file`);
-    });
-  }
-  if ("stores" in json) {
-    items("stores", max.stores, (r, p) => {
-      fields(r, p, ["engine", "where", "orm", "migrations", "env_names"]);
-      pick(r.engine, APP_MAP.storeEngines, `${p}.engine`);
-      text(r.where, `${p}.where`);
-      for (const k of ["orm", "migrations"])
-        if (r[k] !== null)
-          text(r[k], `${p}.${k}`);
-      names(r.env_names, `${p}.env_names`, max.storeEnv);
-    });
-  }
-  if ("services" in json) {
-    items("services", max.services, (r, p) => {
-      fields(r, p, ["name", "for", "required", "settings"]);
-      text(r.name, `${p}.name`);
-      text(r.for, `${p}.for`, { empty: true });
-      bool(r.required, `${p}.required`);
-      names(r.settings, `${p}.settings`, max.serviceSettings);
-    });
-  }
-  if ("settings" in json) {
-    const seen = new Set;
-    items("settings", max.settings, (r, p) => {
-      fields(r, p, ["name", "used_where", "required", "secret"]);
-      if (typeof r.name !== "string" || !isSettingName(r.name))
-        bad(`${p}.name`, "must be a setting NAME (letters, digits, _), never a value");
-      else if (seen.has(r.name))
-        bad(`${p}.name`, `${r.name} is listed twice`);
-      else
-        seen.add(r.name);
-      text(r.used_where, `${p}.used_where`, { empty: true });
-      bool(r.required, `${p}.required`);
-      bool(r.secret, `${p}.secret`);
-    });
-  }
-  for (const [key, kinds, cap] of [["background", APP_MAP.backgroundKinds, max.background], ["local_only", APP_MAP.localKinds, max.localOnly]]) {
-    if (!(key in json))
-      continue;
-    items(key, cap, (r, p) => {
-      fields(r, p, ["kind", "what", "file"]);
-      pick(r.kind, kinds, `${p}.kind`);
-      text(r.what, `${p}.what`);
-      file(r.file, `${p}.file`);
-    });
-  }
-  if ("flows" in json) {
-    items("flows", max.flows, (r, p) => {
-      fields(r, p, ["name", "steps"]);
-      text(r.name, `${p}.name`);
-      texts(r.steps, `${p}.steps`, max.flowSteps);
-    });
-  }
-  if ("pages" in json) {
-    items("pages", max.pages, (r, p) => {
-      fields(r, p, ["path", "name", "states", "components"]);
-      text(r.path, `${p}.path`);
-      text(r.name, `${p}.name`);
-      const states = array(r.states, `${p}.states`, max.pageStates, 1);
-      states.forEach((s, i) => pick(s, APP_MAP.pageStates, `${p}.states[${i}]`));
-      if (new Set(states).size !== states.length)
-        bad(`${p}.states`, "lists a state twice");
-      array(r.components, `${p}.components`, max.pageComponents).forEach((c, i) => {
-        if (!isRec(c))
-          return bad(`${p}.components[${i}]`, "must be an object");
-        fields(c, `${p}.components[${i}]`, ["kind", "name"]);
-        pick(c.kind, APP_MAP.componentKinds, `${p}.components[${i}].kind`);
-        text(c.name, `${p}.components[${i}].name`);
-      });
-    });
-  }
-  if ("tables" in json) {
-    array(json.tables, "tables", 200).forEach((t, i) => {
-      if (!isRec(t))
-        return bad(`tables[${i}]`, "must be an object");
-      fields(t, `tables[${i}]`, ["store", "name", "columns"]);
-      text(t.store, `tables[${i}].store`);
-      text(t.name, `tables[${i}].name`);
-      texts(t.columns, `tables[${i}].columns`, 500);
-    });
-  }
-  if ("queries" in json) {
-    array(json.queries, "queries", 2000).forEach((q, i) => {
-      if (typeof q !== "string" || q.trim() === "")
-        bad(`queries[${i}]`, "must be the SQL string as written in the code");
-      else if (q.length > QUERY_MAX)
-        bad(`queries[${i}]`, `must be at most ${QUERY_MAX} characters`);
-    });
-  }
-  if ("functions" in json) {
-    array(json.functions, "functions", 5000).forEach((f, i) => {
-      if (typeof f !== "string" || !/^[\w$.:<>-]{1,120}$/.test(f))
-        bad(`functions[${i}]`, "must be a function name");
-    });
-  }
-  if ("design" in json) {
-    const d = json.design;
-    if (!isRec(d))
-      bad("design", "must be an object");
-    else {
-      fields(d, "design", ["colors", "fonts", "buttons", "tooltips"]);
-      array(d.colors, "design.colors", 500).forEach((c, i) => {
-        if (typeof c !== "string" || !/^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/.test(c))
-          bad(`design.colors[${i}]`, "must be a lowercase hex color like #1a2b3c");
-      });
-      texts(d.fonts, "design.fonts", 100);
-      texts(d.buttons, "design.buttons", 1000);
-      texts(d.tooltips, "design.tooltips", 1000);
-    }
-  }
-  if (Buffer.byteLength(JSON.stringify(json)) > APP_MAP.maxMapBytes)
-    bad("app-map.json", `must stay under ${APP_MAP.maxMapBytes} bytes`);
-  return problems;
-}
-function normalizeRoute(path) {
-  let p = path.trim().replace(/[?#].*$/, "");
-  p = p.replace(/\[\[?\.\.\.[^\]]*\]?\]/g, ":param");
-  p = p.replace(/\[[^\]]+\]/g, ":param");
-  p = p.replace(/<[^>/]+>/g, ":param");
-  p = p.replace(/\{[^}/]+\}/g, ":param");
-  p = p.replace(/\/\$[A-Za-z_][\w]*/g, "/:param").replace(/\/:[A-Za-z_][\w]*\??/g, "/:param");
-  p = p.replace(/\/\*[\w]*/g, "/:param");
-  p = `/${p.replace(/^\/+/, "")}`.replace(/\/+/g, "/");
-  return p.length > 1 ? p.replace(/\/$/, "") : p;
-}
-var CODE = /\.(?:[cm]?[jt]sx?|svelte)$/;
-var PY = /\.py$/;
-var IS_TEST = /(?:^|\/)(?:tests?|__tests__|e2e|spec)\/|\.(?:test|spec)\.[a-z]+$|(?:^|\/)test_[^/]*\.py$|_test\.py$/;
-var ROUTER_FILE = /createBrowserRouter|createHashRouter|createMemoryRouter|createRoutesFromElements|useRoutes|<Routes|<Route\b|RouteObject|\broutes\s*[:=]/;
-var RECEIVER = "(?:app|router|routes?|server|fastify|api|[A-Za-z_$][\\w$]*(?:Router|App|Server|Routes))";
-var HTTP = /^\.(?:get|post|put|patch|delete|all)$/;
-function packageDirs(files, needle, io, original) {
-  const out = [];
-  for (const f of files) {
-    if (f !== "package.json" && !f.endsWith("/package.json"))
-      continue;
-    if (needle.test(io.readFile(join(original, f)) ?? ""))
-      out.push(f.slice(0, f.length - "package.json".length));
-  }
-  return out;
-}
-var under = (file, dirs) => dirs.find((d) => file.startsWith(d)) ?? null;
-function fileRoutes(files, io, original) {
-  const out = [];
-  const add = (path, file) => out.push({ path: normalizeRoute(path), file, relative: false });
-  const next = packageDirs(files, /"next"\s*:/, io, original);
-  const remix = packageDirs(files, /"@remix-run\/|"@react-router\/|"react-router"\s*:/, io, original);
-  const dropGroups = (segs) => segs.filter((s) => !/^\(.*\)$/.test(s) && !s.startsWith("@"));
-  for (const f of files) {
-    if (IS_TEST.test(f))
-      continue;
-    let m;
-    if ((m = /^((?:.*\/)?)(?:src\/)?app\/(?:(.*)\/)?(page|route)\.(?:[jt]sx?|mdx)$/.exec(f)) !== null && under(f, next) !== null) {
-      add(dropGroups((m[2] ?? "").split("/").filter(Boolean)).join("/"), f);
-    } else if ((m = /^((?:.*\/)?)(?:src\/)?pages\/(.+)\.(?:[jt]sx?|mdx)$/.exec(f)) !== null && under(f, next) !== null) {
-      const segs = m[2].split("/");
-      if (/^_(?:app|document|error|middleware)$/.test(segs[segs.length - 1]) || segs[0] === "_next")
-        continue;
-      if (segs[segs.length - 1] === "index")
-        segs.pop();
-      add(segs.join("/"), f);
-    } else if ((m = /(?:^|\/)src\/routes\/(?:(.*)\/)?\+(?:page|server)\.(?:svelte|[jt]s)$/.exec(f)) !== null) {
-      add(dropGroups((m[1] ?? "").split("/").filter(Boolean)).join("/"), f);
-    } else if ((m = /(?:^|\/)app\/routes\/(?:([^/]+)\.(?:[jt]sx?|mdx)|([^/]+)\/(?:route|index)\.(?:[jt]sx?|mdx))$/.exec(f)) !== null && under(f, remix) !== null) {
-      const flat = m[1] ?? m[2];
-      if (flat === "root" || flat.startsWith("__"))
-        continue;
-      const segs = flat.split(".").map((s) => s.replace(/_$/, "")).filter((s) => s !== "" && !s.startsWith("_") && s !== "route");
-      add(segs.join("/"), f);
-    }
-  }
-  return out;
-}
-function sourceRoutes(files, io, original) {
-  const out = [];
-  for (const f of files) {
-    if (IS_TEST.test(f) || !CODE.test(f) && !PY.test(f))
-      continue;
-    const text = io.readFile(join(original, f));
-    if (text === null)
-      continue;
-    const add = (path) => {
-      if (path === "" || path === "*" || /^https?:/.test(path) || /\s/.test(path))
-        return;
-      out.push({ path: normalizeRoute(path), file: f, relative: !path.startsWith("/") });
-    };
-    if (PY.test(f)) {
-      for (const m of text.matchAll(/@[A-Za-z_][\w.]*\.(?:get|post|put|patch|delete|route|api_route|websocket)\(\s*(["'])(\/[^"']*)\1/g))
-        add(m[2]);
-      continue;
-    }
-    if (ROUTER_FILE.test(text)) {
-      for (const m of text.matchAll(/<Route\b[^>]*?\bpath=(?:\{\s*)?(["'`])([^"'`]*)\1/g))
-        add(m[2]);
-      for (const m of text.matchAll(/\bpath:\s*(["'`])([^"'`]*)\1/g))
-        add(m[2]);
-    }
-    const call = new RegExp(`\\b${RECEIVER}(\\.(?:get|post|put|patch|delete|all))\\(\\s*(["'\`])(\\/[^"'\`]*)\\2`, "g");
-    for (const m of text.matchAll(call))
-      if (HTTP.test(m[1]))
-        add(m[3]);
-    for (const m of text.matchAll(/\bfastify\.route\(\s*\{[^}]*?\burl:\s*(["'`])(\/[^"'`]*)\1/g))
-      add(m[2]);
-  }
-  return out;
-}
-function discoverRoutes(original, io) {
-  const files = io.walk(original, SKIP);
-  const all = [...fileRoutes(files, io, original), ...sourceRoutes(files, io, original)];
-  const seen = new Set;
-  return all.filter((r) => seen.has(r.path) ? false : (seen.add(r.path), true));
-}
-var bare = (s) => s.replace(/[`"'[\]]/g, "");
-var CONSTRAINT = /^(?:primary|foreign|unique|constraint|check|key|index|fulltext|exclude)$/i;
-function discoverTables(original, io) {
-  const out = new Map;
-  const put = (name, cols) => {
-    const set = out.get(name) ?? new Set;
-    for (const c of cols)
-      set.add(c);
-    out.set(name, set);
-  };
-  for (const f of io.walk(original, SKIP)) {
-    if (IS_TEST.test(f))
-      continue;
-    if (/(?:^|\/)data\/.+\.csv$/i.test(f)) {
-      const header = (io.readFile(join(original, f)) ?? "").split(/\r?\n/, 1)[0] ?? "";
-      put((f.split("/").pop() ?? f).replace(/\.csv$/i, ""), header.split(",").map((c) => bare(c.trim())).filter((c) => c !== ""));
-      continue;
-    }
-    if (!/\.sql$/i.test(f) && !CODE.test(f) && !PY.test(f))
-      continue;
-    const raw = io.readFile(join(original, f));
-    if (raw === null)
-      continue;
-    const text = raw.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
-    for (const m of text.matchAll(/CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([`"[\]\w.]+)\s*\(/gi)) {
-      const name = bare(m[1]).split(".").pop();
-      const cols = [];
-      let depth = 1;
-      let cur = "";
-      const flush = () => {
-        const first = bare(cur.trim().split(/[\s(]+/)[0] ?? "");
-        if (first !== "" && !CONSTRAINT.test(first))
-          cols.push(first);
-        cur = "";
-      };
-      for (let i = m.index + m[0].length;i < text.length; i++) {
-        const ch = text[i];
-        if (ch === "(")
-          depth++;
-        else if (ch === ")" && --depth === 0)
-          break;
-        if (ch === "," && depth === 1)
-          flush();
-        else
-          cur += ch;
-      }
-      flush();
-      put(name, cols);
-    }
-  }
-  return out;
-}
-var ENV_READS = [
-  /\bprocess\.env\.([A-Za-z_]\w*)/g,
-  /\bprocess\.env\[\s*(["'`])([A-Za-z_]\w*)\1\s*\]/g,
-  /\bimport\.meta\.env\.([A-Za-z_]\w*)/g,
-  /\bos\.environ\[\s*(["'])([A-Za-z_]\w*)\1\s*\]/g,
-  /\bos\.environ\.get\(\s*(["'])([A-Za-z_]\w*)\1/g,
-  /\bos\.getenv\(\s*(["'])([A-Za-z_]\w*)\1/g
-];
-var VITE_BUILTIN = new Set(["MODE", "DEV", "PROD", "SSR", "BASE_URL"]);
-function discoverSettings(original, io) {
-  const names = new Set;
-  for (const f of io.walk(original, SKIP)) {
-    if (IS_TEST.test(f) || !CODE.test(f) && !PY.test(f))
-      continue;
-    const text = io.readFile(join(original, f));
-    if (text === null)
-      continue;
-    for (const re of ENV_READS)
-      for (const m of text.matchAll(re))
-        if (!VITE_BUILTIN.has(m[2] ?? m[1]))
-          names.add(m[2] ?? m[1]);
-  }
-  return [...names].sort();
-}
-function discoverColors(original, io) {
-  const colors = new Set;
-  for (const f of io.walk(original, SKIP)) {
-    if (!/\.(?:css|scss|sass|less)$/i.test(f))
-      continue;
-    const text = (io.readFile(join(original, f)) ?? "").replace(/\/\*[\s\S]*?\*\//g, "");
-    for (const d of text.matchAll(/[\w-]+\s*:\s*([^;{}]+)(?=[;}]|$)/g)) {
-      for (const c of d[1].replace(/url\([^)]*\)/gi, " ").matchAll(/#([0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})(?![\w-])/g))
-        colors.add(`#${c[1].toLowerCase()}`);
-    }
-  }
-  return [...colors].sort();
-}
-function pageSlug(path) {
-  const slug = path.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
-  return slug === "" ? "home" : slug;
-}
-var readJson = (text) => {
-  if (text === null)
-    return { ok: false, why: "not found" };
+var json = (text) => {
   try {
-    return { ok: true, value: JSON.parse(text) };
+    return JSON.parse(text ?? "");
   } catch {
-    return { ok: false, why: "not valid JSON" };
+    return null;
   }
 };
-async function checkMap(folder, io) {
-  const dir = folder === "" ? io.cwd : folder;
-  const original = originalOf(io.readFile(join(dir, ".dkod/migration.json")));
-  if (original === null) {
-    io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
-    return 2;
+var hashSql = (t) => {
+  const cols = t.cols.map(quoteIdent).join(", ");
+  const text = "convert_to(r::text,'UTF8')";
+  return `SELECT count(*), md5(coalesce(string_agg(${text}, '\\x0a'::bytea ORDER BY ${text}), ''::bytea)) FROM (SELECT ${cols} FROM public.${quoteIdent(t.name)}) r;`;
+};
+function parseTallies(stdout) {
+  const out = [];
+  for (const l of stdout.split(`
+`)) {
+    const m = /^(\d+)[|\t]([0-9a-f]{32})$/.exec(l.trim());
+    if (m)
+      out.push({ rows: Number(m[1]), md5: m[2] });
   }
-  const mapDir = join(dir, ".dkod/map");
-  const problems = [];
-  const missing = [];
-  const noShot = [];
-  const counts = { routes: 0, pages: 0, stores: 0, tables: 0, services: 0, settings: 0, queries: 0, functions: 0, design: 0, found_routes: 0, screenshots: 0, assets: 0 };
-  const parsed = readJson(io.readFile(join(mapDir, "app-map.json")));
-  const designFiles = new Set(io.walk(join(mapDir, "design"), []));
+  return out;
+}
+function readMapTables(text) {
   let map = null;
-  if (!parsed.ok)
-    problems.push(`app-map.json: ${parsed.why}`);
-  else {
-    problems.push(...validateMap(parsed.value));
-    if (isRec(parsed.value))
-      map = parsed.value;
+  try {
+    map = JSON.parse(text ?? "null");
+  } catch {
+    return [];
   }
-  const list = (key) => map !== null && Array.isArray(map[key]) ? map[key].filter(isRec) : [];
-  const routes = list("routes");
-  const pages = list("pages");
-  for (const key of ["routes", "pages", "stores", "tables", "services", "settings", "queries", "functions"])
-    counts[key] = map !== null && Array.isArray(map[key]) ? map[key].length : 0;
-  const design = map !== null && isRec(map.design) ? map.design : {};
-  const designList = (k) => Array.isArray(design[k]) ? design[k].filter((s) => typeof s === "string") : [];
-  counts.design = ["colors", "fonts", "buttons", "tooltips"].reduce((n, k) => n + designList(k).length, 0);
-  const mapped = [...routes, ...pages].flatMap((r) => typeof r.path === "string" ? [normalizeRoute(r.path)] : []);
-  const found = discoverRoutes(original, io);
-  counts.found_routes = found.length;
-  for (const r of found) {
-    const covered = mapped.includes(r.path) || r.relative && mapped.some((m) => m.endsWith(r.path));
-    if (!covered)
-      missing.push(r.path);
+  const m = map;
+  if (!m || !Array.isArray(m.tables))
+    return [];
+  const nonSql = new Set;
+  for (const s of Array.isArray(m.stores) ? m.stores : []) {
+    if (typeof s.name === "string" && typeof s.engine === "string" && !/postgres|sql/i.test(s.engine))
+      nonSql.add(s.name);
   }
-  if (found.length === 0 && mapped.length > 0)
-    problems.push("original: no route found in its router files, check that `original` in .dkod/migration.json is the app's folder");
-  const missingTables = [];
-  const missingColumns = [];
-  if (map !== null) {
-    const mappedTables = new Map;
-    for (const t of list("tables")) {
-      if (typeof t.name !== "string")
-        continue;
-      const set = mappedTables.get(t.name.toLowerCase()) ?? new Set;
-      for (const c of Array.isArray(t.columns) ? t.columns : [])
-        if (typeof c === "string")
-          set.add(c.toLowerCase());
-      mappedTables.set(t.name.toLowerCase(), set);
-    }
-    for (const [name, cols] of discoverTables(original, io)) {
-      const have = mappedTables.get(name.toLowerCase());
-      if (have === undefined) {
-        missingTables.push(name);
+  const names = [];
+  for (const t of m.tables) {
+    if (typeof t.name !== "string" || typeof t.store === "string" && nonSql.has(t.store))
+      continue;
+    if (!names.includes(t.name))
+      names.push(t.name);
+  }
+  return names;
+}
+var PSQL = ["-X", "-q", "-At", "-F", "\t", "-v", "ON_ERROR_STOP=1"];
+async function readColumns(url, names, env, run, cwd = ".") {
+  const filter = names === null ? "" : ` AND c.table_name IN (${names.map(quoteLit).join(",")})`;
+  const sql = `SELECT c.table_name, c.column_name FROM information_schema.columns c JOIN information_schema.tables t ON t.table_schema=c.table_schema AND t.table_name=c.table_name AND t.table_type='BASE TABLE' WHERE c.table_schema='public' AND c.is_generated='NEVER'${filter} ORDER BY c.table_name, c.ordinal_position`;
+  const res = await run("psql", [...PSQL, "--dbname", url, "-c", sql], env, cwd);
+  if (res.status !== 0)
+    return null;
+  const out = new Map;
+  for (const l of res.stdout.split(`
+`)) {
+    const [t, c] = l.split("\t");
+    if (t && c)
+      out.set(t, [...out.get(t) ?? [], c]);
+  }
+  return out;
+}
+async function tallies(url, tables, env, run, cwd = ".") {
+  if (tables.length === 0)
+    return {};
+  const args = [...PSQL, "--dbname", url, "-c", PG_SETTINGS, ...tables.flatMap((t) => ["-c", hashSql(t)])];
+  const res = await run("psql", args, env, cwd);
+  if (res.status !== 0)
+    return null;
+  const got = parseTallies(res.stdout);
+  if (got.length !== tables.length)
+    return null;
+  const out = {};
+  tables.forEach((t, i) => {
+    out[t.name] = got[i];
+  });
+  return out;
+}
+async function tallyNamed(url, names, env, run, cwd = ".") {
+  const cols = await readColumns(url, names, env, run, cwd);
+  if (cols === null)
+    return null;
+  const refs = names.filter((n) => cols.has(n)).map((name) => ({ name, cols: cols.get(name) }));
+  const got = await tallies(url, refs, env, run, cwd);
+  return got === null ? null : { tallies: got, cols };
+}
+var same = (a, b) => a.rows === b.rows && a.md5 === b.md5;
+function changedTables(before, now) {
+  return Object.keys(before).filter((n) => now[n] === undefined || !same(before[n], now[n]));
+}
+function readFreezeData(text) {
+  const f = json(text);
+  const d = isRec(f) ? f.data : null;
+  if (!isRec(d) || !isRec(d.tables) || !Array.isArray(d.suite_writes))
+    return null;
+  const tablesOut = {};
+  for (const [n, t] of Object.entries(d.tables)) {
+    if (!isRec(t) || typeof t.rows !== "number" || typeof t.md5 !== "string")
+      return null;
+    tablesOut[n] = { rows: t.rows, md5: t.md5 };
+  }
+  return { database: typeof d.database === "string" ? d.database : "", tables: tablesOut, suite_writes: d.suite_writes.filter((s) => typeof s === "string") };
+}
+async function devDrift(dir, io) {
+  const snap = json(io.readFile(join(dir, ".dkod/snapshot.json")));
+  if (!isRec(snap) || snap.mode !== "snapshot" || snap.imported !== true)
+    return [];
+  const imported = isRec(snap.imported_tables) ? snap.imported_tables : null;
+  const devUrl = typeof snap.dev_url === "string" ? snap.dev_url : "";
+  if (imported === null || devUrl === "") {
+    return ["Dev data: snapshot.json has imported:true but not what was imported (imported_tables, dev_url). Run `node dkod-db.mjs import` again."];
+  }
+  const allowed = new Set(readFreezeData(io.readFile(join(dir, ".dkod/parity/freeze.json")))?.suite_writes ?? []);
+  const refs = [];
+  const before = {};
+  for (const [name, t] of Object.entries(imported)) {
+    if (allowed.has(name) || !isRec(t) || typeof t.rows !== "number" || typeof t.md5 !== "string" || !Array.isArray(t.cols))
+      continue;
+    refs.push({ name, cols: t.cols.filter((c) => typeof c === "string") });
+    before[name] = { rows: t.rows, md5: t.md5 };
+  }
+  const unreadable = ["Dev data cannot be read to check it after the import: start `node dkod-db.mjs up --app <app key>` in the background and run this again."];
+  const now = await tallies(devUrl, refs, { PGSSLMODE: "disable" }, io.run, dir);
+  if (now === null)
+    return unreadable;
+  return changedTables(before, now).map((n) => {
+    const t = now[n];
+    return `Dev changed after the import: db:seed or hand-written rows (${n}: ${t === undefined ? "table missing" : `${String(t.rows)} rows`}, imported ${String(before[n].rows)}). Never run db:seed or insert rows after \`dkod-db.mjs import\`; import again into an empty Dev.`;
+  });
+}
+async function migrationRows(dir, io) {
+  const snap = json(io.readFile(join(dir, ".dkod/snapshot.json")));
+  if (!isRec(snap) || snap.mode !== "snapshot" || !Array.isArray(snap.databases))
+    return [];
+  const found = snap.databases.map((d) => isRec(d) ? d.url : null).find((u) => typeof u === "string" && /^postgres(ql)?:\/\//i.test(u));
+  if (found === undefined)
+    return [];
+  let source;
+  try {
+    source = new URL(found);
+  } catch {
+    return [];
+  }
+  const password = decodeURIComponent(source.password);
+  source.password = "";
+  const sourceUrl = source.toString();
+  const fresh = `${decodeURIComponent(source.pathname.replace(/^\//, "")).slice(0, 50)}_dkod_build`;
+  const freshObj = new URL(sourceUrl);
+  freshObj.pathname = `/${fresh}`;
+  const freshUrl = freshObj.toString();
+  const env = { PGSSLMODE: "disable", ...password ? { PGPASSWORD: password } : {} };
+  const connect = ["-h", source.hostname.replace(/^\[|\]$/g, ""), "-p", source.port || "5432", ...source.username ? ["-U", decodeURIComponent(source.username)] : []];
+  const failed = (step) => step === "bun run db:migrate" ? [`The dk- app's migrations could not be run on a fresh database (${step} failed): fix \`bun run db:migrate\` so it creates the schema and its rows on an empty database.`] : [`The snapshot's local Postgres could not be used to check the dk- app's migrations (${step} failed): start the snapshot's Postgres server, then run check-build again.`];
+  await io.run("dropdb", ["--if-exists", ...connect, fresh], env, dir);
+  try {
+    if ((await io.run("createdb", [...connect, fresh], env, dir)).status !== 0)
+      return failed("createdb");
+    const migrateEnv = { ...env, DATABASE_URL: freshUrl, PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" };
+    if ((await io.run("bun", ["run", "db:migrate"], migrateEnv, dir)).status !== 0)
+      return failed("bun run db:migrate");
+    const names = readMapTables(io.readFile(join(dir, ".dkod/map/app-map.json")));
+    if (names.length === 0)
+      return [];
+    const mine = await tallyNamed(freshUrl, names, env, io.run, dir);
+    if (mine === null)
+      return failed("psql");
+    const written = new Set(readFreezeData(io.readFile(join(dir, ".dkod/parity/freeze.json")))?.suite_writes ?? []);
+    const filled = names.filter((n) => !written.has(n) && (mine.tallies[n]?.rows ?? 0) > 0);
+    if (filled.length === 0)
+      return [];
+    const theirCols = await readColumns(sourceUrl, filled, env, io.run, dir);
+    if (theirCols === null)
+      return failed("psql");
+    const refs = [];
+    const absent = [];
+    for (const n of filled) {
+      const a = mine.cols.get(n) ?? [];
+      if (!theirCols.has(n)) {
+        absent.push(n);
         continue;
       }
-      for (const c of cols)
-        if (!have.has(c.toLowerCase()))
-          missingColumns.push(`${name}.${c}`);
+      const shared = (theirCols.get(n) ?? []).filter((c) => a.includes(c));
+      if (shared.length > 0)
+        refs.push({ name: n, cols: shared });
     }
+    const orig = await tallies(sourceUrl, refs, env, io.run, dir);
+    const own = await tallies(freshUrl, refs, env, io.run, dir);
+    if (orig === null || own === null)
+      return failed("psql");
+    const missing = absent.map((n) => `table ${n}: the dk- app's migrations insert ${String(mine.tallies[n].rows)} rows on an empty database, but the original has no such table. Change those migrations to insert no rows there; CI and Prod run them on an empty database. Never delete or edit Dev rows by hand.`);
+    return [...missing, ...refs.filter((t) => !same(orig[t.name], own[t.name])).map((t) => `table ${t.name}: the dk- app's migrations insert ${String(own[t.name].rows)} rows on an empty database, unlike the original's ${String(orig[t.name].rows)} (count or md5 differ). Change those migrations to insert exactly the original's rows (or none); CI and Prod run them on an empty database. Never delete or edit Dev rows by hand.`)];
+  } finally {
+    await io.run("dropdb", ["--if-exists", ...connect, fresh], env, dir);
   }
-  const mappedSettings = new Set(list("settings").flatMap((s) => typeof s.name === "string" ? [s.name] : []));
-  const missingSettings = map === null ? [] : discoverSettings(original, io).filter((n) => !mappedSettings.has(n));
-  const mappedColors = new Set(designList("colors").map((c) => c.toLowerCase()));
-  const missingColors = map === null ? [] : discoverColors(original, io).filter((c) => !mappedColors.has(c));
-  for (const page of pages) {
-    if (typeof page.path !== "string")
-      continue;
-    const slug = pageSlug(page.path);
-    const states = new Set(["default", ...Array.isArray(page.states) ? page.states.filter((s) => typeof s === "string") : []]);
-    for (const state of states) {
-      const base = `pages/${slug}/${state}`;
-      if (designFiles.has(`${base}.png`))
-        counts.screenshots = (counts.screenshots ?? 0) + 1;
-      else if (state === "default")
-        noShot.push(page.path);
-      else
-        problems.push(`design/${base}.png: missing, the page ${page.path} lists the state ${state}`);
-      if (!designFiles.has(`${base}.json`))
-        problems.push(`design/${base}.json: missing, computed styles of ${page.path} (${state})`);
-    }
-  }
-  const assets = readJson(io.readFile(join(mapDir, "assets/assets.json")));
-  if (!assets.ok)
-    problems.push(`assets/assets.json: ${assets.why}`);
-  else if (!Array.isArray(assets.value))
-    problems.push("assets/assets.json: must be a list of {kind, path}");
-  else {
-    const originalFiles = new Set(io.walk(original, SKIP));
-    counts.assets = assets.value.length;
-    assets.value.forEach((a, i) => {
-      if (!isRec(a))
-        return problems.push(`assets[${i}]: must be an object {kind, path}`);
-      if (typeof a.kind !== "string" || !ASSET_KINDS.includes(a.kind))
-        problems.push(`assets[${i}].kind: must be one of ${ASSET_KINDS.join(", ")}`);
-      if (typeof a.path !== "string" || !safeFile(a.path))
-        problems.push(`assets[${i}].path: must be a path inside the original, with no '..'`);
-      else if (!originalFiles.has(a.path))
-        problems.push(`assets[${i}].path: ${a.path} is not a file in the original`);
-    });
-  }
-  const report = {
-    ok: problems.length === 0 && missing.length === 0 && noShot.length === 0 && missingTables.length === 0 && missingColumns.length === 0 && missingSettings.length === 0 && missingColors.length === 0,
-    counts,
-    missing_routes: missing,
-    missing_tables: missingTables,
-    missing_columns: missingColumns,
-    missing_settings: missingSettings,
-    missing_colors: missingColors,
-    pages_without_screenshot: noShot,
-    problems
-  };
-  io.print(JSON.stringify(report));
-  return report.ok ? 0 : 1;
 }
 
 var MAX_PATTERN_LENGTH = 200;
@@ -771,6 +441,7 @@ function matchGlob(glob, path) {
 function matchAny(globs, path) {
   return globs.some((g) => matchGlob(g, path));
 }
+var ALWAYS_SKIPPED = ["**/node_modules/**", "node_modules/**", ".git/**", "**/.git/**", "**/vendor/**", "vendor/**"];
 
 function yamlDocs(text) {
   const lines = text.split(/\r?\n/);
@@ -1836,10 +1507,10 @@ function renderTemplateFiles(source, ctx) {
 var join2 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var NOT_WRITTEN = new Set(["values.yaml", "README.md"]);
 var ROOTS = ["app", "answers", "policy", "dkod"];
-var SOURCE_KEYS = ["package_manager", "install_command", "lockfile", "run_command", "build_command", "start_command", "lockfile_command", "bun", "fullstack", "app_start", "static_dir", "app_port"];
+var SOURCE_KEYS = ["package_manager", "install_command", "lockfile", "run_command", "build_command", "start_command", "lockfile_command", "fullstack", "app_start", "static_dir", "app_port"];
 var UNWRITTEN_KEYS = ["org", "image_repository", "app_commit_sha", "governance_repo", "governance_sha"];
 var isRec2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-var json = (text) => {
+var json2 = (text) => {
   try {
     return JSON.parse(text ?? "");
   } catch {
@@ -1887,7 +1558,7 @@ function contextFor(source, name, tables, values) {
   if (ctx.app.template === undefined)
     ctx.app.template = "";
   for (const key of SOURCE_KEYS)
-    dkod[key] = key === "bun" || key === "fullstack" ? false : "";
+    dkod[key] = key === "fullstack" ? false : "";
   return ctx;
 }
 async function render2(args, io) {
@@ -1905,11 +1576,11 @@ async function render2(args, io) {
     return fail([`${templateFile}: not found. Save the template's content from dkoder.templates to this file first.`]);
   let values = {};
   if (valuesFile !== undefined) {
-    values = json(io.readFile(valuesFile));
+    values = json2(io.readFile(valuesFile));
     if (!isRec2(values))
       return fail([`${valuesFile}: not found or not a JSON object.`]);
   }
-  const map = json(io.readFile(join2(dir, ".dkod/map/app-map.json")));
+  const map = json2(io.readFile(join2(dir, ".dkod/map/app-map.json")));
   const tables = isRec2(map) && Array.isArray(map.tables) && map.tables.length > 0;
   const name = baseName(dir === "." ? io.cwd : dir);
   const rendered = renderTemplateFiles(source, contextFor(source, name, tables, values));
@@ -1939,15 +1610,295 @@ async function render2(args, io) {
   return 0;
 }
 
+var MAX_FINDINGS = 200;
+var MAX_FILE_BYTES = 512 * 1024;
+function finish(findings, checked) {
+  const capped = findings.slice(0, MAX_FINDINGS);
+  return { findings: capped, blocked: capped.some((f) => f.level === "block"), checked };
+}
+function toFinding(rule, check, level, message, title, hit) {
+  return { rule, check, level, path: hit.path, line: hit.line, message: message ? `${message} (${hit.detail})` : `${title}: ${hit.detail}` };
+}
+function tails(path) {
+  const parts = path.replace(/[\\/]+$/, "").split(/[\\/]+/).filter((p) => p !== "");
+  return parts.map((_, i) => parts.slice(i).join("/"));
+}
+function exemptFolder(exclude, opts) {
+  const names = [opts.folder, ...opts.folderPath === undefined ? [] : tails(opts.folderPath)].filter((n) => n !== undefined && n !== "");
+  return names.some((name) => matchAny(exclude, name) || matchAny(exclude, `${name}/`));
+}
+function scopeOf(check, opts) {
+  const def = CATALOG[check.use];
+  const paths = stringList(check.with, "paths") ?? def.paths;
+  const prefix = typeof check.with.folder_prefix === "string" ? check.with.folder_prefix : "";
+  const exclude = [...ALWAYS_SKIPPED, ...def.exclude, ...stringList(check.with, "exclude") ?? []];
+  const folder = opts.folder;
+  const defaults = def.pathsFor?.(check.with) ?? def.paths;
+  const narrowed = check.with.paths !== undefined && JSON.stringify(check.with.paths) !== JSON.stringify(defaults);
+  const own = def.folderPaths !== undefined && prefix !== "" && folder !== undefined && folder.startsWith(prefix) && !narrowed && !exemptFolder(exclude, opts) ? def.folderPaths : null;
+  return { paths: own === null ? paths : [...paths, ...own], exclude, ...def.textPaths === undefined ? {} : { text: def.textPaths } };
+}
+var cleanPath = (p) => p.replace(/^\.?\/+/, "");
+function evaluate(pack, files, opts) {
+  const usable = files.map((f) => ({ path: cleanPath(f.path), text: f.text.length <= MAX_FILE_BYTES ? f.text : "", big: f.text.length > MAX_FILE_BYTES }));
+  const findings = [];
+  let checked = 0;
+  for (const rule of pack.rules) {
+    for (const check of rule.checks) {
+      const level = check.level ?? rule.level;
+      if (level === "off")
+        continue;
+      const def = CATALOG[check.use];
+      if (def.scope === "commit")
+        continue;
+      if (def.scope === "tree" && opts.stage !== "build")
+        continue;
+      if (def.needsSecretScan && !opts.secretScan)
+        continue;
+      const { paths, exclude } = scopeOf(check, opts);
+      const scoped = usable.filter((f) => (def.byName === true || !f.big) && matchAny(paths, f.path) && !matchAny(exclude, f.path));
+      checked += 1;
+      const hits = [];
+      if (def.scope === "tree" && def.runTree)
+        hits.push(...def.runTree(scoped, check.with));
+      if (def.scope === "file" && def.runFile) {
+        const runOpts = opts.secretScan ? { secretScan: opts.secretScan } : {};
+        for (const f of scoped)
+          hits.push(...def.runFile(f, check.with, runOpts));
+      }
+      for (const h of hits)
+        findings.push(toFinding(rule.name, check.use, level, check.message, def.title, h));
+      if (findings.length >= MAX_FINDINGS)
+        return finish(findings, checked);
+    }
+  }
+  return finish(findings, checked);
+}
+function pathsToRead(pack, paths, opts) {
+  const scopes = pack.rules.flatMap((rule) => rule.checks.filter((c) => (c.level ?? rule.level) !== "off" && CATALOG[c.use].scope === "file" && (!CATALOG[c.use].needsSecretScan || opts.secretScan !== undefined)).map((c) => scopeOf(c, opts)));
+  return new Set(paths.filter((p) => scopes.some((s) => matchAny(s.paths, cleanPath(p)) && !matchAny(s.exclude, cleanPath(p)) && (s.text === undefined || matchAny(s.text, cleanPath(p))))));
+}
+function formatFindings(findings, max = 20) {
+  const shown = findings.slice(0, max).map((f) => {
+    const where = f.path === null ? "" : f.line === null ? `${f.path}: ` : `${f.path}:${f.line}: `;
+    return `- [${f.level}] ${f.rule}: ${where}${f.message}`;
+  });
+  if (findings.length > max)
+    shown.push(`- and ${findings.length - max} more`);
+  return shown.join(`
+`);
+}
+
+var ACCEPT = [
+  "application/vnd.oci.image.index.v1+json",
+  "application/vnd.docker.distribution.manifest.list.v2+json",
+  "application/vnd.oci.image.manifest.v1+json",
+  "application/vnd.docker.distribution.manifest.v2+json"
+].join(", ");
+var REGISTRY = "https://registry-1.docker.io/v2";
+var TIMEOUT_MS = 5000;
+var isRec3 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+function fromDigests(text) {
+  const out = [];
+  const stages = new Set;
+  text.split(`
+`).forEach((raw, i) => {
+    const m = /^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?/i.exec(raw);
+    if (m === null)
+      return;
+    const image = m[1] ?? "";
+    if (m[2] !== undefined)
+      stages.add(m[2].toLowerCase());
+    if (image.toLowerCase() === "scratch" || stages.has(image.toLowerCase()) && !image.includes("@"))
+      return;
+    const d = /^(.+?)(?::[^/@:]+)?@(sha256:[0-9a-f]{64})$/i.exec(image);
+    if (d === null)
+      return;
+    let repo = d[1] ?? "";
+    if (/^[^/]*(?:\.|:)|^localhost\//.test(repo))
+      return;
+    if (!repo.includes("/"))
+      repo = `library/${repo}`;
+    out.push({ line: i + 1, image, repo, digest: d[2] ?? "" });
+  });
+  return out;
+}
+async function getJson(fetchFn, url, headers, timeoutMs) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${url}: no answer in ${String(timeoutMs)} ms`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([fetchJson(fetchFn, url, headers, timeoutMs), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function fetchJson(fetchFn, url, headers, timeoutMs) {
+  const res = await fetchFn(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+  if (res.status !== 200)
+    throw new Error(`${url}: HTTP ${String(res.status)}`);
+  const body = await res.json();
+  if (!isRec3(body))
+    throw new Error(`${url}: not a JSON object`);
+  return body;
+}
+async function hasAmd64(fetchFn, repo, digest, t) {
+  const tokenRes = await getJson(fetchFn, `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull`, {}, t);
+  const token = typeof tokenRes.token === "string" ? tokenRes.token : typeof tokenRes.access_token === "string" ? tokenRes.access_token : "";
+  const headers = { Accept: ACCEPT, ...token === "" ? {} : { Authorization: `Bearer ${token}` } };
+  const manifest = await getJson(fetchFn, `${REGISTRY}/${repo}/manifests/${digest}`, headers, t);
+  if (Array.isArray(manifest.manifests)) {
+    return manifest.manifests.some((m) => isRec3(m) && isRec3(m.platform) && m.platform.os === "linux" && m.platform.architecture === "amd64");
+  }
+  if (isRec3(manifest.config) && typeof manifest.config.digest === "string") {
+    const config = await getJson(fetchFn, `${REGISTRY}/${repo}/blobs/${manifest.config.digest}`, headers, t);
+    return config.os === "linux" && config.architecture === "amd64";
+  }
+  throw new Error(`${repo}@${digest}: not an index or an image manifest`);
+}
+async function checkFromArch(dockerfileText, fetchFn, path = "Dockerfile", timeoutMs = TIMEOUT_MS) {
+  const result = { problems: [], warnings: [] };
+  const cache = new Map;
+  for (const f of fromDigests(dockerfileText)) {
+    const key = `${f.repo}@${f.digest}`;
+    let p = cache.get(key);
+    if (p === undefined) {
+      p = hasAmd64(fetchFn, f.repo, f.digest, timeoutMs);
+      cache.set(key, p);
+    }
+    try {
+      if (!await p)
+        result.problems.push(`${path}:${String(f.line)}: pinned-base-images: FROM ${f.image} digest has no linux/amd64; pin the multi-arch index digest`);
+    } catch (e) {
+      result.warnings.push(`${path}:${String(f.line)}: FROM ${f.image}: architecture not checked (${e instanceof Error ? e.message : String(e)})`);
+    }
+  }
+  return result;
+}
+
+var POLICY_CHECK_TOOL = "policy_check";
+var POLICY_CHECK_TOOL_FULL = `mcp__dkod__${POLICY_CHECK_TOOL}`;
+var MAX_FOLDER_FILES = 5000;
+var MAX_READ_BYTES = 64 * 1024 * 1024;
+var MAX_SHOWN = 50;
+var DOCKERFILE = /(^|\/)Dockerfile(\.[^/]+)?$/;
+var DEV_DOCKERFILE = /(^|\/)Dockerfile\.dev$/;
+function archFinding(text, level) {
+  const m = /^(.+?):(\d+): (?:pinned-base-images: )?(.*)$/.exec(text);
+  return {
+    rule: "pinned-base-images",
+    check: "dockerfile.from_digest",
+    level,
+    path: m?.[1] ?? null,
+    line: m?.[2] === undefined ? null : Number(m[2]),
+    message: m?.[3] ?? text
+  };
+}
+var refuse = (error, message) => ({ ok: false, error, message });
+async function checkFolder(pack, dir, io) {
+  if (!pack || pack.rules.length === 0) {
+    return { ok: true, folder: dir, files: 0, skipped: 0, checked: 0, blocked: false, findings: [], summary: "", next: "Your organization's rules have no checks yet. Nothing to fix." };
+  }
+  const listed = await io.list(dir).catch(() => null);
+  if (listed === null)
+    return refuse("cannot_list", "Dkoder could not list the files of that folder. Check the path, then try again.");
+  if (listed.length > MAX_FOLDER_FILES)
+    return refuse("too_many_files", `That folder has more than ${String(MAX_FOLDER_FILES)} files. Run the check on the app's own folder.`);
+  const base = dir.replace(/[\\/]+$/, "").replace(/[\\/]\.$/, "");
+  const folder = base.split(/[\\/]/).pop() ?? "";
+  const wanted = pathsToRead(pack, listed, { stage: "build", folder, folderPath: base });
+  let total = 0;
+  let skipped = 0;
+  const files = [];
+  for (const path of listed) {
+    if (!wanted.has(path)) {
+      files.push({ path, text: "" });
+      continue;
+    }
+    let text = null;
+    try {
+      text = total > MAX_READ_BYTES ? null : await io.read(`${base}/${path}`);
+    } catch {
+      text = null;
+    }
+    if (text === null || text.includes("\x00") || text.length > MAX_FILE_BYTES) {
+      skipped += 1;
+      files.push({ path, text: "" });
+      continue;
+    }
+    total += text.length;
+    files.push({ path, text });
+  }
+  const result = evaluate(pack, files, { stage: "build", folder, folderPath: base });
+  const fetchFn = io.fetch ?? globalThis.fetch;
+  for (const f of files) {
+    if (!DOCKERFILE.test(f.path) || DEV_DOCKERFILE.test(f.path) || f.text === "")
+      continue;
+    const arch = await checkFromArch(f.text, fetchFn, f.path);
+    for (const p of arch.problems)
+      result.findings.push(archFinding(p, "block"));
+    for (const w of arch.warnings)
+      result.findings.push(archFinding(w, "warn"));
+    if (arch.problems.length > 0)
+      result.blocked = true;
+  }
+  const blocks = result.findings.filter((f) => f.level === "block").length;
+  const next = blocks > 0 ? `Fix the ${String(blocks)} block finding${blocks === 1 ? "" : "s"}, then run this check again before you deploy.` : result.findings.length > 0 ? "No block finding. Tell the person about each warn finding." : "Every check passed.";
+  return {
+    ok: true,
+    folder: dir,
+    files: listed.length,
+    skipped,
+    checked: result.checked,
+    blocked: result.blocked,
+    findings: result.findings.slice(0, MAX_SHOWN),
+    summary: formatFindings(result.findings, MAX_SHOWN),
+    next: skipped > 0 ? `${next} ${String(skipped)} file${skipped === 1 ? " was" : "s were"} not read (binary, over 512 KB, or past the read limit).` : next
+  };
+}
+
 var join3 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var TEST_FILE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
 var TITLE = /\b(?:test|it)(?:\.(?:only|fixme|slow))?\(\s*(["'`])((?:\\.|(?!\1)[^\\])*)\1/g;
-var isRec3 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-var list2 = (v) => Array.isArray(v) ? v.filter(isRec3) : [];
-var same = (a, b) => a.trim().replace(/\s+/g, " ").toLowerCase() === b.trim().replace(/\s+/g, " ").toLowerCase();
+var isRec4 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var list2 = (v) => Array.isArray(v) ? v.filter(isRec4) : [];
+var same2 = (a, b) => a.trim().replace(/\s+/g, " ").toLowerCase() === b.trim().replace(/\s+/g, " ").toLowerCase();
 var freezePath = (dir) => join3(dir, ".dkod/parity/freeze.json");
 function testTitles(text) {
   return [...text.matchAll(TITLE)].map((m) => m[2]);
+}
+var REPORT_REFUSAL = "not a raw Playwright JSON report; a hand-written summary is refused. Save the real one with `bunx playwright test --reporter=json > report.json` (PLAYWRIGHT_JSON_OUTPUT_NAME=report.json also works).";
+function isReporterShape(json) {
+  if (!isRec4(json) || !isRec4(json.config) || !isRec4(json.stats) || !Array.isArray(json.suites) || json.suites.length === 0)
+    return false;
+  for (const k of ["expected", "unexpected", "skipped", "flaky"])
+    if (typeof json.stats[k] !== "number")
+      return false;
+  const suiteOk = (suite) => {
+    if (!isRec4(suite))
+      return false;
+    if (suite.specs !== undefined) {
+      if (!Array.isArray(suite.specs))
+        return false;
+      for (const spec of suite.specs) {
+        if (!isRec4(spec) || !Array.isArray(spec.tests))
+          return false;
+        for (const t of spec.tests)
+          if (!isRec4(t) || !Array.isArray(t.results))
+            return false;
+      }
+    }
+    if (suite.suites !== undefined) {
+      if (!Array.isArray(suite.suites))
+        return false;
+      for (const sub of suite.suites)
+        if (!suiteOk(sub))
+          return false;
+    }
+    return true;
+  };
+  return json.suites.every(suiteOk);
 }
 function reportTests(text) {
   let json;
@@ -1956,7 +1907,7 @@ function reportTests(text) {
   } catch {
     return null;
   }
-  if (!isRec3(json) || !Array.isArray(json.suites))
+  if (!isReporterShape(json))
     return null;
   const out = [];
   const visit = (suite) => {
@@ -2021,11 +1972,15 @@ async function freeze(folder, reportFile, io) {
   let map;
   try {
     const parsed = JSON.parse(io.readFile(join3(dir, ".dkod/map/app-map.json")) ?? "");
-    if (!isRec3(parsed))
+    if (!isRec4(parsed))
       throw new Error("not an object");
     map = parsed;
   } catch {
     return fail(io, { problems: [".dkod/map/app-map.json: missing or not valid JSON. Do the map step, and run check-map, first."] });
+  }
+  const overlays = devOverlayStates(join3(dir, ".dkod/map"), io);
+  if (overlays.length > 0) {
+    return fail(io, { problems: overlays.map((s) => `.dkod/map/design/pages/${s}.json: the capture shows a framework dev overlay. Capture the original's production build and start (Next.js: next build, then next start), never a dev server, then run freeze again.`), dev_overlay_pages: overlays });
   }
   const specs = io.walk(join3(dir, "tests/parity"), []).filter((f) => TEST_FILE.test(f));
   if (specs.length === 0)
@@ -2035,7 +1990,7 @@ async function freeze(folder, reportFile, io) {
     return fail(io, { problems: [`${reportFile}: not found. Run the suite on the original with --reporter=json and write the output there.`] });
   const run = reportTests(reportText);
   if (run === null || run.length === 0)
-    return fail(io, { problems: [`${reportFile}: not a Playwright JSON report with tests (use --reporter=json).`] });
+    return fail(io, { problems: [`${reportFile}: ${REPORT_REFUSAL}`] });
   const failures = run.filter((t) => !t.ok).map((t) => `${t.title} (${t.status})`);
   const passed = new Set(run.filter((t) => t.ok).map((t) => t.title));
   const have = new Map;
@@ -2088,7 +2043,7 @@ async function freeze(folder, reportFile, io) {
         design.push(`${path} ${state}`);
     }
   }
-  const flows = list2(map.flows).flatMap((f) => typeof f.name === "string" && !got("flow").some((k) => same(k, f.name)) ? [f.name] : []);
+  const flows = list2(map.flows).flatMap((f) => typeof f.name === "string" && !got("flow").some((k) => same2(k, f.name)) ? [f.name] : []);
   const data = list2(map.stores).length > 0 && got("data").length === 0 ? ["@data"] : [];
   const missing = { routes, pages, flows, data, design };
   const gaps = routes.length + pages.length + flows.length + data.length + design.length;
@@ -2096,9 +2051,33 @@ async function freeze(folder, reportFile, io) {
   if (gaps > 0 || original_failures.length > 0) {
     return fail(io, { missing, original_failures, counts: { tests: run.length, original_passed: passed.size, original_failed: original_failures.length } });
   }
+  let frozenData = null;
+  let snap = null;
+  try {
+    snap = JSON.parse(io.readFile(join3(dir, ".dkod/snapshot.json")) ?? "null");
+  } catch {}
+  const dbs = isRec4(snap) && snap.mode === "snapshot" ? list2(snap.databases) : [];
+  const pg = dbs.find((d) => typeof d.url === "string" && /^postgres(ql)?:\/\//i.test(d.url));
+  if (pg !== undefined) {
+    const again = "Run `dkod-migrate.mjs snapshot` again, rerun the suite on the original and freeze again.";
+    if (!isRec4(pg.tables))
+      return fail(io, { problems: [`.dkod/snapshot.json: the Postgres scratch database has no table tallies. ${again}`] });
+    const before = {};
+    for (const [n, t] of Object.entries(pg.tables))
+      if (isRec4(t) && typeof t.rows === "number" && typeof t.md5 === "string")
+        before[n] = { rows: t.rows, md5: t.md5 };
+    const mapped = readMapTables(io.readFile(join3(dir, ".dkod/map/app-map.json"))).filter((n) => before[n] !== undefined);
+    const now = await tallyNamed(pg.url, mapped, {}, io.run, dir);
+    if (now === null)
+      return fail(io, { problems: [`The scratch database cannot be read to record its data. ${again}`] });
+    const frozenTables = {};
+    for (const n of mapped)
+      frozenTables[n] = before[n];
+    frozenData = { database: typeof pg.name === "string" ? pg.name : "", tables: frozenTables, suite_writes: changedTables(frozenTables, now.tallies) };
+  }
   const files = suiteFiles(dir, io);
   const sha256 = io.sha256(files.map((f) => join3(dir, f)));
-  const record = { sha256, files, baseline: { tests: run.map((t) => t.title), passed: passed.size }, frozenAt: new Date().toISOString() };
+  const record = { sha256, files, baseline: { tests: run.map((t) => t.title), passed: passed.size }, frozenAt: new Date().toISOString(), platform: process.platform, data: frozenData };
   io.writeFile(freezePath(dir), `${JSON.stringify(record, null, 2)}
 `);
   io.print(JSON.stringify({ ok: true, sha256, counts: { tests: run.length, tagged, original_passed: passed.size, original_failed: 0 }, missing, original_failures: [] }));
@@ -2121,12 +2100,41 @@ async function unfreeze(folder, io) {
   return 0;
 }
 
+var STARTER_PACK = {
+  version: 1,
+  rules: [
+    {
+      name: "pinned-base-images",
+      path: "rules/pinned-base-images.md",
+      level: "block",
+      stale: false,
+      checks: [{ use: "dockerfile.from_digest", with: { exclude: ["Dockerfile.dev"] }, message: "Pin the base image by digest: FROM image:tag@sha256:<digest>", level: null }]
+    }
+  ]
+};
 var join4 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
-var SKIP2 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".dkod"];
+var SKIP = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".dkod"];
 var SOURCE2 = /\.[cm]?[jt]sx?$/;
 var DATA = /\.(?:sqlite|sqlite3|db|db3)$/i;
-var isRec4 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-var json2 = (text) => {
+var IMAGE = /\.(?:png|jpe?g|webp|gif)$/i;
+var HTML = /\.html?$/i;
+var CODE = /\.(?:js|mjs|cjs|ts|tsx|jsx|vue|svelte|py|css)$/i;
+var DESTRUCTIVE_SEED = [
+  /\bdelete\s+from\b/i,
+  /\btruncate\b(?!\s*\()/i,
+  /\.truncate\s*\(/i,
+  /\bdrop\s+(?:table|schema)\b/i,
+  /\.delete\s*\(/i,
+  /\.deleteMany\s*\(/i,
+  /\bdeleteFrom\s*\(/i,
+  /\.destroy\s*\(\s*\{/i,
+  /\.del\s*\(/i
+];
+var stripComments = (text) => text.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/.*$/gm, "$1").replace(/(^|\s)--.*$/gm, "$1");
+var SEED_FILE = /\.(?:[cm]?[jt]s|sql|py)$/i;
+var NEXT_MARKERS = ["__NEXT_DATA__", "/_next/static/", "next-route-announcer"];
+var isRec5 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var json3 = (text) => {
   try {
     return JSON.parse(text ?? "");
   } catch {
@@ -2144,6 +2152,15 @@ function ignoresEnvLocal(text) {
     return pattern === ".env.local" || pattern === ".env*" || pattern === ".env.*" || pattern === "*.local" || pattern === ".env*.local";
   });
 }
+function ignoresDir(text, dir) {
+  return text.split(`
+`).some((raw) => {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#") || line.startsWith("!"))
+      return false;
+    return [dir, `${dir}/`, `/${dir}`, `/${dir}/`, `**/${dir}`, `**/${dir}/`].includes(line);
+  });
+}
 async function checkBuild(folder, reportFile, io) {
   const dir = folder === "" ? io.cwd : folder;
   const original = originalOf(io.readFile(join4(dir, ".dkod/migration.json")));
@@ -2156,8 +2173,8 @@ async function checkBuild(folder, reportFile, io) {
   let tests = 0;
   let newPassed = 0;
   let visual = 0;
-  const frozen = json2(io.readFile(freezePath(dir)));
-  if (!isRec4(frozen) || typeof frozen.sha256 !== "string" || !isRec4(frozen.baseline) || !Array.isArray(frozen.baseline.tests)) {
+  const frozen = json3(io.readFile(freezePath(dir)));
+  if (!isRec5(frozen) || typeof frozen.sha256 !== "string" || !isRec5(frozen.baseline) || !Array.isArray(frozen.baseline.tests)) {
     problems.push(".dkod/parity/freeze.json: missing. Freeze the suite (step 3) before the build is checked.");
   } else {
     const record = frozen;
@@ -2170,7 +2187,7 @@ async function checkBuild(folder, reportFile, io) {
     if (reportFile === undefined)
       problems.push("check-build needs the Playwright JSON report of the frozen suite run on the dk- app: check-build <folder> <report.json>");
     else if (run === null)
-      problems.push(`${reportFile}: not found or not a Playwright JSON report (use --reporter=json).`);
+      problems.push(`${reportFile}: not found, or ${REPORT_REFUSAL}`);
     else {
       const byTitle = new Map(run.map((t) => [t.title, t]));
       for (const title of record.baseline.tests) {
@@ -2187,9 +2204,9 @@ async function checkBuild(folder, reportFile, io) {
       }
     }
   }
-  const sources = io.walk(dir, SKIP2);
-  const map = json2(io.readFile(join4(dir, ".dkod/map/app-map.json")));
-  const tables = isRec4(map) && Array.isArray(map.tables) ? map.tables.filter(isRec4).flatMap((t) => typeof t.name === "string" ? [t.name] : []) : [];
+  const sources = io.walk(dir, SKIP);
+  const map = json3(io.readFile(join4(dir, ".dkod/map/app-map.json")));
+  const tables = isRec5(map) && Array.isArray(map.tables) ? map.tables.filter(isRec5).flatMap((t) => typeof t.name === "string" ? [t.name] : []) : [];
   if (tables.length > 0) {
     const text = sources.filter((f) => SOURCE2.test(f) && !/^(?:tests|migrations)\//.test(f)).map((f) => io.readFile(join4(dir, f)) ?? "").join(`
 `);
@@ -2201,12 +2218,33 @@ async function checkBuild(folder, reportFile, io) {
   }
   if (!sources.some((f) => /^migrations\/0001_baseline[^/]*$/.test(f)))
     problems.push("migrations/: no 0001_baseline migration. Generate it from the schema.");
+  if (tables.length > 0) {
+    const pkg = json3(io.readFile(join4(dir, "package.json")));
+    const scripts = isRec5(pkg) && isRec5(pkg.scripts) ? pkg.scripts : {};
+    const seedCmd = scripts["db:seed"];
+    if (typeof seedCmd !== "string")
+      problems.push("package.json: no db:seed script. CI runs the suite on an empty database: write db:seed to insert the rows the suite reads (the original's rows it ran green on), run it on the Dev data, and never insert rows by hand.");
+    else {
+      const named = seedCmd.split(/\s+/).map((t) => t.replace(/^\.\//, "")).filter((t) => SEED_FILE.test(t) && sources.includes(t));
+      const seeds = new Set([
+        ...named,
+        ...sources.filter((f) => SEED_FILE.test(f) && !f.startsWith("tests/") && !f.startsWith(".dkod/") && (/^seed/i.test(base(f)) || /(^|\/)seeders?\/|(^|\/)seeds\//.test(f)))
+      ]);
+      for (const f of seeds) {
+        const text = io.readFile(join4(dir, f)) ?? "";
+        const code = stripComments(/\.py$/i.test(f) ? text.replace(/(^|\s)#.*$/gm, "$1") : text);
+        const hit = DESTRUCTIVE_SEED.map((re) => re.exec(code)).find((m) => m !== null);
+        if (hit)
+          problems.push(`${f}: db:seed deletes, truncates or drops rows (${hit[0].trim()}). Dev is shared by every builder in the org and CI runs db:seed too: insert the original's rows idempotently (insert ... on conflict do nothing, or skip a table that already has rows) and never delete, truncate or update rows.`);
+      }
+    }
+  }
   for (const f of sources)
     if (DATA.test(f))
       problems.push(`${f}: a file database in the dk- folder. The data lives in the Dev data service.`);
-  const assets = json2(io.readFile(join4(dir, ".dkod/map/assets/assets.json")));
+  const assets = json3(io.readFile(join4(dir, ".dkod/map/assets/assets.json")));
   if (Array.isArray(assets)) {
-    for (const a of assets.filter(isRec4)) {
+    for (const a of assets.filter(isRec5)) {
       if (typeof a.path !== "string")
         continue;
       const source = join4(original, a.path);
@@ -2218,6 +2256,21 @@ async function checkBuild(folder, reportFile, io) {
       const same = sources.some((f) => base(f) === base(a.path) && io.sha256([join4(dir, f)]) === want);
       if (!same)
         problems.push(`asset ${a.path}: no byte-identical copy in the dk- folder. Copy the file as it is; never redraw it.`);
+    }
+  }
+  const declared = new Set(Array.isArray(assets) ? assets.filter(isRec5).flatMap((a) => typeof a.path === "string" ? [a.path] : []) : []);
+  const originalCode = new Map;
+  const blank = (path) => (io.readFile(path) ?? "").trim() === "";
+  for (const rel of io.walk(original, SKIP))
+    if (CODE.test(rel) && !declared.has(rel) && !blank(join4(original, rel)))
+      originalCode.set(io.sha256([join4(original, rel)]), rel);
+  if (originalCode.size > 0) {
+    for (const f of sources) {
+      if (!CODE.test(f) || f.startsWith("tests/parity/") || f.startsWith(".dkod/") || blank(join4(dir, f)))
+        continue;
+      const orig = originalCode.get(io.sha256([join4(dir, f)]));
+      if (orig !== undefined)
+        problems.push(`${f}: byte-identical to ${orig}, a code file of the original. The map and the frozen suite are the spec, not the original's code; rebuild it on the stack.`);
     }
   }
   for (const f of sources) {
@@ -2232,17 +2285,67 @@ async function checkBuild(folder, reportFile, io) {
   if (appName.startsWith("dk-") && sources.includes("package.json") && !sources.includes("bun.lock")) {
     problems.push("bun.lock: missing. Run `bun install` in the dk- folder and keep bun.lock; without it the deploy installs without a lock file.");
   }
+  const designDir = join4(dir, ".dkod/map/design/pages");
+  const designs = new Map;
+  for (const rel of io.walk(designDir, []))
+    if (IMAGE.test(rel))
+      designs.set(io.sha256([join4(designDir, rel)]), rel);
+  if (designs.size > 0) {
+    for (const f of sources) {
+      if (f.startsWith("tests/parity/") || !IMAGE.test(f))
+        continue;
+      const name = designs.get(io.sha256([join4(dir, f)]));
+      if (name !== undefined)
+        problems.push(`${f}: byte-identical to the design screenshot ${name} of the map. Rebuild the page; never serve the design image.`);
+    }
+  }
+  for (const f of sources) {
+    if (/(^|\/)_next(\/|$)/.test(f) || /(^|\/)webpack-[^/]*\.js$/.test(f) || /(^|\/)chunks\//.test(f) || base(f).includes("buildManifest")) {
+      problems.push(`${f}: the original's build output in the dk- folder. Never copy build output; rebuild every page on the stack.`);
+    }
+  }
+  const pages = sources.filter((f) => HTML.test(f) && !f.startsWith("tests/"));
+  if (pages.length > 0) {
+    const rendered = new Set(io.walk(original, SKIP).filter((f) => HTML.test(f)).map((f) => io.sha256([join4(original, f)])));
+    for (const f of pages) {
+      const marker = NEXT_MARKERS.find((m) => (io.readFile(join4(dir, f)) ?? "").includes(m));
+      if (marker !== undefined)
+        problems.push(`${f}: served HTML with the original's ${marker}. Never serve the original's rendered pages; rebuild every page on the stack.`);
+      else if (rendered.has(io.sha256([join4(dir, f)])))
+        problems.push(`${f}: a copy of a page the original rendered. Never serve the original's HTML; rebuild every page on the stack.`);
+    }
+  }
+  problems.push(...await devDrift(dir, io));
+  problems.push(...await migrationRows(dir, io));
   if (io.readFile(join4(dir, ".env.local")) !== null && !ignoresEnvLocal(io.readFile(join4(dir, ".gitignore")) ?? "")) {
     problems.push(".env.local: not covered by .gitignore. Add it before anything is committed.");
   }
+  const gitignore = io.readFile(join4(dir, ".gitignore")) ?? "";
+  for (const out of ["test-results", "playwright-report"]) {
+    if (sources.some((f) => f.startsWith(`${out}/`)) && !ignoresDir(gitignore, out)) {
+      problems.push(`${out}/: Playwright output is in the dk- folder and .gitignore does not ignore it. Add ${out}/ to .gitignore and delete the folder (git rm -r --cached if it is tracked).`);
+    }
+  }
+  const warnings = [];
+  const policy = await checkFolder(STARTER_PACK, dir, { list: async (d) => io.walk(d, SKIP), read: async (p) => io.readFile(p) ?? "", fetch: io.fetch });
+  if (policy.ok) {
+    for (const f of policy.findings) {
+      const text = `${f.path ?? "(folder)"}${f.line === null ? "" : `:${String(f.line)}`}: ${f.rule}: ${f.message}`;
+      if (f.level === "block")
+        problems.push(text);
+      else if (f.check === "dockerfile.from_digest")
+        warnings.push(text);
+    }
+  } else
+    problems.push(`policy check: ${policy.message}`);
   const ok = problems.length === 0;
-  io.print(JSON.stringify({ ok, problems, new_failed, counts: { tests, new_passed: newPassed, new_failed: new_failed.length, visual_diff: visual } }));
+  io.print(JSON.stringify({ ok, problems, ...warnings.length > 0 ? { warnings } : {}, new_failed, counts: { tests, new_passed: newPassed, new_failed: new_failed.length, visual_diff: visual } }));
   return ok ? 0 : 1;
 }
 
 var join5 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
-var isRec5 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-var json3 = (text) => {
+var isRec6 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var json4 = (text) => {
   try {
     return JSON.parse(text ?? "");
   } catch {
@@ -2261,8 +2364,8 @@ async function sideBySide(folder, originalReport, dkReport, io) {
   const original = { tests: 0, passed: 0, failed: 0 };
   const dk = { tests: 0, passed: 0, failed: 0 };
   let visual = 0;
-  const frozen = json3(io.readFile(freezePath(dir)));
-  if (!isRec5(frozen) || typeof frozen.sha256 !== "string" || !isRec5(frozen.baseline) || !Array.isArray(frozen.baseline.tests)) {
+  const frozen = json4(io.readFile(freezePath(dir)));
+  if (!isRec6(frozen) || typeof frozen.sha256 !== "string" || !isRec6(frozen.baseline) || !Array.isArray(frozen.baseline.tests)) {
     problems.push(".dkod/parity/freeze.json: missing. Freeze the suite (step 3) first.");
   } else {
     const record = frozen;
@@ -2276,7 +2379,7 @@ async function sideBySide(folder, originalReport, dkReport, io) {
       if (file === undefined)
         problems.push("side-by-side needs both reports: side-by-side <folder> <original report.json> <dk report.json>");
       else if (run === null)
-        problems.push(`${file}: not found or not a Playwright JSON report (use --reporter=json) for the ${label}.`);
+        problems.push(`${file}: not found, or ${REPORT_REFUSAL} (the ${label} report)`);
       return run === null ? null : new Map(run.map((t) => [t.title, t]));
     };
     const onOriginal = load(originalReport, "original app");
@@ -2306,10 +2409,11 @@ async function sideBySide(folder, originalReport, dkReport, io) {
       }
     }
   }
-  const map = json3(io.readFile(join5(dir, ".dkod/map/app-map.json")));
-  const count = (key) => isRec5(map) && Array.isArray(map[key]) ? map[key].length : 0;
-  const snapshot = json3(io.readFile(join5(dir, ".dkod/snapshot.json")));
-  const dataImported = isRec5(snapshot) && snapshot.mode === "snapshot" && snapshot.imported === true;
+  const map = json4(io.readFile(join5(dir, ".dkod/map/app-map.json")));
+  const count = (key) => isRec6(map) && Array.isArray(map[key]) ? map[key].length : 0;
+  const snapshot = json4(io.readFile(join5(dir, ".dkod/snapshot.json")));
+  const dataImported = isRec6(snapshot) && snapshot.mode === "snapshot" && snapshot.imported === true;
+  problems.push(...await devDrift(dir, io));
   const ok = problems.length === 0;
   io.print(JSON.stringify({
     ok,
@@ -2324,7 +2428,7 @@ async function sideBySide(folder, originalReport, dkReport, io) {
 var USAGE = [
   "Usage:",
   "  node dkod-migrate.mjs snapshot <the dk- app's folder>",
-  "  node dkod-migrate.mjs check-map <the dk- app's folder>",
+  "  node dkod-migrate.mjs check-map <the dk- app's folder> [--original-url http://localhost:<port>]",
   "  node dkod-migrate.mjs freeze <the dk- app's folder> <report.json>",
   "  node dkod-migrate.mjs unfreeze <the dk- app's folder>",
   "  node dkod-migrate.mjs render <template.md> <the dk- app's folder> [values.json] [--force]",
@@ -2338,7 +2442,7 @@ var join6 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}
 var norm = (p) => p.replace(/\/\.\//g, "/").replace(/\/+/g, "/");
 var snapshotPath = (dir) => join6(dir, ".dkod/snapshot.json");
 var recordPath = (dir) => join6(dir, ".dkod/migration.json");
-var SKIP3 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor"];
+var SKIP2 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor"];
 var DATA2 = /\.(?:sqlite|sqlite3|db|db3)$/i;
 var LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 var DB_SCHEMES = new Set(["postgres:", "postgresql:", "mysql:", "mariadb:"]);
@@ -2475,7 +2579,7 @@ async function snapshot(folder, io) {
   const scratch = io.mkdtemp(join6(io.tmpdir(), "dkod-migrate-"));
   const id = (scratch.split(/[\\/]/).pop() ?? "run").replace(/[^A-Za-z0-9]/g, "_");
   const files = [];
-  for (const rel of io.walk(original, SKIP3)) {
+  for (const rel of io.walk(original, SKIP2)) {
     if (!DATA2.test(rel))
       continue;
     const to = join6(scratch, rel);
@@ -2493,6 +2597,14 @@ async function snapshot(folder, io) {
       }
       const db = await copyDatabase(value, scratch, id, io);
       if (db !== null) {
+        const source = localDatabase(value);
+        if (source.protocol.startsWith("postgres")) {
+          const env2 = connection(source).env;
+          const cols = await readColumns(db.url, null, env2, io.run, io.cwd);
+          const got = cols === null ? null : await tallies(db.url, [...cols].map(([name, c]) => ({ name, cols: c })), env2, io.run, io.cwd);
+          if (got !== null)
+            Object.assign(db, { tables: got });
+        }
         databases.push(db);
         env[key] = db.url;
       }
@@ -2542,9 +2654,1296 @@ async function runMigrateCli(argv, io) {
   if (command === "clean" && folder !== undefined)
     return await clean(folder, io);
   if (command === "check-map" && folder !== undefined)
-    return await checkMap(folder, io);
+    return await checkMap(folder, io, argv.slice(2));
   io.print(USAGE);
   return 2;
+}
+
+var TIMEOUT_MS2 = 5000;
+var PAGE_CAP = 300;
+var ASSET_CAP = 100;
+var BODY_MAX = 2000000;
+var HOPS = 3;
+var same3 = (a, b) => b !== null && a.status === b.status && a.type === b.type && a.body.trim() === b.body.trim();
+var isHtml = (a) => /html/i.test(a.type);
+async function discoverRuntime(baseUrl, mapped, codeRoutes, io) {
+  const out = { answered: false, pages: [], routes: [], colors: [], fonts: [], buttons: [], tooltips: [] };
+  let origin;
+  try {
+    origin = new URL(baseUrl).origin;
+  } catch {
+    return out;
+  }
+  const doFetch = io.fetch ?? ((url, init) => globalThis.fetch(url, init));
+  const get = async (url) => {
+    let cur = url;
+    for (let hop = 0;hop <= HOPS; hop++) {
+      if (new URL(cur).origin !== origin)
+        return null;
+      const ctl = new AbortController;
+      const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS2);
+      try {
+        const res = await doFetch(cur, { redirect: "manual", signal: ctl.signal });
+        const loc = res.headers.get("location");
+        if (res.status >= 300 && res.status < 400 && loc !== null) {
+          const next = new URL(loc, cur).href;
+          if (new URL(next).origin !== origin)
+            return { status: res.status, type: "", body: "" };
+          cur = next;
+          continue;
+        }
+        return { status: res.status, type: res.headers.get("content-type") ?? "", body: (await res.text()).slice(0, BODY_MAX) };
+      } catch {
+        return null;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    return null;
+  };
+  const root = await get(`${origin}/`);
+  if (root === null)
+    return out;
+  out.answered = true;
+  const fallback = await get(`${origin}/__dkod_probe_${Math.random().toString(36).slice(2, 10)}`);
+  const colors = new Set;
+  const fonts = new Map;
+  const buttons = new Set;
+  const tooltips = new Set;
+  const assets = [];
+  const seenAssets = new Set;
+  const readMarkup = (html, base) => {
+    for (const c of colorsInCode(html))
+      colors.add(c);
+    for (const m of html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi))
+      for (const c of colorsInCss(m[1]))
+        colors.add(c);
+    for (const f of fontsIn(html, false))
+      fonts.set(f.toLowerCase(), f);
+    idsIn(html, buttons, tooltips);
+    const refs = [
+      ...[...html.matchAll(/<link\b[^>]*>/gi)].filter((m) => /rel\s*=\s*["']?stylesheet/i.test(m[0])).map((m) => /href\s*=\s*["']([^"']+)["']/i.exec(m[0])?.[1]),
+      ...[...html.matchAll(/<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi)].map((m) => m[1])
+    ];
+    for (const ref of refs)
+      addAsset(ref, base);
+  };
+  const addAsset = (ref, base) => {
+    if (ref === undefined || assets.length >= ASSET_CAP)
+      return;
+    try {
+      const u = new URL(ref, base);
+      u.hash = "";
+      if (u.origin === origin && !seenAssets.has(u.href)) {
+        seenAssets.add(u.href);
+        assets.push(u.href);
+      }
+    } catch {}
+  };
+  const queue = ["/", ...mapped.filter((p) => !p.includes(":"))];
+  const seen = new Set;
+  const pages = new Set;
+  const routes = new Set;
+  let fetched = 0;
+  while (queue.length > 0 && fetched < PAGE_CAP) {
+    const path = queue.shift();
+    if (seen.has(path))
+      continue;
+    seen.add(path);
+    fetched++;
+    const ans = path === "/" ? root : await get(origin + path);
+    if (ans === null)
+      continue;
+    if (path !== "/" && !same3(ans, fallback) && (ans.status !== 200 || !isHtml(ans)) && (ans.status >= 200 && ans.status < 300 || ans.status === 401 || ans.status === 403))
+      routes.add(normalizeRoute(path));
+    if (ans.status !== 200 || !isHtml(ans))
+      continue;
+    const isFallback = same3(ans, fallback);
+    if (!isFallback)
+      pages.add(normalizeRoute(path));
+    if (!isFallback || path === "/") {
+      readMarkup(ans.body, origin + path);
+      for (const m of ans.body.matchAll(/<a\b[^>]*?\bhref\s*=\s*["']([^"']+)["']/gi)) {
+        try {
+          const u = new URL(m[1], origin + path);
+          if (u.origin === origin && !seen.has(u.pathname) && /^[\w./~%:@!$&'()*+,;=-]*$/.test(u.pathname))
+            queue.push(u.pathname);
+        } catch {}
+      }
+    }
+  }
+  if (fallback !== null && fallback.status === 200 && isHtml(fallback))
+    readMarkup(fallback.body, `${origin}/`);
+  for (const p of new Set([...mapped, ...codeRoutes])) {
+    if (p.includes(":") || p.includes("*"))
+      continue;
+    const ans = await get(origin + p);
+    if (ans === null || same3(ans, fallback))
+      continue;
+    if (ans.status >= 200 && ans.status < 400 || ans.status === 401 || ans.status === 403)
+      routes.add(normalizeRoute(p));
+  }
+  for (let i = 0;i < assets.length; i++) {
+    const url = assets[i];
+    const ans = await get(url);
+    if (ans === null || ans.status !== 200)
+      continue;
+    const isCss = /css/i.test(ans.type) || /\.css(?:$|\?)/i.test(url);
+    if (isCss) {
+      for (const c of colorsInCss(ans.body))
+        colors.add(c);
+      for (const f of fontsIn(ans.body, true))
+        fonts.set(f.toLowerCase(), f);
+      for (const m of ans.body.matchAll(/@import\s+(?:url\(\s*)?["']?([^"')\s;]+)/gi))
+        addAsset(m[1], url);
+    } else {
+      for (const c of colorsInCode(ans.body))
+        colors.add(c);
+      for (const f of fontsIn(ans.body, false))
+        fonts.set(f.toLowerCase(), f);
+      idsIn(ans.body, buttons, tooltips);
+    }
+  }
+  out.pages = [...pages].sort();
+  out.routes = [...routes].sort();
+  out.colors = [...colors].sort();
+  out.fonts = [...fonts.values()].sort();
+  out.buttons = [...buttons].sort();
+  out.tooltips = [...tooltips].sort();
+  return out;
+}
+
+var join7 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+var SKIP3 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".dkod", "__pycache__"];
+var ASSET_KINDS = ["css", "font", "icon", "image"];
+var TEXT_MAX2 = 200;
+var FULL_MAP = {
+  max: { summary: 20, routes: 2000, routeRefs: 64, stores: 64, storeEnv: 64, services: 500, serviceSettings: 128, settings: 2000, background: 500, localOnly: 500, flows: 500, flowSteps: 100, pages: 1000, pageStates: 5, pageComponents: 500 },
+  maxMapBytes: 16 * 1024 * 1024
+};
+var QUERY_MAX = 4000;
+var LOCAL_KEYS = ["tables", "queries", "functions", "design", "original_cannot_run", "not_mapped"];
+var NOT_MAPPED_KINDS = ["route", "page", "table", "column", "setting", "color", "function", "query", "font", "button", "service"];
+var isRec7 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var CONTROL_ANY = new RegExp("[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]");
+function safeFile(s) {
+  if (s.length === 0 || s.length > 512 || CONTROL_ANY.test(s) || s.startsWith("/") || s.includes("\\"))
+    return false;
+  return s.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
+}
+function validateMap(json) {
+  const problems = [];
+  const bad = (path, why) => {
+    problems.push(`${path}: ${why}`);
+  };
+  if (!isRec7(json))
+    return ["app-map.json: must be a JSON object"];
+  const text = (v, path, opts = {}) => {
+    if (typeof v !== "string")
+      return bad(path, "must be a string");
+    if (v.length > TEXT_MAX2)
+      bad(path, `must be at most ${TEXT_MAX2} characters`);
+    else if (CONTROL_ANY.test(v))
+      bad(path, "must be one line");
+    else if (!opts.empty && v.trim() === "")
+      bad(path, "must not be empty");
+  };
+  const file = (v, path) => {
+    if (v === null)
+      return;
+    if (typeof v !== "string" || !safeFile(v))
+      bad(path, "must be null or a path inside the original, with no '..' and no leading '/'");
+  };
+  const pick = (v, values, path) => {
+    if (typeof v !== "string" || !values.includes(v))
+      bad(path, `must be one of ${values.join(", ")}`);
+  };
+  const bool = (v, path) => {
+    if (typeof v !== "boolean")
+      bad(path, "must be true or false");
+  };
+  const array = (v, path, max, min = 0) => {
+    if (!Array.isArray(v)) {
+      bad(path, "must be a list");
+      return [];
+    }
+    if (v.length > max)
+      bad(path, `must have at most ${max} items`);
+    if (v.length < min)
+      bad(path, `must have at least ${min} item${min === 1 ? "" : "s"}`);
+    return v;
+  };
+  const texts = (v, path, max, min = 0) => {
+    array(v, path, max, min).forEach((t, i) => text(t, `${path}[${i}]`));
+  };
+  const names = (v, path, max) => {
+    array(v, path, max).forEach((n, i) => {
+      if (typeof n !== "string" || !isSettingName(n))
+        bad(`${path}[${i}]`, "must be a setting NAME (letters, digits, _), never a value");
+    });
+  };
+  const items = (key, max, each) => {
+    array(json[key], key, max).forEach((r, i) => {
+      if (!isRec7(r))
+        return bad(`${key}[${i}]`, "must be an object");
+      each(r, `${key}[${i}]`);
+    });
+  };
+  const fields = (r, path, allowed) => {
+    for (const k of allowed)
+      if (!(k in r))
+        bad(`${path}.${k}`, "is missing");
+    for (const k of Object.keys(r))
+      if (!allowed.includes(k))
+        bad(`${path}.${k}`, "is not a field of the app map");
+  };
+  const keys = ["summary", "routes", "stores", "services", "settings", "background", "local_only", "flows", "pages"];
+  for (const k of keys)
+    if (!(k in json))
+      bad(k, "is missing");
+  for (const k of Object.keys(json))
+    if (!keys.includes(k) && !LOCAL_KEYS.includes(k))
+      bad(k, "is not a field of the app map");
+  const max = FULL_MAP.max;
+  if ("summary" in json)
+    texts(json.summary, "summary", max.summary, 1);
+  if ("routes" in json) {
+    items("routes", max.routes, (r, p) => {
+      fields(r, p, ["kind", "method", "path", "does", "reads", "writes", "file"]);
+      pick(r.kind, APP_MAP.routeKinds, `${p}.kind`);
+      pick(r.method, APP_MAP.methods, `${p}.method`);
+      text(r.path, `${p}.path`);
+      text(r.does, `${p}.does`, { empty: true });
+      texts(r.reads, `${p}.reads`, max.routeRefs);
+      texts(r.writes, `${p}.writes`, max.routeRefs);
+      file(r.file, `${p}.file`);
+    });
+  }
+  if ("stores" in json) {
+    items("stores", max.stores, (r, p) => {
+      fields(r, p, ["engine", "where", "orm", "migrations", "env_names"]);
+      pick(r.engine, APP_MAP.storeEngines, `${p}.engine`);
+      text(r.where, `${p}.where`);
+      for (const k of ["orm", "migrations"])
+        if (r[k] !== null)
+          text(r[k], `${p}.${k}`);
+      names(r.env_names, `${p}.env_names`, max.storeEnv);
+    });
+  }
+  if ("services" in json) {
+    items("services", max.services, (r, p) => {
+      fields(r, p, ["name", "for", "required", "settings"]);
+      text(r.name, `${p}.name`);
+      text(r.for, `${p}.for`, { empty: true });
+      bool(r.required, `${p}.required`);
+      names(r.settings, `${p}.settings`, max.serviceSettings);
+    });
+  }
+  if ("settings" in json) {
+    const seen = new Set;
+    items("settings", max.settings, (r, p) => {
+      fields(r, p, ["name", "used_where", "required", "secret"]);
+      if (typeof r.name !== "string" || !isSettingName(r.name))
+        bad(`${p}.name`, "must be a setting NAME (letters, digits, _), never a value");
+      else if (seen.has(r.name))
+        bad(`${p}.name`, `${r.name} is listed twice`);
+      else
+        seen.add(r.name);
+      text(r.used_where, `${p}.used_where`, { empty: true });
+      bool(r.required, `${p}.required`);
+      bool(r.secret, `${p}.secret`);
+    });
+  }
+  for (const [key, kinds, cap] of [["background", APP_MAP.backgroundKinds, max.background], ["local_only", APP_MAP.localKinds, max.localOnly]]) {
+    if (!(key in json))
+      continue;
+    items(key, cap, (r, p) => {
+      fields(r, p, ["kind", "what", "file"]);
+      pick(r.kind, kinds, `${p}.kind`);
+      text(r.what, `${p}.what`);
+      file(r.file, `${p}.file`);
+    });
+  }
+  if ("flows" in json) {
+    items("flows", max.flows, (r, p) => {
+      fields(r, p, ["name", "steps"]);
+      text(r.name, `${p}.name`);
+      texts(r.steps, `${p}.steps`, max.flowSteps);
+    });
+  }
+  if ("pages" in json) {
+    items("pages", max.pages, (r, p) => {
+      fields(r, p, ["path", "name", "states", "components"]);
+      text(r.path, `${p}.path`);
+      text(r.name, `${p}.name`);
+      const states = array(r.states, `${p}.states`, max.pageStates, 1);
+      states.forEach((s, i) => pick(s, APP_MAP.pageStates, `${p}.states[${i}]`));
+      if (new Set(states).size !== states.length)
+        bad(`${p}.states`, "lists a state twice");
+      array(r.components, `${p}.components`, max.pageComponents).forEach((c, i) => {
+        if (!isRec7(c))
+          return bad(`${p}.components[${i}]`, "must be an object");
+        fields(c, `${p}.components[${i}]`, ["kind", "name"]);
+        pick(c.kind, APP_MAP.componentKinds, `${p}.components[${i}].kind`);
+        text(c.name, `${p}.components[${i}].name`);
+      });
+    });
+  }
+  if ("tables" in json) {
+    array(json.tables, "tables", 200).forEach((t, i) => {
+      if (!isRec7(t))
+        return bad(`tables[${i}]`, "must be an object");
+      fields(t, `tables[${i}]`, ["store", "name", "columns"]);
+      text(t.store, `tables[${i}].store`);
+      text(t.name, `tables[${i}].name`);
+      texts(t.columns, `tables[${i}].columns`, 500);
+    });
+  }
+  if ("queries" in json) {
+    array(json.queries, "queries", 2000).forEach((q, i) => {
+      if (typeof q !== "string" || q.trim() === "")
+        bad(`queries[${i}]`, "must be the SQL string as written in the code");
+      else if (q.length > QUERY_MAX)
+        bad(`queries[${i}]`, `must be at most ${QUERY_MAX} characters`);
+    });
+  }
+  if ("functions" in json) {
+    array(json.functions, "functions", 5000).forEach((f, i) => {
+      if (typeof f !== "string" || !/^[\w$.:<>-]{1,120}$/.test(f))
+        bad(`functions[${i}]`, "must be a function name");
+    });
+  }
+  if ("original_cannot_run" in json)
+    text(json.original_cannot_run, "original_cannot_run");
+  if ("not_mapped" in json) {
+    items("not_mapped", 2000, (r, p) => {
+      fields(r, p, ["kind", "name", "why"]);
+      pick(r.kind, NOT_MAPPED_KINDS, `${p}.kind`);
+      text(r.name, `${p}.name`);
+      text(r.why, `${p}.why`);
+    });
+  }
+  if ("design" in json) {
+    const d = json.design;
+    if (!isRec7(d))
+      bad("design", "must be an object");
+    else {
+      fields(d, "design", ["colors", "fonts", "buttons", "tooltips"]);
+      array(d.colors, "design.colors", 500).forEach((c, i) => {
+        if (typeof c !== "string" || !/^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/.test(c))
+          bad(`design.colors[${i}]`, "must be a lowercase hex color like #1a2b3c");
+      });
+      texts(d.fonts, "design.fonts", 100);
+      texts(d.buttons, "design.buttons", 1000);
+      texts(d.tooltips, "design.tooltips", 1000);
+    }
+  }
+  if (Buffer.byteLength(JSON.stringify(json)) > FULL_MAP.maxMapBytes)
+    bad("app-map.json", `must stay under ${FULL_MAP.maxMapBytes} bytes`);
+  return problems;
+}
+function normalizeRoute(path) {
+  let p = path.trim().replace(/[?#].*$/, "");
+  p = p.replace(/\[\[?\.\.\.[^\]]*\]?\]/g, ":param");
+  p = p.replace(/\[[^\]]+\]/g, ":param");
+  p = p.replace(/<[^>/]+>/g, ":param");
+  p = p.replace(/\{[^}/]+\}/g, ":param");
+  p = p.replace(/\/\$[A-Za-z_][\w]*/g, "/:param").replace(/\/:[A-Za-z_][\w]*\??/g, "/:param");
+  p = p.replace(/\/\*[\w]*/g, "/:param");
+  p = `/${p.replace(/^\/+/, "")}`.replace(/\/+/g, "/");
+  return p.length > 1 ? p.replace(/\/$/, "") : p;
+}
+var CODE2 = /\.(?:[cm]?[jt]sx?|svelte)$/;
+var PY = /\.py$/;
+var VUE = /\.vue$/i;
+var scriptsOf = (text) => [...text.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).join(`
+`);
+var codeOf = (f, text) => VUE.test(f) ? scriptsOf(text) : text;
+var IS_TEST = /(?:^|\/)(?:tests?|__tests__|e2e|spec)\/|\.(?:test|spec)\.[a-z]+$|(?:^|\/)test_[^/]*\.py$|_test\.py$/;
+var IS_TEST_FILE = /\.(?:test|spec)\.[a-z]+$|(?:^|\/)test_[^/]*\.py$|_test\.py$/;
+var ROUTER_FILE = /createBrowserRouter|createHashRouter|createMemoryRouter|createRoutesFromElements|useRoutes|<Routes|<Route\b|RouteObject|\broutes\s*[:=]/;
+var RECEIVER = "(?:app|router|routes?|server|fastify|api|[A-Za-z_$][\\w$]*(?:Router|App|Server|Routes))";
+var HTTP = /^\.(?:get|post|put|patch|delete|all)$/;
+var BOUND_RECEIVER = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*[\w$.]+(?:<[^<>=]*>)?\s*)?=\s*(?:express\s*\(|express\.Router\s*\(|Router\s*\()/g;
+var SPA_CATCH_ALL = /^\/(?:\*\w*|\(\.\*\)|\{\*\w*\})$/;
+function skipArgs(text, from) {
+  let depth = 1;
+  let i = from;
+  while (i < text.length && depth > 0) {
+    const c = text[i];
+    if (c === "/" && text[i + 1] === "/") {
+      while (i < text.length && text[i] !== `
+`)
+        i++;
+    } else if (c === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      i = end < 0 ? text.length : end + 1;
+    } else if (c === "'" || c === '"' || c === "`") {
+      i++;
+      while (i < text.length && text[i] !== c)
+        i += text[i] === "\\" ? 2 : 1;
+    } else if (c === "(")
+      depth++;
+    else if (c === ")")
+      depth--;
+    i++;
+  }
+  return i;
+}
+var HEALTH = "(?:\\/[\\w.-]+)*\\/(?:health|healthz|readyz|ready|readiness|livez|live|ping)";
+var HEALTH_OPTION = new RegExp(`\\b(?:[\\w$]*(?:health|probe|readiness|liveness)[\\w$]*|path)["']?\\s*[:=]\\s*(["'\`])(${HEALTH})\\1`, "gi");
+var HEALTH_URL = new RegExp(`\\b(?:req|request)\\.url\\s*(?:={2,3}\\s*|\\.startsWith\\(\\s*)(["'\`])(${HEALTH})\\1`, "g");
+var toMethod = (m) => {
+  const up = m.toUpperCase();
+  return up === "GET" || up === "POST" || up === "PUT" || up === "PATCH" || up === "DELETE" ? up : "ANY";
+};
+function packageDirs(files, needle, io, original) {
+  const out = [];
+  for (const f of files) {
+    if (f !== "package.json" && !f.endsWith("/package.json"))
+      continue;
+    if (needle.test(io.readFile(join7(original, f)) ?? ""))
+      out.push(f.slice(0, f.length - "package.json".length));
+  }
+  return out;
+}
+var under = (file, dirs) => dirs.find((d) => file.startsWith(d)) ?? null;
+var HANDLER_METHOD = /^(?:GET|POST|PUT|PATCH|DELETE)$/;
+function handlerMethods(text) {
+  const methods = new Set;
+  for (const m of text.matchAll(/\bexport\s+(?:async\s+)?(?:function\s*\*?|const|let|var)\s+(GET|POST|PUT|PATCH|DELETE)\b/g))
+    methods.add(m[1]);
+  for (const m of text.matchAll(/\bexport\s+(?:const|let|var)\s*\{([^}]*)\}/g)) {
+    for (const part of m[1].split(",")) {
+      const name = part.split(/[:=]/)[0].trim();
+      if (HANDLER_METHOD.test(name))
+        methods.add(name);
+    }
+  }
+  for (const m of text.matchAll(/\bexport\s*\{([^}]*)\}/g)) {
+    for (const part of m[1].split(",")) {
+      const name = part.trim().split(/\s+as\s+/).pop().trim();
+      if (HANDLER_METHOD.test(name))
+        methods.add(name);
+    }
+  }
+  return methods.size > 0 ? [...methods].sort() : ["ANY"];
+}
+function fileRoutes(files, io, original) {
+  const out = [];
+  const add = (path, file, method = "GET") => out.push({ path: normalizeRoute(path), method, file, relative: false });
+  const addHandler = (path, file) => {
+    for (const method of handlerMethods(io.readFile(join7(original, file)) ?? ""))
+      add(path, file, method);
+  };
+  const next = packageDirs(files, /"next"\s*:/, io, original);
+  const remix = packageDirs(files, /"@remix-run\/|"@react-router\/|"react-router"\s*:/, io, original);
+  const dropGroups = (segs) => segs.filter((s) => !/^\(.*\)$/.test(s) && !s.startsWith("@"));
+  for (const f of files) {
+    if (IS_TEST.test(f) && (IS_TEST_FILE.test(f) || /(?:^|\/)(?:tests|__tests__|e2e)\//.test(f)))
+      continue;
+    let m;
+    if ((m = /^((?:.*\/)?)(?:src\/)?app\/(?:(.*)\/)?(page|route)\.(?:[jt]sx?|mdx)$/.exec(f)) !== null && under(f, next) !== null) {
+      const path = dropGroups((m[2] ?? "").split("/").filter(Boolean)).join("/");
+      if (m[3] === "route")
+        addHandler(path, f);
+      else
+        add(path, f);
+    } else if ((m = /^((?:.*\/)?)(?:src\/)?pages\/(.+)\.(?:[jt]sx?|mdx)$/.exec(f)) !== null && under(f, next) !== null) {
+      const segs = m[2].split("/");
+      if (/^_(?:app|document|error|middleware)$/.test(segs[segs.length - 1]) || segs[0] === "_next")
+        continue;
+      if (segs[segs.length - 1] === "index")
+        segs.pop();
+      add(segs.join("/"), f);
+    } else if ((m = /(?:^|\/)src\/routes\/(?:(.*)\/)?\+(?:page|server)\.(?:svelte|[jt]s)$/.exec(f)) !== null) {
+      const path = dropGroups((m[1] ?? "").split("/").filter(Boolean)).join("/");
+      if (f.includes("+server."))
+        addHandler(path, f);
+      else
+        add(path, f);
+    } else if ((m = /(?:^|\/)app\/routes\/(?:([^/]+)\.(?:[jt]sx?|mdx)|([^/]+)\/(?:route|index)\.(?:[jt]sx?|mdx))$/.exec(f)) !== null && under(f, remix) !== null) {
+      const flat = m[1] ?? m[2];
+      if (flat === "root" || flat.startsWith("__"))
+        continue;
+      const segs = flat.split(".").map((s) => s.replace(/_$/, "")).filter((s) => s !== "" && !s.startsWith("_") && s !== "route");
+      add(segs.join("/"), f);
+    }
+  }
+  return out;
+}
+function sourceRoutes(files, io, original) {
+  const out = [];
+  for (const f of files) {
+    if (IS_TEST.test(f))
+      continue;
+    if (/(?:^|\/)netlify\.toml$/.test(f)) {
+      const toml = io.readFile(join7(original, f));
+      for (const m of (toml ?? "").matchAll(/^\s*from\s*=\s*(["'])(\/[^"']*)\1/gm)) {
+        if (!SPA_CATCH_ALL.test(m[2]) && !/\s/.test(m[2]))
+          out.push({ path: normalizeRoute(m[2]), method: "ANY", file: f, relative: false });
+      }
+      continue;
+    }
+    if (!CODE2.test(f) && !PY.test(f))
+      continue;
+    const text = io.readFile(join7(original, f));
+    if (text === null)
+      continue;
+    const add = (path, method = "GET") => {
+      if (path === "" || path === "*" || SPA_CATCH_ALL.test(path) || path.includes("${") || /^https?:/.test(path) || /\s/.test(path))
+        return;
+      out.push({ path: normalizeRoute(path), method: toMethod(method), file: f, relative: !path.startsWith("/") });
+    };
+    for (const m of text.matchAll(HEALTH_OPTION))
+      add(m[2]);
+    for (const m of text.matchAll(HEALTH_URL))
+      add(m[2]);
+    if (/\bcreateServer\s*\(|from\s+["'](?:node:)?https?["']|require\(\s*["'](?:node:)?https?["']\s*\)/.test(text)) {
+      for (const m of text.matchAll(/\b(?:pathname|path|url)\s*(?:={2,3}\s*|\.startsWith\(\s*)(["'`])(\/[^"'`]*)\1/g))
+        add(m[2]);
+      if (/switch\s*\(\s*(?:[\w$.]*\.)?(?:pathname|path|url)\s*\)/.test(text)) {
+        for (const m of text.matchAll(/\bcase\s+(["'`])(\/[^"'`]*)\1\s*:/g))
+          add(m[2]);
+      }
+    }
+    const fn = /(?:^|\/)netlify\/functions\/([^/]+?)(?:\/index)?\.[cm]?[jt]s$/.exec(f);
+    if (fn !== null)
+      add(`/.netlify/functions/${fn[1]}`, "ANY");
+    if (PY.test(f)) {
+      for (const m of text.matchAll(/@[A-Za-z_][\w.]*\.(get|post|put|patch|delete|route|api_route|websocket)\(\s*(["'])(\/[^"']*)\2/g))
+        add(m[3], m[1]);
+      continue;
+    }
+    if (ROUTER_FILE.test(text)) {
+      for (const m of text.matchAll(/<Route\b[^>]*?\bpath=(?:\{\s*)?(["'`])([^"'`]*)\1/g))
+        add(m[2]);
+      for (const m of text.matchAll(/\bpath:\s*(["'`])([^"'`]*)\1/g))
+        add(m[2]);
+    }
+    const bound = [...text.matchAll(BOUND_RECEIVER)].map((m) => m[1].replace(/\$/g, "\\$"));
+    const receiver = bound.length > 0 ? `(?:${RECEIVER}|${bound.join("|")})` : RECEIVER;
+    const chain = new RegExp(`(?<![\\w$.])${receiver}\\s*\\.route\\(\\s*(["'\`])(\\/[^"'\`]*)\\1\\s*\\)`, "g");
+    for (const m of text.matchAll(chain)) {
+      let i = m.index + m[0].length;
+      for (;; ) {
+        const step = /\s*\.(get|post|put|patch|delete|all)\s*\(/y;
+        step.lastIndex = i;
+        const next = step.exec(text);
+        if (next === null)
+          break;
+        add(m[2], next[1]);
+        i = skipArgs(text, i + next[0].length);
+      }
+    }
+    const call = new RegExp(`\\b${receiver}(\\.(?:get|post|put|patch|delete|all))\\(\\s*(["'\`])(\\/[^"'\`]*)\\2`, "g");
+    for (const m of text.matchAll(call))
+      if (HTTP.test(m[1]))
+        add(m[3], m[1].slice(1));
+    for (const m of text.matchAll(/\bfastify\.route\(\s*\{([^}]*?)\burl:\s*(["'`])(\/[^"'`]*)\2([^}]*)\}/g)) {
+      const given = /\bmethod:\s*(\[[^\]]*\]|["'`]\w+["'`])/.exec(`${m[1]}${m[4]}`);
+      const methods = given === null ? [] : [...given[1].matchAll(/\w+/g)].map((x) => x[0]);
+      for (const method of methods.length > 0 ? methods : ["ANY"])
+        add(m[3], method);
+    }
+  }
+  return out;
+}
+function discoverRoutes(original, io) {
+  const files = io.walk(original, SKIP3);
+  const all = [...fileRoutes(files, io, original), ...sourceRoutes(files, io, original)];
+  const seen = new Set;
+  return all.filter((r) => {
+    const key = `${r.method} ${r.path}`;
+    return seen.has(key) ? false : (seen.add(key), true);
+  });
+}
+var bare = (s) => s.replace(/[`"'[\]]/g, "");
+var CONSTRAINT = /^(?:primary|foreign|unique|constraint|check|key|index|fulltext|exclude)$/i;
+function discoverTables(original, io) {
+  const out = new Map;
+  const put = (name, cols) => {
+    const set = out.get(name) ?? new Set;
+    for (const c of cols)
+      set.add(c);
+    out.set(name, set);
+  };
+  for (const f of io.walk(original, SKIP3)) {
+    if (IS_TEST.test(f))
+      continue;
+    if (/(?:^|\/)data\/.+\.csv$/i.test(f)) {
+      const header = (io.readFile(join7(original, f)) ?? "").split(/\r?\n/, 1)[0] ?? "";
+      put((f.split("/").pop() ?? f).replace(/\.csv$/i, ""), header.split(",").map((c) => bare(c.trim())).filter((c) => c !== ""));
+      continue;
+    }
+    if (!/\.sql$/i.test(f) && !CODE2.test(f) && !PY.test(f))
+      continue;
+    const raw = io.readFile(join7(original, f));
+    if (raw === null)
+      continue;
+    const text = raw.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
+    for (const m of text.matchAll(/CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([`"[\]\w.]+)\s*\(/gi)) {
+      const name = bare(m[1]).split(".").pop();
+      const cols = [];
+      let depth = 1;
+      let cur = "";
+      const flush = () => {
+        const first = bare(cur.trim().split(/[\s(]+/)[0] ?? "");
+        if (first !== "" && !CONSTRAINT.test(first))
+          cols.push(first);
+        cur = "";
+      };
+      for (let i = m.index + m[0].length;i < text.length; i++) {
+        const ch = text[i];
+        if (ch === "(")
+          depth++;
+        else if (ch === ")" && --depth === 0)
+          break;
+        if (ch === "," && depth === 1)
+          flush();
+        else
+          cur += ch;
+      }
+      flush();
+      put(name, cols);
+    }
+  }
+  return out;
+}
+var ENV_READS = [
+  /\bprocess\.env\.([A-Za-z_]\w*)/g,
+  /\bprocess\.env\[\s*(["'`])([A-Za-z_]\w*)\1\s*\]/g,
+  /\bimport\.meta\.env\.([A-Za-z_]\w*)/g,
+  /\bos\.environ\[\s*(["'])([A-Za-z_]\w*)\1\s*\]/g,
+  /\bos\.environ\.get\(\s*(["'])([A-Za-z_]\w*)\1/g,
+  /\bos\.getenv\(\s*(["'])([A-Za-z_]\w*)\1/g
+];
+var VITE_BUILTIN = new Set(["MODE", "DEV", "PROD", "SSR", "BASE_URL"]);
+var ENV_FILE = /^(?:.*\.)?env(?:\..+)?$|\.example$/;
+var ENV_SCHEMA = /^env\.[cm]?[jt]s$/;
+function discoverSettings(original, io) {
+  const names = new Set;
+  for (const f of io.walk(original, SKIP3)) {
+    const base = f.split("/").pop();
+    if (IS_TEST.test(f) && ENV_FILE.test(base))
+      continue;
+    if (ENV_FILE.test(base) && !CODE2.test(base) && !PY.test(base) && !VUE.test(base)) {
+      for (const line of (io.readFile(join7(original, f)) ?? "").split(/\r?\n/)) {
+        const key = /^\s*(?:export\s+)?([A-Za-z_]\w*)\s*=/.exec(line)?.[1];
+        if (key !== undefined)
+          names.add(key);
+      }
+      continue;
+    }
+    if (IS_TEST.test(f) || !CODE2.test(f) && !PY.test(f) && !VUE.test(f))
+      continue;
+    const raw = io.readFile(join7(original, f));
+    if (raw === null)
+      continue;
+    const text = codeOf(f, raw);
+    for (const re of ENV_READS)
+      for (const m of text.matchAll(re))
+        if (!VITE_BUILTIN.has(m[2] ?? m[1]))
+          names.add(m[2] ?? m[1]);
+    for (const m of text.matchAll(/\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:process\.env|import\.meta\.env)\b/g)) {
+      for (const part of m[1].split(",")) {
+        const name = part.split(/[:=]/)[0].trim();
+        if (/^[A-Za-z_]\w*$/.test(name) && !VITE_BUILTIN.has(name))
+          names.add(name);
+      }
+    }
+    if (ENV_SCHEMA.test(base))
+      for (const m of text.matchAll(/^\s*["']?([A-Z][A-Z0-9_]*)["']?\s*:/gm))
+        names.add(m[1]);
+  }
+  return [...names].sort();
+}
+function colorsInCode(raw) {
+  const HEX = /(?<=[:(,]\s*)#([0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})(?![\w-])|(?<!(?:href|id)\s*=\s*['"`])(?<=['"`])#([0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})(?=['"`])/g;
+  const code = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:\w])\/\/.*$/gm, "$1");
+  return [...code.matchAll(HEX)].map((c) => `#${(c[1] ?? c[2]).toLowerCase()}`);
+}
+function colorsInCss(raw) {
+  const out = [];
+  const text = raw.replace(/\/\*[\s\S]*?\*\//g, "");
+  for (const d of text.matchAll(/[\w-]+\s*:\s*([^;{}]+)(?=[;}]|$)/g)) {
+    for (const c of d[1].replace(/url\([^)]*\)/gi, " ").matchAll(/#([0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})(?![\w-])/g))
+      out.push(`#${c[1].toLowerCase()}`);
+  }
+  return out;
+}
+function discoverColors(original, io) {
+  const colors = new Set;
+  for (const f of io.walk(original, SKIP3)) {
+    if (/\.[cm]?[jt]sx?$/.test(f)) {
+      if (IS_TEST.test(f))
+        continue;
+      for (const c of colorsInCode(io.readFile(join7(original, f)) ?? ""))
+        colors.add(c);
+      continue;
+    }
+    if (!/\.(?:css|scss|sass|less)$/i.test(f))
+      continue;
+    for (const c of colorsInCss(io.readFile(join7(original, f)) ?? ""))
+      colors.add(c);
+  }
+  return [...colors].sort();
+}
+var KEYWORDS = new Set(["if", "for", "while", "switch", "catch", "constructor", "return", "function", "with", "else", "do", "try", "super", "await", "typeof", "new"]);
+var MARKUP = /\.(?:html?|vue)$/i;
+function discoverFunctions(original, io) {
+  const names = new Set;
+  for (const f of io.walk(original, SKIP3)) {
+    if (IS_TEST.test(f) || !CODE2.test(f) && !PY.test(f) && !VUE.test(f))
+      continue;
+    const raw = io.readFile(join7(original, f));
+    if (raw === null)
+      continue;
+    const text = codeOf(f, raw);
+    const add = (n) => {
+      if (n !== undefined && !KEYWORDS.has(n))
+        names.add(n);
+    };
+    if (PY.test(f)) {
+      for (const m of text.matchAll(/^[ \t]*(?:async[ \t]+)?def[ \t]+(\w+)/gm))
+        add(m[1]);
+      continue;
+    }
+    for (const m of text.matchAll(/\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)\s*[(<]/g))
+      add(m[1]);
+    for (const m of text.matchAll(/(?<![\w$.=!<>])([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::[^=\n]+)?=>|[A-Za-z_$][\w$]*\s*=>)/g))
+      add(m[1]);
+    for (const m of text.matchAll(/^[ \t]*(?:(?:public|private|protected|static|async|override|get|set)\s+)*([A-Za-z_$][\w$]*)\s*\([^()]*\)\s*(?::\s*[^{;=\n]+)?\{/gm))
+      add(m[1]);
+  }
+  return [...names].sort();
+}
+function queryId(q) {
+  return `q:${createHash("sha256").update(normalizeQuery(q)).digest("hex").slice(0, 12)}`;
+}
+function normalizeQuery(sql) {
+  return sql.replace(/\s+/g, " ").trim().replace(/\s*;$/, "");
+}
+var SQL_START = /^\s*(?:(?:select|insert|update|delete)\s[\s\S]*\b(?:from|into|set)\b|update\s+(?:only\s+)?\S+(?:\s+(?:as\s+)?\w+)?\s+set\s|with\s+(?:recursive\s+)?\w+\s+as\s*\()/i;
+var LITERAL = /"""([\s\S]*?)"""|'''([\s\S]*?)'''|`([^`]*)`|"((?:[^"\\\n]|\\.)*)"|'((?:[^'\\\n]|\\.)*)'/g;
+function discoverQueries(original, io) {
+  const out = new Set;
+  for (const f of io.walk(original, SKIP3)) {
+    if (IS_TEST.test(f) || !CODE2.test(f) && !PY.test(f) && !VUE.test(f) && !/\.(?:html?|sql)$/i.test(f))
+      continue;
+    const text = io.readFile(join7(original, f));
+    if (text === null)
+      continue;
+    for (const m of text.matchAll(LITERAL)) {
+      const body = m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5] ?? "";
+      if (SQL_START.test(body))
+        out.add(normalizeQuery(body));
+    }
+  }
+  return [...out].sort();
+}
+var GENERIC_FONT = /^(?:serif|sans-serif|monospace|cursive|fantasy|system-ui|ui-[\w-]+|inherit|initial|unset|revert|-[\w-]+|blinkmacsystemfont)$/i;
+function normalizeFontStack(list) {
+  return list.replace(/!important/gi, "").split(",").map((p) => p.trim().replace(/^["'`]+|["'`]+$/g, "").trim().toLowerCase()).filter((p) => p !== "").join(",");
+}
+function fontsIn(text, isStyle, stacks) {
+  const out = [];
+  const put = (list) => {
+    let named = false;
+    for (const part of list.replace(/!important/gi, "").split(",")) {
+      const name = part.trim().replace(/^["'`]+|["'`]+$/g, "").trim();
+      if (name === "" || GENERIC_FONT.test(name) || /var\(|\$\{|[(){}]/.test(name))
+        continue;
+      out.push(name);
+      named = true;
+    }
+    if (named)
+      stacks?.add(list.replace(/!important/gi, "").trim());
+  };
+  for (const m of text.matchAll(/font-family\s*:\s*([^;{}\n]+)/gi))
+    put(m[1].replace(/["'`,)\s]+$/, ""));
+  if (!isStyle)
+    for (const m of text.matchAll(/\bfontFamily\s*:\s*(["'`])([^"'`]*)\1/g))
+      put(m[2]);
+  return out;
+}
+function scanFonts(original, io) {
+  const fonts = new Map;
+  const stacks = new Set;
+  for (const f of io.walk(original, SKIP3)) {
+    if (IS_TEST.test(f) || !STYLE.test(f) && !CODE2.test(f) && !MARKUP.test(f))
+      continue;
+    const text = io.readFile(join7(original, f));
+    if (text === null)
+      continue;
+    for (const name of fontsIn(text, STYLE.test(f), stacks))
+      fonts.set(name.toLowerCase(), name);
+  }
+  return { families: [...fonts.values()].sort(), stacks: [...stacks].sort() };
+}
+function discoverFonts(original, io) {
+  return scanFonts(original, io).families;
+}
+function discoverFontStacks(original, io) {
+  return scanFonts(original, io).stacks;
+}
+var STYLE = /\.(?:css|scss|sass|less)$/i;
+var TAG = /<([A-Za-z][\w.]*)((?:\s[^<>]*?)?)\/?>/g;
+var BUTTON_NAME = /(?:^|\s)name\s*=\s*(?:\{\s*)?["'`]([^"'`{}$]+)["'`]/;
+var TOOLTIP_ATTR = /\b(data-tooltip-id|data-tip-id|data-tooltip|aria-describedby)\s*=\s*(?:\{\s*)?["'`]([^"'`{}$]+)["'`]/g;
+var TOOLTIP_FLAG = /(?:^|\s)(?:title|data-tooltip|data-tip)(?=[\s=/>]|$)/;
+var ELEMENT_ID = /\b(?:id|data-testid)\s*[=:]\s*(?:\{\s*)?["'`]([^"'`{}$]+)["'`]/;
+function idsIn(text, buttons, tooltips) {
+  for (const m of text.matchAll(TAG)) {
+    const attrs = m[2];
+    const isButton = /^button$/i.test(m[1]) || /\brole\s*=\s*["']button["']/.test(attrs);
+    if (isButton) {
+      const name = BUTTON_NAME.exec(attrs)?.[1];
+      if (name !== undefined)
+        buttons.add(name);
+    }
+    for (const t of attrs.matchAll(TOOLTIP_ATTR)) {
+      const ids = t[1] === "aria-describedby" ? t[2].trim().split(/\s+/) : [t[2]];
+      for (const id of ids)
+        if (id !== "")
+          tooltips.add(id);
+    }
+    const id = ELEMENT_ID.exec(attrs)?.[1];
+    if (id === undefined)
+      continue;
+    if (isButton)
+      buttons.add(id);
+    else if (m[1] === "Tooltip" || TOOLTIP_FLAG.test(attrs.replace(/"[^"]*"|'[^']*'|`[^`]*`/g, "")))
+      tooltips.add(id);
+    else if (/^tip-/.test(id))
+      tooltips.add(id);
+  }
+}
+function discoverButtons(original, io) {
+  const buttons = new Set;
+  const tooltips = new Set;
+  for (const f of io.walk(original, SKIP3)) {
+    if (IS_TEST.test(f) || !CODE2.test(f) && !MARKUP.test(f))
+      continue;
+    const text = io.readFile(join7(original, f));
+    if (text === null)
+      continue;
+    idsIn(text, buttons, tooltips);
+  }
+  return { buttons: [...buttons].sort(), tooltips: [...tooltips].sort() };
+}
+var HOST_URL = /https?:\/\/([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})/g;
+var HOST_FILE = /\.(?:html?|vue|css|scss|sass|less|sql)$/i;
+var SKIP_HOST = /^(?:localhost|127\.|0\.0\.0\.0|(?:www\.)?w3\.org$|(?:www\.)?schema\.org$|json-schema\.org$|xmlns\.com$|example\.(?:com|org|net)$)/i;
+var SDKS = [
+  [/^stripe$|^@stripe\//, "stripe"],
+  [/^@sentry\/|^sentry[-_]sdk$/, "sentry"],
+  [/^@aws-sdk\/|^aws-sdk$|^boto3$/, "aws"],
+  [/^firebase(?:-admin)?(?:\/|$)|^firebase_admin$/, "firebase"],
+  [/^openai$/, "openai"],
+  [/^twilio$/, "twilio"],
+  [/^@slack\/|^slack_sdk$/, "slack"],
+  [/^@anthropic-ai\/sdk$|^anthropic$/, "anthropic"],
+  [/^@sendgrid\//, "sendgrid"]
+];
+var sdkName = (pkg) => SDKS.find(([re]) => re.test(pkg))?.[1] ?? null;
+function discoverServices(original, io) {
+  const out = new Set;
+  for (const f of io.walk(original, SKIP3)) {
+    const isPkg = f === "package.json" || f.endsWith("/package.json");
+    const py = PY.test(f);
+    const plain = HOST_FILE.test(f) || ENV_FILE.test(f.split("/").pop()) && !CODE2.test(f) && !py;
+    if (IS_TEST.test(f) || !isPkg && !plain && !CODE2.test(f) && !py)
+      continue;
+    const raw = io.readFile(join7(original, f));
+    if (raw === null)
+      continue;
+    if (isPkg) {
+      const parsed = readJson(raw);
+      const pkg = parsed.ok && isRec7(parsed.value) ? parsed.value : {};
+      for (const key of ["dependencies", "devDependencies"]) {
+        const deps = pkg[key];
+        if (isRec7(deps))
+          for (const name of Object.keys(deps)) {
+            const c = sdkName(name);
+            if (c !== null)
+              out.add(c);
+          }
+      }
+      continue;
+    }
+    if (plain) {
+      for (const m of raw.matchAll(HOST_URL))
+        if (!SKIP_HOST.test(m[1]))
+          out.add(m[1].toLowerCase());
+      continue;
+    }
+    const text = py ? raw.replace(/^[ \t]*#.*$/gm, "") : raw.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:\\])\/\/[^\n]*/g, "$1");
+    for (const m of text.matchAll(HOST_URL))
+      if (!SKIP_HOST.test(m[1]))
+        out.add(m[1].toLowerCase());
+    const mods = py ? [...text.matchAll(/^[ \t]*(?:import|from)[ \t]+([\w]+)/gm)].map((m) => m[1]) : [...text.matchAll(/(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\(\s*)(["'])([^"']+)\1/g)].map((m) => m[2]);
+    for (const mod of mods) {
+      const c = sdkName(mod);
+      if (c !== null)
+        out.add(c);
+    }
+  }
+  return [...out].sort();
+}
+function pageSlug(path) {
+  const slug = path.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
+  return slug === "" ? "home" : slug;
+}
+function serverToolDirs(list) {
+  const out = [];
+  for (const prefix of ["/opt/homebrew/opt", "/usr/local/opt"]) {
+    for (const name of list(prefix)) {
+      if (/^(?:postgresql|mysql|mariadb|redis|mongodb-community)(?:@.*)?$/.test(name))
+        out.push(`${prefix}/${name}/bin`);
+    }
+  }
+  const app = "/Applications/Postgres.app/Contents/Versions";
+  for (const name of list(app))
+    out.push(`${app}/${name}/bin`);
+  return out;
+}
+function installedServers(map, original, io) {
+  const need = new Set;
+  for (const s of Array.isArray(map.stores) ? map.stores : []) {
+    if (isRec7(s) && typeof s.engine === "string")
+      need.add(s.engine.toLowerCase());
+  }
+  const DEPS = [
+    [/^(?:pg|postgres|pg-promise|@neondatabase\/serverless|@vercel\/postgres|psycopg2?(?:-binary)?|asyncpg)$/, "postgres"],
+    [/^(?:ioredis|redis|redis-py)$/, "redis"],
+    [/^(?:mysql2?|mysqlclient|pymysql)$/, "mysql"],
+    [/^(?:mongodb|mongoose|pymongo)$/, "mongodb"]
+  ];
+  for (const f of io.walk(original, SKIP3)) {
+    const base = f.split("/").pop();
+    const text = /^package\.json$|^requirements[\w.-]*\.txt$|^pyproject\.toml$/.test(base) ? io.readFile(join7(original, f)) : null;
+    if (text === null)
+      continue;
+    let deps;
+    if (base === "package.json") {
+      const parsed = readJson(text);
+      const pkg = parsed.ok && isRec7(parsed.value) ? parsed.value : {};
+      deps = ["dependencies", "devDependencies"].flatMap((k) => isRec7(pkg[k]) ? Object.keys(pkg[k]) : []);
+    } else {
+      deps = [...text.matchAll(/(?:^|["'\s])([A-Za-z][\w.-]*)(?=\s*(?:[=<>~!\[;"',]|$))/gm)].map((m) => m[1].toLowerCase());
+    }
+    for (const d of deps)
+      for (const [re, engine] of DEPS)
+        if (re.test(d))
+          need.add(engine);
+  }
+  const PROGRAMS = [
+    ["postgres", ["postgres", "pg_ctl"]],
+    ["redis", ["redis-server"]],
+    ["mysql", ["mysqld"]],
+    ["mongodb", ["mongod"]]
+  ];
+  const out = [];
+  for (const [engine, programs] of PROGRAMS) {
+    if (!need.has(engine) && !(engine === "mysql" && need.has("mariadb")))
+      continue;
+    const found = programs.find((p) => io.hasTool(p));
+    if (found !== undefined)
+      out.push(found);
+  }
+  return out;
+}
+var readJson = (text) => {
+  if (text === null)
+    return { ok: false, why: "not found" };
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    return { ok: false, why: "not valid JSON" };
+  }
+};
+var DEV_OVERLAY_NAME = /nextjs-portal|nextjs-dev-indicator/i;
+function recordsDevOverlay(value, top = true) {
+  if (typeof value === "string")
+    return DEV_OVERLAY_NAME.test(value);
+  if (Array.isArray(value))
+    return value.some((v) => recordsDevOverlay(v, false));
+  if (isRec7(value)) {
+    if (top && "dev_overlay" in value) {
+      const o = value.dev_overlay;
+      if (Array.isArray(o) && o.length > 0 || typeof o === "string" && o !== "" || o === true || isRec7(o) && Object.keys(o).length > 0)
+        return true;
+    }
+    return Object.entries(value).some(([k, v]) => DEV_OVERLAY_NAME.test(k) || recordsDevOverlay(v, false));
+  }
+  return false;
+}
+function devOverlayStates(mapDir, io) {
+  const out = [];
+  for (const rel of io.walk(join7(mapDir, "design"), [])) {
+    const m = /^pages[/]([^/]+)[/]([^/]+)[.]json$/.exec(rel);
+    if (m === null)
+      continue;
+    const parsed = readJson(io.readFile(join7(join7(mapDir, "design"), rel)));
+    if (parsed.ok && recordsDevOverlay(parsed.value))
+      out.push(`${m[1]}/${m[2]}`);
+  }
+  return out.sort();
+}
+async function checkMap(folder, io, args = []) {
+  const flag = args.findIndex((a) => a === "--original-url" || a.startsWith("--original-url="));
+  const originalUrl = flag < 0 ? "" : args[flag].startsWith("--original-url=") ? args[flag].slice(15) : args[flag + 1] ?? "";
+  const dir = folder === "" ? io.cwd : folder;
+  const original = originalOf(io.readFile(join7(dir, ".dkod/migration.json")));
+  if (original === null) {
+    io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
+    return 2;
+  }
+  const mapDir = join7(dir, ".dkod/map");
+  const problems = [];
+  const missing = [];
+  const noShot = [];
+  const counts = { routes: 0, pages: 0, stores: 0, tables: 0, services: 0, settings: 0, queries: 0, functions: 0, design: 0, found_routes: 0, screenshots: 0, assets: 0 };
+  const parsed = readJson(io.readFile(join7(mapDir, "app-map.json")));
+  const designFiles = new Set(io.walk(join7(mapDir, "design"), []));
+  let map = null;
+  if (!parsed.ok)
+    problems.push(`app-map.json: ${parsed.why}`);
+  else {
+    problems.push(...validateMap(parsed.value));
+    if (isRec7(parsed.value))
+      map = parsed.value;
+  }
+  const list = (key) => map !== null && Array.isArray(map[key]) ? map[key].filter(isRec7) : [];
+  const routes = list("routes");
+  const pages = list("pages");
+  for (const key of ["routes", "pages", "stores", "tables", "services", "settings", "queries", "functions"])
+    counts[key] = map !== null && Array.isArray(map[key]) ? map[key].length : 0;
+  const design = map !== null && isRec7(map.design) ? map.design : {};
+  const designList = (k) => Array.isArray(design[k]) ? design[k].filter((s) => typeof s === "string") : [];
+  counts.design = ["colors", "fonts", "buttons", "tooltips"].reduce((n, k) => n + designList(k).length, 0);
+  const mapped = [];
+  for (const r of routes)
+    if (typeof r.path === "string")
+      mapped.push({ method: typeof r.method === "string" ? toMethod(r.method) : "ANY", path: normalizeRoute(r.path) });
+  for (const r of pages)
+    if (typeof r.path === "string")
+      mapped.push({ method: "GET", path: normalizeRoute(r.path) });
+  const fits = (m, r) => m.method === "ANY" || r.method === "ANY" || m.method === r.method;
+  const found = discoverRoutes(original, io);
+  counts.found_routes = found.length;
+  for (const r of found) {
+    const covered = mapped.some((m) => fits(m, r) && (m.path === r.path || r.relative && m.path.endsWith(r.path)));
+    if (!covered)
+      missing.push(`${r.method} ${r.path}`);
+  }
+  if (found.length === 0 && mapped.length > 0)
+    problems.push("original: no route found in its router files, check that `original` in .dkod/migration.json is the app's folder");
+  const missingTables = [];
+  const missingColumns = [];
+  if (map !== null) {
+    const mappedTables = new Map;
+    for (const t of list("tables")) {
+      if (typeof t.name !== "string")
+        continue;
+      const set = mappedTables.get(t.name.toLowerCase()) ?? new Set;
+      for (const c of Array.isArray(t.columns) ? t.columns : [])
+        if (typeof c === "string")
+          set.add(c.toLowerCase());
+      mappedTables.set(t.name.toLowerCase(), set);
+    }
+    for (const [name, cols] of discoverTables(original, io)) {
+      const have = mappedTables.get(name.toLowerCase());
+      if (have === undefined) {
+        missingTables.push(name);
+        continue;
+      }
+      for (const c of cols)
+        if (!have.has(c.toLowerCase()))
+          missingColumns.push(`${name}.${c}`);
+    }
+  }
+  const mappedSettings = new Set(list("settings").flatMap((s) => typeof s.name === "string" ? [s.name] : []));
+  const missingSettings = map === null ? [] : discoverSettings(original, io).filter((n) => !mappedSettings.has(n));
+  const mappedColors = new Set(designList("colors").map((c) => c.toLowerCase()));
+  const missingColors = map === null ? [] : discoverColors(original, io).filter((c) => !mappedColors.has(c));
+  const mappedFunctions = new Set((map !== null && Array.isArray(map.functions) ? map.functions : []).flatMap((f) => typeof f === "string" ? [f, f.split(/[.:]/).pop()] : []));
+  const missingFunctions = map === null ? [] : discoverFunctions(original, io).filter((n) => !mappedFunctions.has(n));
+  const mappedQueries = new Set((map !== null && Array.isArray(map.queries) ? map.queries : []).flatMap((q) => typeof q === "string" ? [normalizeQuery(q), queryId(q), q.trim()] : []));
+  const missingQueries = map === null ? [] : discoverQueries(original, io).filter((q) => !mappedQueries.has(q) && !mappedQueries.has(queryId(q))).map((q) => q.length <= TEXT_MAX2 ? q : queryId(q));
+  const mappedFonts = new Set(designList("fonts").map((s) => s.toLowerCase()));
+  const coveredFamilies = new Set;
+  if (map !== null) {
+    const mappedStacks = new Set([...mappedFonts].map(normalizeFontStack));
+    for (const stack of discoverFontStacks(original, io)) {
+      const families = stack.replace(/!important/gi, "").split(",").map((p) => p.trim().replace(/^["'`]+|["'`]+$/g, "").trim()).filter((n) => n !== "" && !GENERIC_FONT.test(n) && !/var\(|\$\{|[(){}]/.test(n));
+      if (mappedStacks.has(normalizeFontStack(stack))) {
+        for (const n of families)
+          coveredFamilies.add(n.toLowerCase());
+      }
+    }
+  }
+  const missingFonts = map === null ? [] : discoverFonts(original, io).filter((s) => !mappedFonts.has(s.toLowerCase()) && !coveredFamilies.has(s.toLowerCase()));
+  const mappedButtons = new Set(designList("buttons"));
+  const mappedTooltips = new Set(designList("tooltips"));
+  const ids = map === null ? { buttons: [], tooltips: [] } : discoverButtons(original, io);
+  const missingButtons = [...ids.buttons, ...ids.tooltips].filter((id) => !mappedButtons.has(id) && !mappedTooltips.has(id));
+  const mappedServices = list("services").flatMap((s) => typeof s.name === "string" ? [s.name.toLowerCase()] : []);
+  const missingServices = map === null ? [] : discoverServices(original, io).filter((h) => !mappedServices.some((n) => n.includes(h)));
+  const missingPagesRuntime = [];
+  const cannotRun = map !== null && typeof map.original_cannot_run === "string" && map.original_cannot_run.trim() !== "";
+  let runtime = "not checked";
+  if (originalUrl === "" && flag >= 0)
+    problems.push("runtime: --original-url needs a base URL like http://localhost:3000");
+  else if (originalUrl !== "") {
+    const getPaths = mapped.filter((m) => m.method === "GET" || m.method === "ANY").map((m) => m.path);
+    const live = await discoverRuntime(originalUrl, getPaths, found.filter((r) => r.method === "GET" && !r.relative).map((r) => r.path), io);
+    if (!live.answered)
+      problems.push(`runtime: ${originalUrl} did not answer`);
+    else {
+      runtime = "checked";
+      const have = (path) => mapped.some((m) => m.path === path);
+      for (const p of live.pages)
+        if (!have(p))
+          missingPagesRuntime.push(`GET ${p}`);
+      for (const p of live.routes)
+        if (!have(p) && !live.pages.includes(p) && !missing.includes(`GET ${p}`))
+          missing.push(`GET ${p}`);
+      if (map !== null) {
+        for (const c of live.colors)
+          if (!mappedColors.has(c) && !missingColors.includes(c))
+            missingColors.push(c);
+        for (const s of live.fonts)
+          if (!mappedFonts.has(s.toLowerCase()) && !coveredFamilies.has(s.toLowerCase()) && !missingFonts.some((x) => x.toLowerCase() === s.toLowerCase()))
+            missingFonts.push(s);
+        for (const id of [...live.buttons, ...live.tooltips])
+          if (!mappedButtons.has(id) && !mappedTooltips.has(id) && !missingButtons.includes(id))
+            missingButtons.push(id);
+      }
+    }
+  }
+  if (cannotRun && originalUrl === "" && map !== null) {
+    const servers = installedServers(map, original, io);
+    if (servers.length > 0)
+      problems.push(`original_cannot_run: ${servers.join(", ")} ${servers.length === 1 ? "is" : "are"} installed on this computer; start ${servers.length === 1 ? "it" : "them"} and run the original, then pass --original-url`);
+  }
+  if (runtime === "not checked" && originalUrl === "" && flag < 0) {
+    io.print("runtime: not checked");
+    if (!cannotRun)
+      problems.push("runtime: not checked. Run the original and pass --original-url http://localhost:<port>, or set original_cannot_run in the map to the reason it cannot run");
+  }
+  for (const page of pages) {
+    if (typeof page.path !== "string")
+      continue;
+    const slug = pageSlug(page.path);
+    const states = new Set(["default", ...Array.isArray(page.states) ? page.states.filter((s) => typeof s === "string") : []]);
+    for (const state of states) {
+      const base = `pages/${slug}/${state}`;
+      if (designFiles.has(`${base}.png`))
+        counts.screenshots = (counts.screenshots ?? 0) + 1;
+      else if (state === "default")
+        noShot.push(page.path);
+      else
+        problems.push(`design/${base}.png: missing, the page ${page.path} lists the state ${state}`);
+      if (!designFiles.has(`${base}.json`))
+        problems.push(`design/${base}.json: missing, computed styles of ${page.path} (${state})`);
+    }
+  }
+  const devOverlayPages = devOverlayStates(mapDir, io);
+  for (const s of devOverlayPages)
+    problems.push(`design/pages/${s}.json: the capture shows a framework dev overlay (dev_overlay). Run the original's production build and start (Next.js: next build, then next start), never a dev server, and capture ${s} again`);
+  const byImage = new Map;
+  for (const page of pages) {
+    if (typeof page.path !== "string")
+      continue;
+    const rel = `pages/${pageSlug(page.path)}/default.png`;
+    if (!designFiles.has(rel))
+      continue;
+    const sha = io.sha256([join7(join7(mapDir, "design"), rel)]);
+    byImage.set(sha, [...byImage.get(sha) ?? [], page.path]);
+  }
+  const shotPages = [...byImage.values()].reduce((n, g) => n + g.length, 0);
+  const placeholders = [...byImage.values()].filter((g) => g.length >= 3 || g.length === shotPages && shotPages >= 2).flat();
+  const assets = readJson(io.readFile(join7(mapDir, "assets/assets.json")));
+  if (!assets.ok)
+    problems.push(`assets/assets.json: ${assets.why}`);
+  else if (!Array.isArray(assets.value))
+    problems.push("assets/assets.json: must be a list of {kind, path}");
+  else {
+    const originalFiles = new Set(io.walk(original, SKIP3));
+    counts.assets = assets.value.length;
+    assets.value.forEach((a, i) => {
+      if (!isRec7(a))
+        return problems.push(`assets[${i}]: must be an object {kind, path}`);
+      if (typeof a.kind !== "string" || !ASSET_KINDS.includes(a.kind))
+        problems.push(`assets[${i}].kind: must be one of ${ASSET_KINDS.join(", ")}`);
+      if (typeof a.path !== "string" || !safeFile(a.path))
+        problems.push(`assets[${i}].path: must be a path inside the original, with no '..'`);
+      else if (!originalFiles.has(a.path))
+        problems.push(`assets[${i}].path: ${a.path} is not a file in the original`);
+    });
+  }
+  const lists = {
+    route: missing,
+    page: missingPagesRuntime,
+    table: missingTables,
+    column: missingColumns,
+    setting: missingSettings,
+    color: missingColors,
+    function: missingFunctions,
+    query: missingQueries,
+    font: missingFonts,
+    button: missingButtons,
+    service: missingServices
+  };
+  const justified = Object.fromEntries(NOT_MAPPED_KINDS.map((k) => [k, 0]));
+  const missingCount = {};
+  const entries = map !== null && Array.isArray(map.not_mapped) ? map.not_mapped : [];
+  const same = (kind, a, b) => kind === "query" ? a.trim() === b || normalizeQuery(a) === b || queryId(a) === b : kind === "color" || kind === "service" ? a.toLowerCase() === b.toLowerCase() : a.trim() === b;
+  entries.forEach((e, i) => {
+    if (!isRec7(e) || typeof e.kind !== "string" || typeof e.name !== "string" || typeof e.why !== "string" || e.why.trim() === "")
+      return;
+    const list = lists[e.kind];
+    if (list === undefined)
+      return;
+    const kind = e.kind;
+    const name = e.name;
+    const at = list.findIndex((item) => same(kind, name, item));
+    if (at < 0) {
+      problems.push(`not_mapped[${i}]: ${kind} ${name.slice(0, 80)} is not something check-map found missing, remove the entry`);
+      return;
+    }
+    list.splice(at, 1);
+    justified[kind] = (justified[kind] ?? 0) + 1;
+  });
+  for (const k of NOT_MAPPED_KINDS)
+    missingCount[k] = lists[k].length;
+  missingCount.total = NOT_MAPPED_KINDS.reduce((n, k) => n + lists[k].length, 0);
+  const report = {
+    ok: problems.length === 0 && devOverlayPages.length === 0 && placeholders.length === 0 && runtime === (cannotRun && originalUrl === "" ? "not checked" : "checked") && missingPagesRuntime.length === 0 && missing.length === 0 && noShot.length === 0 && missingTables.length === 0 && missingColumns.length === 0 && missingSettings.length === 0 && missingColors.length === 0 && missingFunctions.length === 0 && missingQueries.length === 0 && missingFonts.length === 0 && missingButtons.length === 0 && missingServices.length === 0,
+    counts,
+    missing_routes: missing,
+    missing_pages_runtime: missingPagesRuntime,
+    runtime,
+    missing_tables: missingTables,
+    missing_columns: missingColumns,
+    missing_settings: missingSettings,
+    missing_colors: missingColors,
+    missing_functions: missingFunctions,
+    missing_queries: missingQueries,
+    missing_fonts: missingFonts,
+    missing_buttons: missingButtons,
+    missing_services: missingServices,
+    justified,
+    missing_count: { total: missingCount.total, ...Object.fromEntries(NOT_MAPPED_KINDS.map((k) => [k, missingCount[k]])) },
+    pages_without_screenshot: noShot,
+    placeholder_screenshots: placeholders,
+    dev_overlay_pages: devOverlayPages,
+    problems
+  };
+  io.print(JSON.stringify(report));
+  return report.ok ? 0 : 1;
 }
 
 function walk(dir, skip) {
@@ -2559,7 +3958,7 @@ function walk(dir, skip) {
     for (const name of names) {
       if (skip.includes(name))
         continue;
-      const full = join7(at, name);
+      const full = join8(at, name);
       const next = rel === "" ? name : `${rel}/${name}`;
       if (statSync(full).isDirectory())
         visit(full, next);
@@ -2584,7 +3983,7 @@ var io = {
     writeFileSync(path, text, "utf8");
   },
   sha256: (paths) => {
-    const hash = createHash("sha256");
+    const hash = createHash2("sha256");
     for (const path of paths)
       hash.update(readFileSync(path));
     return hash.digest("hex");
@@ -2597,7 +3996,16 @@ var io = {
   rm: (path, opts) => rmSync(path, { recursive: opts.recursive ?? false, force: opts.force ?? false }),
   mkdtemp: (prefix) => mkdtempSync(prefix),
   tmpdir,
-  hasTool: (program) => (process.env.PATH ?? "").split(process.platform === "win32" ? ";" : ":").some((dir) => dir !== "" && existsSync(join7(dir, program))),
+  hasTool: (program) => [
+    ...(process.env.PATH ?? "").split(process.platform === "win32" ? ";" : ":"),
+    ...serverToolDirs((dir) => {
+      try {
+        return readdirSync(dir);
+      } catch {
+        return [];
+      }
+    })
+  ].some((dir) => dir !== "" && existsSync(join8(dir, program))),
   print: (line) => process.stdout.write(`${line}
 `),
   run: (cmd, args, env, cwd) => new Promise((resolve) => {

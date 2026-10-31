@@ -4,7 +4,11 @@
 # same thing byte for byte (same files, same headers, same sha256); keep the four in step.
 #
 #   python3 dkod-pack.py pack [<folder>]                    -> {"file","sha256","bytes","files"[,"git"]}
-#   python3 dkod-pack.py put <file> <url> ["Name: value"...] -> {"ok":true,"status":200}
+#   python3 dkod-pack.py put <file> --ticket <ticket>        -> {"ok":true,"status":200}
+#
+# DKO-1382: the agent holds only the one-use upload_ticket from dkoder.source.target. `put` trades
+# it at POST /api/v1/dkoder/source/put-args for put_args (single-quoted words, the URL first, then
+# 'Name: value' headers), so the signed URL never reaches the agent's screen. No URL, --args or stdin.
 #
 # The headers are written by hand rather than with tarfile: tarfile's device fields and name split
 # differ across Python versions, and the sha256 must match the other three scripts.
@@ -24,10 +28,16 @@ import urllib.parse
 MAX_FILES = 20000
 MAX_FILE_BYTES = 4 * 1024 * 1024
 MAX_TOTAL_BYTES = 64 * 1024 * 1024
-SKIP_DIRS = {".git", "node_modules", "dist", "build", ".next", "out", ".turbo", ".cache", "coverage", "venv", ".venv", "__pycache__"}
+SKIP_DIRS = {".git", "node_modules", "dist", "build", ".next", "out", ".turbo", ".cache", "coverage", "venv", ".venv", "__pycache__", "test-results", "playwright-report", "graphify-out"}
 WINDOWS = os.name == "nt"
 CONTROL = re.compile(r"[\x00-\x1f\x7f]")
-USAGE = 'usage: dkod-pack pack [<folder>] | put <file> <url> ["Name: value"...]'
+USAGE = "usage: dkod-pack pack [<folder>] | put <file> --ticket <upload_ticket>"
+NO_PUT = "refused: use --ticket <upload_ticket> from dkoder.source.target; an upload URL, --args and stdin are not accepted"
+BAD_TICKET = "refused: the upload ticket is not valid; call dkoder.source.target again"
+EXPIRED = "upload failed: the upload ticket expired or was already used. Call dkoder.source.target again for a new one, then run put with the new --ticket."
+TICKET_HOST = re.compile(r"^[A-Za-z0-9.:\[\]-]+$")
+LOCAL_HOST = re.compile(r"^(127\.0\.0\.1|localhost)(:\d+)?$")
+BAD_ARGS = "refused: put_args must be single-quoted words, the URL first"
 
 
 class Refusal(Exception):
@@ -89,6 +99,50 @@ def git_facts(root):
         json.dumps(os.path.basename(root)), json.dumps(branch), head, int(at.strip()), dirty)
 
 
+def glob_regex(s):
+    re_s = ""
+    for c in s:
+        re_s += "[^/]*" if c == "*" else "[^/]" if c == "?" else re.escape(c)
+    return re.compile("^" + re_s + "$", re.S)
+
+
+def ignore_rules(root):
+    """DKO-1407: outside git, the root .gitignore: plain names, `dir/`, `/anchored`, `a/b`, `*` and `?`.
+    No negation, no `**`, no nested .gitignore. A name matches any segment; a `dir/` pattern only a
+    folder (a non-final segment); an anchored one a leading run of segments."""
+    try:
+        with open(os.path.join(root, ".gitignore"), "rb") as f:
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+    rules = []
+    for raw in text.split("\n"):
+        line = raw.strip(" \t\r")
+        if line == "" or line.startswith("#") or line.startswith("!"):
+            continue
+        dir_only = line.endswith("/")
+        anchored = "/" in line.rstrip("/")
+        parts = [glob_regex(s) for s in line.split("/") if s != ""]
+        if parts:
+            rules.append((dir_only, anchored, parts))
+    return rules
+
+
+def ignored(path, rules):
+    segs = path.split("/")
+    for dir_only, anchored, parts in rules:
+        if not anchored:
+            if any((not dir_only or i < len(segs) - 1) and parts[0].match(s) for i, s in enumerate(segs)):
+                return True
+            continue
+        k = len(parts)
+        if (k >= len(segs)) if dir_only else (k > len(segs)):
+            continue
+        if all(parts[i].match(segs[i]) for i in range(k)):
+            return True
+    return False
+
+
 def candidates(root):
     """Candidate paths, relative to root with forward slashes, before the common filters."""
     if in_git_tree(root):
@@ -109,7 +163,8 @@ def candidates(root):
                     out.append(path)
 
     walk(root, "")
-    return out
+    rules = ignore_rules(root)
+    return [p for p in out if not ignored(p, rules)] if rules else out
 
 
 def check_path(path):
@@ -212,6 +267,55 @@ def pack(folder):
         json.dumps(out), digest.hexdigest(), count[0], len(files), "" if git is None else ',"git":' + git)
 
 
+def split_put_args(text):
+    """The words of a put_args string: each one in single quotes, split by spaces. Never echoes the input."""
+    s = text.strip()
+    words = []
+    i = 0
+    while i < len(s):
+        if s[i] != "'":
+            raise Refusal(BAD_ARGS)
+        end = s.find("'", i + 1)
+        if end < 0:
+            raise Refusal(BAD_ARGS)
+        words.append(s[i + 1:end])
+        i = end + 1
+        while i < len(s) and s[i].isspace():
+            i += 1
+    if not words:
+        raise Refusal(BAD_ARGS)
+    return words
+
+
+def trade_ticket(ticket):
+    """DKO-1382: trades the ticket ('<host>~<org>~<slot>~<secret>') for put_args. Never prints the ticket, the URL or the body."""
+    parts = ticket.split("~")
+    host = parts[0]
+    if len(parts) != 4 or not TICKET_HOST.match(host):
+        raise Refusal(BAD_TICKET)
+    conn_class = http.client.HTTPConnection if LOCAL_HOST.match(host) else http.client.HTTPSConnection
+    try:
+        conn = conn_class(host, timeout=60)
+        try:
+            conn.request("POST", "/api/v1/dkoder/source/put-args", json.dumps({"ticket": ticket}), {"Content-Type": "application/json"})
+            res = conn.getresponse()
+            data = res.read()
+            status = res.status
+        finally:
+            conn.close()
+    except (OSError, http.client.HTTPException, ValueError):
+        raise Refusal("upload failed: could not connect")
+    if status in (404, 410):
+        raise Refusal(EXPIRED)
+    if status != 200:
+        raise Refusal("upload failed: HTTP %d" % status)
+    try:
+        text = data.decode("utf-8")
+    except ValueError:
+        raise Refusal(BAD_ARGS)
+    return split_put_args(text)
+
+
 def put(file, url, header_args):
     u = urllib.parse.urlsplit(url)
     host = u.hostname or ""
@@ -263,7 +367,7 @@ def put(file, url, header_args):
         raise Refusal("upload failed: could not connect")
     # A 403 from S3 means the presigned link no longer works: it expired, or it was used.
     if status == 403:
-        raise Refusal("upload failed: the upload link expired or was already used. Call dkoder.source.target again for a new one, then run put with the new put_args.")
+        raise Refusal(EXPIRED)
     if status < 200 or status > 299:
         raise Refusal("upload failed: HTTP %d" % status)
     os.remove(file)
@@ -279,8 +383,11 @@ def put(file, url, header_args):
 def main(argv):
     if argv and argv[0] == "pack" and len(argv) <= 2:
         return pack(argv[1] if len(argv) == 2 else ".")
-    if argv and argv[0] == "put" and len(argv) >= 3:
-        return put(argv[1], argv[2], argv[3:])
+    if argv and argv[0] == "put" and len(argv) >= 2:
+        if len(argv) != 4 or argv[2] != "--ticket":
+            raise Refusal(NO_PUT)
+        words = trade_ticket(argv[3])
+        return put(argv[1], words[0], words[1:])
     raise Refusal(USAGE)
 
 

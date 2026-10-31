@@ -1101,11 +1101,112 @@ function readPack(raw) {
   return { version: 1, rules };
 }
 
+var ACCEPT = [
+  "application/vnd.oci.image.index.v1+json",
+  "application/vnd.docker.distribution.manifest.list.v2+json",
+  "application/vnd.oci.image.manifest.v1+json",
+  "application/vnd.docker.distribution.manifest.v2+json"
+].join(", ");
+var REGISTRY = "https://registry-1.docker.io/v2";
+var TIMEOUT_MS = 5000;
+var isRec = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+function fromDigests(text) {
+  const out = [];
+  const stages = new Set;
+  text.split(`
+`).forEach((raw, i) => {
+    const m = /^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?/i.exec(raw);
+    if (m === null)
+      return;
+    const image = m[1] ?? "";
+    if (m[2] !== undefined)
+      stages.add(m[2].toLowerCase());
+    if (image.toLowerCase() === "scratch" || stages.has(image.toLowerCase()) && !image.includes("@"))
+      return;
+    const d = /^(.+?)(?::[^/@:]+)?@(sha256:[0-9a-f]{64})$/i.exec(image);
+    if (d === null)
+      return;
+    let repo = d[1] ?? "";
+    if (/^[^/]*(?:\.|:)|^localhost\//.test(repo))
+      return;
+    if (!repo.includes("/"))
+      repo = `library/${repo}`;
+    out.push({ line: i + 1, image, repo, digest: d[2] ?? "" });
+  });
+  return out;
+}
+async function getJson(fetchFn, url, headers, timeoutMs) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${url}: no answer in ${String(timeoutMs)} ms`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([fetchJson(fetchFn, url, headers, timeoutMs), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function fetchJson(fetchFn, url, headers, timeoutMs) {
+  const res = await fetchFn(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+  if (res.status !== 200)
+    throw new Error(`${url}: HTTP ${String(res.status)}`);
+  const body = await res.json();
+  if (!isRec(body))
+    throw new Error(`${url}: not a JSON object`);
+  return body;
+}
+async function hasAmd64(fetchFn, repo, digest, t) {
+  const tokenRes = await getJson(fetchFn, `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull`, {}, t);
+  const token = typeof tokenRes.token === "string" ? tokenRes.token : typeof tokenRes.access_token === "string" ? tokenRes.access_token : "";
+  const headers = { Accept: ACCEPT, ...token === "" ? {} : { Authorization: `Bearer ${token}` } };
+  const manifest = await getJson(fetchFn, `${REGISTRY}/${repo}/manifests/${digest}`, headers, t);
+  if (Array.isArray(manifest.manifests)) {
+    return manifest.manifests.some((m) => isRec(m) && isRec(m.platform) && m.platform.os === "linux" && m.platform.architecture === "amd64");
+  }
+  if (isRec(manifest.config) && typeof manifest.config.digest === "string") {
+    const config = await getJson(fetchFn, `${REGISTRY}/${repo}/blobs/${manifest.config.digest}`, headers, t);
+    return config.os === "linux" && config.architecture === "amd64";
+  }
+  throw new Error(`${repo}@${digest}: not an index or an image manifest`);
+}
+async function checkFromArch(dockerfileText, fetchFn, path = "Dockerfile", timeoutMs = TIMEOUT_MS) {
+  const result = { problems: [], warnings: [] };
+  const cache = new Map;
+  for (const f of fromDigests(dockerfileText)) {
+    const key = `${f.repo}@${f.digest}`;
+    let p = cache.get(key);
+    if (p === undefined) {
+      p = hasAmd64(fetchFn, f.repo, f.digest, timeoutMs);
+      cache.set(key, p);
+    }
+    try {
+      if (!await p)
+        result.problems.push(`${path}:${String(f.line)}: pinned-base-images: FROM ${f.image} digest has no linux/amd64; pin the multi-arch index digest`);
+    } catch (e) {
+      result.warnings.push(`${path}:${String(f.line)}: FROM ${f.image}: architecture not checked (${e instanceof Error ? e.message : String(e)})`);
+    }
+  }
+  return result;
+}
+
 var POLICY_CHECK_TOOL = "policy_check";
 var POLICY_CHECK_TOOL_FULL = `mcp__dkod__${POLICY_CHECK_TOOL}`;
 var MAX_FOLDER_FILES = 5000;
 var MAX_READ_BYTES = 64 * 1024 * 1024;
 var MAX_SHOWN = 50;
+var DOCKERFILE = /(^|\/)Dockerfile(\.[^/]+)?$/;
+var DEV_DOCKERFILE = /(^|\/)Dockerfile\.dev$/;
+function archFinding(text, level) {
+  const m = /^(.+?):(\d+): (?:pinned-base-images: )?(.*)$/.exec(text);
+  return {
+    rule: "pinned-base-images",
+    check: "dockerfile.from_digest",
+    level,
+    path: m?.[1] ?? null,
+    line: m?.[2] === undefined ? null : Number(m[2]),
+    message: m?.[3] ?? text
+  };
+}
 var refuse = (error, message) => ({ ok: false, error, message });
 function packFromAnswer(raw) {
   const inner = typeof raw === "object" && raw !== null && "structuredContent" in raw ? raw.structuredContent : raw;
@@ -1147,6 +1248,18 @@ async function checkFolder(pack, dir, io) {
     files.push({ path, text });
   }
   const result = evaluate(pack, files, { stage: "build", folder, folderPath: base });
+  const fetchFn = io.fetch ?? globalThis.fetch;
+  for (const f of files) {
+    if (!DOCKERFILE.test(f.path) || DEV_DOCKERFILE.test(f.path) || f.text === "")
+      continue;
+    const arch = await checkFromArch(f.text, fetchFn, f.path);
+    for (const p of arch.problems)
+      result.findings.push(archFinding(p, "block"));
+    for (const w of arch.warnings)
+      result.findings.push(archFinding(w, "warn"));
+    if (arch.problems.length > 0)
+      result.blocked = true;
+  }
   const blocks = result.findings.filter((f) => f.level === "block").length;
   const next = blocks > 0 ? `Fix the ${String(blocks)} block finding${blocks === 1 ? "" : "s"}, then run this check again before you deploy.` : result.findings.length > 0 ? "No block finding. Tell the person about each warn finding." : "Every check passed.";
   return {

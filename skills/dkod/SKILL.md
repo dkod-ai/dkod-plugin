@@ -23,14 +23,29 @@ If a tool says the server needs sign-in, or the DKOD band above the prompt is ye
 - The template is DKOD's choice. Never ask the Builder which template to use, and never ask whether to continue with DKOD's pick. If the pick looks wrong, say so in the result and go on.
 - Push to prod needs no git and no `gh`. Do not check GitHub sign-in, git remotes or repositories.
 - Never run git for the app, not even `git init`: DKOD needs none.
+- Scratch files: at the start of a run make one folder with `mktemp -d` (on Windows, a new folder with a random name under $env:TEMP) and keep every file you write outside the app's folder there: the policy answer, the pack scripts from `dkoder.guide`, the secrets target, the policy pack, the capture script, and the output of your own commands (`curl -o`, `wget -O`, saved answers, notes, logs). Never write to a fixed /tmp/<name>: other users of this computer may own it, and Cursor refuses it.
 
 ## Start a session
 
 Start a session first, before you plan, ask questions, make a folder or write a file, for any code work, not only deploys. The org's templates and policy decide the stack and where things go. In Cursor, Dkoder refuses file writes and commands that change anything until the chat has a session.
 
-1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.17.3"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user in one line that the plugin is updated, read this SKILL.md again from disk, and go on with its new text, not the text loaded earlier in the session. In Cursor that is `dkod-update.mjs` in the `scripts` folder next to this file: it needs no git. Never update the plugin with git. The app key is the app's short name in lowercase kebab-case, usually the app's repository or folder name. If there is no app yet, use the name the user gave; ask only when they gave none.
+1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.17.71"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user in one line that the plugin is updated, read this SKILL.md again from disk, and go on with its new text, not the text loaded earlier in the session. In Cursor that is `dkod-update.mjs` in the `scripts` folder next to this file: it needs no git. Never update the plugin with git. The app key is the app folder's own name (the last part of its path, lowercase kebab-case). Never use a name read from package.json, inventory.json, a README or the chat, even when the user names the app differently. When you are unsure (no folder yet, or the folder's name is not a valid key), ask the user and show the key the folder gives.
+
 2. Call `dkoder.policy` and `dkoder.templates` with the `sessionId`. Follow what they return while you write code. When a template has `content: null`, DKOD could not read it now: work from its `name` and `description`, and do not look for the file anywhere else.
 3. When the user asks for a new app (there is no code for it yet), run the wizard (below) before you plan or write any code.
+
+## Code graph: ask graphify before you read files
+
+Right after the session starts, and before you read or search the project's files, make sure the project has a code graph. graphify (https://github.com/Graphify-Labs/graphify) maps the code once on this computer; then you ask the graph instead of reading file after file. That saves most of the tokens and time a large app costs, above all in a migration.
+
+1. Run `node <scripts>/dkod-graph.mjs ensure <the app's folder>`, as one command on its own. In a migration, the dkod-migrate skill runs it with `--out`, because the original is read only. `<scripts>` is the `scripts` folder next to this file (or `dkod-graph.mjs` from `dkoder.guide`, as in "Send the code").
+2. It installs graphify when it is missing (`uv tool install graphifyy`, else `pipx`), builds or refreshes the graph, and prints one JSON line. Installing is the only step that uses the network. The graph is made on this computer only: graphify has no telemetry, and the script runs it with no AI backend, no AI key, no query log and no tips, so no file and no question leaves the computer. When `installed` is set, tell the builder in one line that graphify was installed.
+3. Read `report` (GRAPH_REPORT.md) first: the main parts of the app and how they connect. Then ask the graph with the commands in `ask`, always through the script: `node <scripts>/dkod-graph.mjs query "<question>" <graph>`, `node <scripts>/dkod-graph.mjs explain "<name>" <graph>`, `node <scripts>/dkod-graph.mjs path "<A>" "<B>" <graph>`. Open a file only where the graph points, and read only the lines you need. Use grep only for what the graph does not hold, such as config values, strings and CSS.
+4. After you change many files, or when an answer looks out of date, run `ensure` again: it refreshes the graph from its cache.
+5. On exit 2, graphify is missing and could not be installed: tell the builder the `install` line once, and work without the graph. On exit 1, tell the builder the `reason` in one line, and work without the graph. Never stop the DKOD work because of the graph.
+
+- The graph stays on this computer. `ensure` adds `graphify-out/` to the app's `.gitignore`, and the pack scripts never send it.
+- Never run `graphify` yourself: only through `dkod-graph.mjs`, which keeps it local. Never run `graphify install`, `graphify hook install` or the `/graphify` skill, and never give graphify an AI backend, an API key or `--backend`: they would send the builder's files to an AI service.
 
 ## New app: the wizard
 
@@ -59,7 +74,7 @@ The org's rules come with checks: `policy_pack` in the answer of `dkoder.policy`
 - In Claude Code, Dkoder runs the checks on every file write and commit. It refuses one that breaks a `block` check and says the file, the line and the rule. Change the code so it follows the rule. Do not try another way around it.
 - Before you send the code, run every check on the app's folder. The code is read on this computer and is not sent.
   - With the tool `policy_check` (Dkoder's own, `mcp__dkod__policy_check`, in Claude Code): call it with the app's folder in `path`.
-  - Without that tool (for example in Cursor), use `dkod-policy.mjs` in the `scripts` folder next to this file (or from `dkoder.guide`, as in "Send the code"). It needs Node (`node -v`). Write the answer of `dkoder.policy`, as it is, to a new file in the system's temp folder, never in the app's folder. Run `node <scripts>/dkod-policy.mjs check <that file> <the app's folder>`. It prints one JSON line. Delete the file after.
+  - Without that tool (for example in Cursor), use `dkod-policy.mjs` in the `scripts` folder next to this file (or from `dkoder.guide`, as in "Send the code"). It needs Node (`node -v`). Write the answer of `dkoder.policy`, as it is, to a new file in the run's scratch folder (`mktemp -d`), never in the app's folder. Run `node <scripts>/dkod-policy.mjs check <that file> <the app's folder>`. It prints one JSON line. Delete the file after.
 - The answer lists `findings`: rule, file, line and what to change. Fix every `block` finding and run the check again until `blocked` is false. Then tell the user each `warn` finding in one line.
 - When there is no Node, tell the user the checks could not run on this computer.
 
@@ -77,7 +92,7 @@ In Cursor, Auto-review can stop each dkod tool call and each DKOD script, and wa
   ```
 
 - `plugin-dkod-dkod` is the plugin's server. `dkod` is a server the user added by hand.
-- In `terminalAllowlist`, write `<scripts>` as the full path of the `scripts` folder next to this file. Cursor then runs each DKOD script with no stop.
+- In `terminalAllowlist`, write `<scripts>` as the full path of the `scripts` folder next to this file. Cursor then runs each DKOD script, the questions to the code graph among them, with no stop.
 - These lists replace the allowlists in Cursor's settings. Copy the entries from there into the file too.
 - Run Mode must be Auto-review, Allowlist or Run Everything. Cursor reads the file again by itself.
 - "Allowlist (with Sandbox)" runs even the allowed DKOD scripts in Cursor's sandbox. The sandbox does not let a command write in `~/.cursor`, so `dkod-update.mjs` cannot update the plugin there. When a DKOD script says "Cursor's sandbox", tell the user: Cursor Settings, Agents, Run Mode: choose "Allowlist". Then run the script again. Cursor can ask once to approve the update; the user clicks Run.
@@ -99,7 +114,7 @@ When the user says "push to prod" (or ship, deploy, go live), do all of these st
 1. Start a session (above).
    - When the app is one DKOD did not build (its code was not made by the wizard or by a DKOD template), or when `dkoder.session.start` answered with a `migration`, do not deploy it: run the `dkod-migrate` skill's steps first. That skill sits next to this one; when it is not on disk, call `dkoder.guide` with `skill: "dkod-migrate"`.
 2. Check the code again, every time, even when it passed before: run every required check script (the PRD's "Required checks", or `policy.required_checks` from `dkoder.policy`) and the policy checks (above). When anything fails, stop: fix it and run all of it again. Ship nothing that fails.
-3. Send the code (below). Run each DKOD script as one command on its own, exactly as `node <scripts>/dkod-pack.mjs ...`. Write `<scripts>` as a full path, with no quotes. Never chain it with another command by `&&` or `;`. Then Cursor's allowlist matches it. When `put` fails with "expired", call `dkoder.source.target` again, then run `put` with the new `put_args`.
+3. Send the code (below). Run each DKOD script as one command on its own, exactly as `node <scripts>/dkod-pack.mjs ...`. Write `<scripts>` as a full path, with no quotes. Never chain it with another command by `&&` or `;`. Then Cursor's allowlist matches it. When `put` fails with "expired", call `dkoder.source.target` again, then run `put <file> --ticket <the new upload_ticket>`.
 4. If the app's folder has a `.env` file, fill the app's secrets from it (Secrets, below). Do not ask first. Use `.env.production` when there is one. Look only at the file names (`ls -a`); never open the file.
 5. Deploy (below). When this app went through the wizard, pass the `deploy_answers` from `dkoder.wizard.prd` as they are, and do not ask the Deploy questions again. When `dkoder.deploy.questions` answers `none: true`, call `dkoder.deploy` with no `deploy_answers`. When the app needs no database, pass `no_database: true`.
 6. Follow the build with `dkoder.build.status` about every 30 seconds until its state is `delivered` or `failed`. Answer its own questions as Deploy step 6 says.
@@ -113,7 +128,7 @@ A person who is not an admin (a Builder) can deploy, follow, answer, fill secret
 
 DKOD builds the code you send it. Send it again after each change, before you deploy. No git is needed. The code goes straight to the organization's own storage; DKOD servers never read it, and DKOD's worker in the organization drops env files and secrets before it commits.
 
-The pack scripts are in the `scripts` folder next to this SKILL.md file. When that folder is not on disk (a cloud session, or this text came from `dkoder.guide`), call `dkoder.guide` with `script` set to the script's name, write its `content` to a new file in the system's temp folder (never in the app's folder), and use that folder as `<scripts>`. They all do the same thing. Use the first one this computer can run:
+The pack scripts are in the `scripts` folder next to this SKILL.md file. When that folder is not on disk (a cloud session, or this text came from `dkoder.guide`), call `dkoder.guide` with `script` set to the script's name, write its `content` to a new file in the run's scratch folder (`mktemp -d`, never the app's folder), and use that folder as `<scripts>`. They all do the same thing. Use the first one this computer can run:
 
 | Check | Script | Run it as |
 | --- | --- | --- |
@@ -124,9 +139,9 @@ The pack scripts are in the `scripts` folder next to this SKILL.md file. When th
 
 On a Mac, `/usr/bin/python3` can be Apple's installer and not Python: running it opens a window that asks to install the developer tools. So on a Mac, when `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails, do not run `python3 -V`: skip that row.
 
-1. Pack: run `<run it as> pack <the app's folder>`. It prints one JSON line: `file` (the archive), `sha256`, `bytes`, `files` and, in a git folder with a commit, `git` (`folder`, `branch`, `head`, `head_at`, `dirty`). It leaves out `.env` files, `.git`, dependencies (`node_modules`, `.venv`) and build output (`dist`, `build`, `.next`), and honors `.gitignore` in a git repository.
+1. Pack: run `<run it as> pack <the app's folder>`. It prints one JSON line: `file` (the archive), `sha256`, `bytes`, `files` and, in a git folder with a commit, `git` (`folder`, `branch`, `head`, `head_at`, `dirty`). It leaves out `.env` files, `.git`, dependencies (`node_modules`, `.venv`), build output (`dist`, `build`, `.next`) and test reports (`test-results`, `playwright-report`), and honors the root `.gitignore` in a git repository and also outside git (plain names, `dir/`, simple `*` globs; a `!` negation line is not supported and is skipped).
 2. Call `dkoder.source.target` with `sessionId`, `appKey`, `sha256` and `bytes`, and `git` as the pack script printed it when it printed one. When the answer has `preflight`, tell the user that one line first (folder, branch, commit, uncommitted files). When it has `warnings`, show each `message` and ask the user once whether to send this code anyway. Run `put` only after they say yes. With no warning, go on without asking.
-3. Upload: run `<run it as> put <file> <put_args>`, with the `put_args` it returned pasted exactly as given. It sends the archive to the organization's storage, then deletes it. `put_args` works once and expires after an hour; do not save it or show it. When `put` fails with "expired", call `dkoder.source.target` again for a new `put_args`.
+3. Upload: run `<run it as> put <file> --ticket <upload_ticket>`, with the `upload_ticket` it returned, exactly as given. The script trades the ticket for the signed upload link itself, so you never write, show or see an upload URL. It sends the archive to the organization's storage, then deletes it. The ticket works once and expires after an hour; do not save it. When `put` fails with "expired", call `dkoder.source.target` again for a new `upload_ticket`.
 4. Call `dkoder.source.done` with `sessionId`, `appKey`, the `slot` and `sha256`. When it answers `working`, call it again. When it answers `pushed`, the app is ready to deploy. When it refuses, tell the user why in one sentence.
 5. If you stop before the upload ran, delete the archive `file`.
 
@@ -147,7 +162,7 @@ The app's secret values never go through you. DKOD never sees them either.
 
 - When the app needs secret values and the user has them in a `.env` file, and you have the tool `secrets_from_env` (Dkoder's own, `mcp__dkod__secrets_from_env`, in Claude Code): call it with the `appKey` and the file's path in `envFile`. Dkoder reads the file on this computer, seals each value for the apps cluster and sends only the sealed text. The answer has names and counts.
 - Without that tool (for example in Cursor), use `dkod-secrets.mjs` in the `scripts` folder next to this file (or from `dkoder.guide`, as in "Send the code"). It needs Node (`node -v`).
-  1. Call `dkoder.secrets.target` with `sessionId` and `appKey`. Write its answer, as it is, to a new file in the system's temp folder, never in the app's folder. It holds names and a public certificate, no value.
+  1. Call `dkoder.secrets.target` with `sessionId` and `appKey`. Write its answer, as it is, to a new file in the run's scratch folder (`mktemp -d`), never in the app's folder. It holds names and a public certificate, no value.
   2. Run `node <scripts>/dkod-secrets.mjs seal <the .env file> <that file>`. It reads the `.env` file and seals each value on this computer. It prints one JSON line: the names and `save`.
   3. When `save` is not null, call `dkoder.secrets.save` with `sessionId`, `appKey`, and `certFingerprint` and `secrets` from `save`, copied exactly.
   4. Delete the file from step 1.
@@ -172,7 +187,7 @@ First call `dkoder.devdb.status` with the app's key. Owner or admin only.
 
 When the plan's `change.kind` is not `none`, do the steps `dkoder.deploy.database` gives, including the `0001_baseline` migration, then run `node "<scripts>/dkod-db.mjs" migrate`. Dev and Prod then start from the same schema.
 
-When the app has a Dev database, start the helper at the start of work, as a BACKGROUND command: `node "<scripts>/dkod-db.mjs" up --app <app key>` (in Claude Code, Bash with `run_in_background`; it stops when the session ends). `<scripts>` is the `scripts` folder next to this file. It needs Node (`node -v`) and this computer's Dkoder device token.
+When the app has a Dev database, start the helper at the start of work, as a BACKGROUND command: `node "<scripts>/dkod-db.mjs" up --app <app key>` (in Claude Code, Bash with `run_in_background`; it stops when the session ends). In Cursor, or any agent with no background tool, run the one command `node "<scripts>/dkod-db.mjs" up --app <app key> --detach` (no `&&`, so the allowlist matches it): it starts the tunnel as a detached process, returns one JSON line once the database answers, and the tunnel keeps running. `node "<scripts>/dkod-db.mjs" down` stops it. `<scripts>` is the `scripts` folder next to this file. It needs Node (`node -v`) and this computer's Dkoder device token.
 
 - It waits (up to 10 minutes, `--wait <seconds>` changes it) until the database answers `select 1`, and prints its ready line only then. If it exits saying the Dev database does not exist, follow that sentence: `dkoder.devdb.status`, then `dkoder.devdb.make` with `confirm: true` when it says `missing`, then run `up` again. Never run Docker or a local Postgres for it.
 - It opens Postgres on `127.0.0.1:6543` and writes `DATABASE_URL` into the app's `.env.local`. The URL has no password: there is none. Never ask the user for a database password, and never put one in a file.
