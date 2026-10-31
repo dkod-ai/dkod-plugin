@@ -24,8 +24,8 @@
 </p>
 
 <p align="center">
-  <a href="#what-it-adds"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-adds-dark.svg"><img src="assets/readme/nav-adds-light.svg" alt="What it adds"></picture></a>
   <a href="#install"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-install-dark.svg"><img src="assets/readme/nav-install-light.svg" alt="Quick install"></picture></a>
+  <a href="#what-it-adds"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-adds-dark.svg"><img src="assets/readme/nav-adds-light.svg" alt="What it adds"></picture></a>
   <a href="#cursor-admin"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-cursor-admin-dark.svg"><img src="assets/readme/nav-cursor-admin-light.svg" alt="Cursor admin"></picture></a>
   <a href="#claude-admin"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-claude-admin-dark.svg"><img src="assets/readme/nav-claude-admin-light.svg" alt="Anthropic admin"></picture></a>
   <a href="#cursor"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-cursor-dark.svg"><img src="assets/readme/nav-cursor-light.svg" alt="Cursor builder"></picture></a>
@@ -37,33 +37,9 @@
   <a href="#limits"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-limits-dark.svg"><img src="assets/readme/nav-limits-light.svg" alt="Limits"></picture></a>
 </p>
 
-<h2 id="what-it-adds"><sub><picture><img src="assets/readme/dot-yellow.svg" width="18" height="10" alt=""></picture>What it adds</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-adds-dark.svg"><img src="assets/readme/h-adds-light.svg" alt="Three parts, one plugin."></picture></h2>
-
-- **MCP server** `dkod`: your org's policy, templates, Deploy questions, Deploy, build answers, Deliver and Remove.
-- **Skill** `dkod`: tells Claude how to use them, in the right order.
-- **Dkoder band and rules**: a band above the prompt shows whether you are signed in to DKOD.<br>DKOD's floor checks every command and file write, and once you sign in, so do your organization's Guard&nbsp;rules.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/band-dark.svg">
-  <img src="assets/readme/band-light.svg" width="100%" alt="The Dkoder band above the Claude Code prompt. Before you sign in it is yellow and says: Sign in to DKOD for Deliver and your organization's Guard rules: type /mcp, pick dkod, then Authenticate. Signed in, it is cyan and says: on, Guard on, refund-admin, Deliver required.">
-</picture>
-
-<h3>Which part is for you</h3>
-
-| You are | You want | Read |
-| -- | -- | -- |
-| <picture><img src="assets/readme/agent-cursor.svg" width="22" height="16" alt=""></picture>A Cursor team admin | The plugin for every member of your Cursor team, with no step on their side | [Cursor org admin](#cursor-admin) |
-| <picture><img src="assets/readme/agent-claude.svg" width="22" height="16" alt=""></picture>An admin of a Claude Team or Enterprise org | The plugin in every Claude Code of your company, and the DKOD server in claude.ai | [Anthropic org admin](#claude-admin) |
-| <picture><img src="assets/readme/agent-cursor.svg" width="22" height="16" alt=""></picture>A builder who uses Cursor | The plugin in your own Cursor, with no admin | [Cursor builder](#cursor) |
-| <picture><img src="assets/readme/agent-claude.svg" width="22" height="16" alt=""></picture>A builder who uses Claude Code | The plugin in your own Claude Code, with no admin | [Claude Code builder](#claude) |
-| <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/agent-codex-dark.svg"><img src="assets/readme/agent-codex-light.svg" width="22" height="16" alt=""></picture>A builder who uses Codex | The plugin in your own Codex CLI, with no admin | [Codex builder](#codex) |
-| <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/agent-copilot-dark.svg"><img src="assets/readme/agent-copilot-light.svg" width="22" height="16" alt=""></picture>A builder who uses GitHub Copilot CLI | The plugin in your own Copilot CLI, with no admin | [Copilot builder](#copilot) |
-
-Not sure? Run the [quick install](#install). It asks the questions.
-
 <h2 id="install"><sub><picture><img src="assets/readme/dot-cyan.svg" width="18" height="10" alt=""></picture>Quick install</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-install-dark.svg"><img src="assets/readme/h-install-light.svg" alt="One line, any agent."></picture></h2>
 
-**For:** one builder on a Mac or Linux computer, in Claude Code, Cursor, Codex, GitHub Copilot CLI, or any of them together.
+**Recommended for everyone.** On a Mac or Linux computer, run this one line. It works for Claude Code, Cursor, Codex and GitHub Copilot CLI, one of them or all of them.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | sh
@@ -101,9 +77,33 @@ curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh
 
 `DKOD_AGENT` is `claude`, `cursor`, `codex`, `copilot` or `all`, with commas between them. `DKOD_CHANNEL` is `stable` or `nightly`. With no terminal and no `DKOD_AGENT`, it upgrades the copies you have, each on its own channel.
 
+<h2 id="what-it-adds"><sub><picture><img src="assets/readme/dot-yellow.svg" width="18" height="10" alt=""></picture>What it adds</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-adds-dark.svg"><img src="assets/readme/h-adds-light.svg" alt="Three parts, one plugin."></picture></h2>
+
+- **MCP server** `dkod`: your org's policy, templates, Deploy questions, Deploy, build answers, Deliver and Remove.
+- **Skill** `dkod`: tells Claude how to use them, in the right order.
+- **Dkoder band and rules**: a band above the prompt shows whether you are signed in to DKOD.<br>DKOD's floor checks every command and file write, and once you sign in, so do your organization's Guard&nbsp;rules.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/band-dark.svg">
+  <img src="assets/readme/band-light.svg" width="100%" alt="The Dkoder band above the Claude Code prompt. Before you sign in it is yellow and says: Sign in to DKOD for Deliver and your organization's Guard rules: type /mcp, pick dkod, then Authenticate. Signed in, it is cyan and says: on, Guard on, refund-admin, Deliver required.">
+</picture>
+
+<h3>Other ways to install</h3>
+
+| You are | You want | Read |
+| -- | -- | -- |
+| <picture><img src="assets/readme/agent-cursor.svg" width="22" height="16" alt=""></picture>A Cursor team admin | The plugin for every member of your Cursor team, with no step on their side | [Cursor org admin](#cursor-admin) |
+| <picture><img src="assets/readme/agent-claude.svg" width="22" height="16" alt=""></picture>An admin of a Claude Team or Enterprise org | The plugin in every Claude Code of your company, and the DKOD server in claude.ai | [Anthropic org admin](#claude-admin) |
+| <picture><img src="assets/readme/agent-cursor.svg" width="22" height="16" alt=""></picture>A builder who uses Cursor | The plugin in your own Cursor, with no admin | [Cursor builder](#cursor) |
+| <picture><img src="assets/readme/agent-claude.svg" width="22" height="16" alt=""></picture>A builder who uses Claude Code | The plugin in your own Claude Code, with no admin | [Claude Code builder](#claude) |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/agent-codex-dark.svg"><img src="assets/readme/agent-codex-light.svg" width="22" height="16" alt=""></picture>A builder who uses Codex | The plugin in your own Codex CLI, with no admin | [Codex builder](#codex) |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/agent-copilot-dark.svg"><img src="assets/readme/agent-copilot-light.svg" width="22" height="16" alt=""></picture>A builder who uses GitHub Copilot CLI | The plugin in your own Copilot CLI, with no admin | [Copilot builder](#copilot) |
+
+The [quick install](#install) above is the recommended way for everyone. Use one of these only when it fits you better.
+
 <h2 id="cursor-admin"><sub><picture><img src="assets/readme/agent-cursor.svg" width="22" height="16" alt=""></picture>Cursor org admin</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-cursor-admin-dark.svg"><img src="assets/readme/h-cursor-admin-light.svg" alt="Your whole team, in Cursor."></picture></h2>
 
-**For:** the admin of a Cursor team. Every member gets the plugin from the team, and Cursor keeps it up to date. Members do not run the installer.
+**For:** the admin of a Cursor team. Every member gets the plugin from the team, and Cursor keeps it up to date. Members do not run the installer. On your own computer, use the [quick install](#install), the recommended way.
 
 1. In the Cursor dashboard, import the GitHub repository `dkod-ai/dkod-plugin` as a team marketplace.
 2. Turn on **Enable Auto Refresh**. Then a new release reaches your team by itself.
@@ -121,7 +121,7 @@ To let the dkod tools run without an approval each time, see [Run the dkod tools
 
 <h2 id="claude-admin"><sub><picture><img src="assets/readme/agent-claude.svg" width="22" height="16" alt=""></picture>Anthropic org admin</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-claude-admin-dark.svg"><img src="assets/readme/h-claude-admin-light.svg" alt="Your whole org, in Claude."></picture></h2>
 
-**For:** the admin of a Claude Team or Enterprise organization. Every Claude Code in your company gets the plugin, and claude.ai gets the DKOD server. Members do not run the installer.
+**For:** the admin of a Claude Team or Enterprise organization. Every Claude Code in your company gets the plugin, and claude.ai gets the DKOD server. Members do not run the installer. On your own computer, use the [quick install](#install), the recommended way.
 
 **Claude Code on your company's computers.** Choose one:
 
@@ -153,13 +153,13 @@ Members then connect it under **Settings → Connectors** and sign in. The serve
 
 **For:** one builder who uses Cursor, when your team admin did not install the plugin for the team. If the plugin shows in Cursor already, your team installed it: skip to step 2.
 
-1. Install it. On macOS or Linux:
+1. Install it with `dk`, the recommended way. On macOS or Linux:
 
    ```sh
    curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | DKOD_AGENT=cursor sh
    ```
 
-   On Windows, in PowerShell:
+   On Windows, `dk` does not run yet. In PowerShell:
 
    ```powershell
    curl.exe -fsSLo "$env:TEMP\dkod-plugin.tar.gz" https://github.com/dkod-ai/dkod-plugin/archive/refs/heads/stable.tar.gz
@@ -220,13 +220,13 @@ This list replaces the MCP allowlist in Cursor's settings, so copy those entries
 
 **For:** one builder who uses Claude Code, when your company did not install DKOD on your computer.
 
-1. Install it, with the script:
+1. Install it with `dk`, the recommended way:
 
    ```sh
    curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | DKOD_AGENT=claude sh
    ```
 
-   Or in Claude Code, with two commands:
+   Or by hand, in Claude Code, with two commands:
 
    ```
    /plugin marketplace add dkod-ai/dkod-plugin@stable
@@ -247,13 +247,13 @@ Until you sign in, the band above the prompt is yellow. To upgrade, run `dk upgr
 
 **For:** one builder who uses the Codex CLI. Codex reads this repository's plugin marketplace.
 
-1. Install it, with the script:
+1. Install it with `dk`, the recommended way:
 
    ```sh
    curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | DKOD_AGENT=codex sh
    ```
 
-   Or with two commands:
+   Or by hand, with two commands:
 
    ```sh
    codex plugin marketplace add dkod-ai/dkod-plugin --ref stable
@@ -272,13 +272,13 @@ In Codex, the plugin gives the `dkod` MCP server, the `dkod` skills and the Dkod
 
 **For:** one builder who uses GitHub Copilot CLI. Copilot reads this repository's plugin marketplace.
 
-1. Install it, with the script:
+1. Install it with `dk`, the recommended way:
 
    ```sh
    curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | DKOD_AGENT=copilot sh
    ```
 
-   Or with two commands:
+   Or by hand, with two commands:
 
    ```sh
    copilot plugin marketplace add https://github.com/dkod-ai/dkod-plugin.git#stable
