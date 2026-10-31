@@ -48,10 +48,10 @@
 
 | You are | You want | Read |
 | -- | -- | -- |
-| A Cursor team admin | The plugin for every member of your Cursor team, with no step on their side | [Cursor org admin](#cursor-admin) |
-| An admin of a Claude Team or Enterprise org | The plugin in every Claude Code of your company, and the DKOD server in claude.ai | [Anthropic org admin](#claude-admin) |
-| A builder who uses Cursor | The plugin in your own Cursor, with no admin | [Cursor builder](#cursor) |
-| A builder who uses Claude Code | The plugin in your own Claude Code, with no admin | [Claude Code builder](#claude) |
+| <picture><img src="assets/readme/agent-cursor.svg" width="22" height="16" alt=""></picture>A Cursor team admin | The plugin for every member of your Cursor team, with no step on their side | [Cursor org admin](#cursor-admin) |
+| <picture><img src="assets/readme/agent-claude.svg" width="22" height="16" alt=""></picture>An admin of a Claude Team or Enterprise org | The plugin in every Claude Code of your company, and the DKOD server in claude.ai | [Anthropic org admin](#claude-admin) |
+| <picture><img src="assets/readme/agent-cursor.svg" width="22" height="16" alt=""></picture>A builder who uses Cursor | The plugin in your own Cursor, with no admin | [Cursor builder](#cursor) |
+| <picture><img src="assets/readme/agent-claude.svg" width="22" height="16" alt=""></picture>A builder who uses Claude Code | The plugin in your own Claude Code, with no admin | [Claude Code builder](#claude) |
 
 Not sure? Run the [quick install](#install). It asks the questions.
 
@@ -83,7 +83,7 @@ curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh
 
 `DKOD_AGENT` is `claude`, `cursor` or `both`. `DKOD_CHANNEL` is `stable` or `nightly`.
 
-<h2 id="cursor-admin"><sub><picture><img src="assets/readme/dot-violet.svg" width="18" height="10" alt=""></picture>Cursor org admin</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-cursor-admin-dark.svg"><img src="assets/readme/h-cursor-admin-light.svg" alt="Your whole team, in Cursor."></picture></h2>
+<h2 id="cursor-admin"><sub><picture><img src="assets/readme/agent-cursor.svg" width="22" height="16" alt=""></picture>Cursor org admin</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-cursor-admin-dark.svg"><img src="assets/readme/h-cursor-admin-light.svg" alt="Your whole team, in Cursor."></picture></h2>
 
 **For:** the admin of a Cursor team. Every member gets the plugin from the team, and Cursor keeps it up to date. Members do not run the installer.
 
@@ -101,7 +101,7 @@ In Cursor, the plugin gives the `dkod` MCP server, the `dkod` skill, an always-o
 
 To let the dkod tools run without an approval each time, see [Run the dkod tools without approval](#cursor).
 
-<h2 id="claude-admin"><sub><picture><img src="assets/readme/dot-orange.svg" width="18" height="10" alt=""></picture>Anthropic org admin</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-claude-admin-dark.svg"><img src="assets/readme/h-claude-admin-light.svg" alt="Your whole org, in Claude."></picture></h2>
+<h2 id="claude-admin"><sub><picture><img src="assets/readme/agent-claude.svg" width="22" height="16" alt=""></picture>Anthropic org admin</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-claude-admin-dark.svg"><img src="assets/readme/h-claude-admin-light.svg" alt="Your whole org, in Claude."></picture></h2>
 
 **For:** the admin of a Claude Team or Enterprise organization. Every Claude Code in your company gets the plugin, and claude.ai gets the DKOD server. Members do not run the installer.
 
@@ -131,7 +131,7 @@ https://dashboard.dkod.app/api/v1/dkoder/mcp
 
 Members then connect it under **Settings → Connectors** and sign in. The server gives the agent the dkod skill and its scripts through the `dkoder.guide` tool. The default **Trusted** network reaches your organization's storage on AWS, Google Cloud and Cloudflare R2.
 
-<h2 id="cursor"><sub><picture><img src="assets/readme/dot-violet.svg" width="18" height="10" alt=""></picture>Cursor builder</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-cursor-dark.svg"><img src="assets/readme/h-cursor-light.svg" alt="Just you, in Cursor."></picture></h2>
+<h2 id="cursor"><sub><picture><img src="assets/readme/agent-cursor.svg" width="22" height="16" alt=""></picture>Cursor builder</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-cursor-dark.svg"><img src="assets/readme/h-cursor-light.svg" alt="Just you, in Cursor."></picture></h2>
 
 **For:** one builder who uses Cursor, when your team admin did not install the plugin for the team. If the plugin shows in Cursor already, your team installed it: skip to step 2.
 
@@ -198,7 +198,7 @@ This list replaces the MCP allowlist in Cursor's settings, so copy those entries
 
 </details>
 
-<h2 id="claude"><sub><picture><img src="assets/readme/dot-orange.svg" width="18" height="10" alt=""></picture>Claude Code builder</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-claude-dark.svg"><img src="assets/readme/h-claude-light.svg" alt="Just you, in Claude Code."></picture></h2>
+<h2 id="claude"><sub><picture><img src="assets/readme/agent-claude.svg" width="22" height="16" alt=""></picture>Claude Code builder</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-claude-dark.svg"><img src="assets/readme/h-claude-light.svg" alt="Just you, in Claude Code."></picture></h2>
 
 **For:** one builder who uses Claude Code, when your company did not install DKOD on your computer.
 
