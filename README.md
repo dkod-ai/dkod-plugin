@@ -47,10 +47,11 @@ curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh
 
 The script installs `dk`, the DKOD plugin manager, in `~/.local/bin`. Then it runs `dk install`, which:
 
-1. Shows each agent, and the plugin version in it.
-2. Asks which agents to install it in or upgrade. Press Enter to upgrade the copies you have. With no copy yet, Enter means every agent it found.
-3. Asks which channel to follow. Choose **stable**, the default.
-4. Installs or upgrades, then tells you what to restart, and how to sign in.
+1. Recommends [graphify](https://github.com/Graphify-Labs/graphify) first, and installs it when you say yes. graphify maps your project's code into a graph on this computer. The DKOD skill builds that graph in your project and asks it instead of reading file after file, so your agent spends far fewer tokens and works faster, above all when it migrates an app to DKOD. Only the code is read, by graphify's local parser: nothing is sent to an AI service.
+2. Shows each agent, and the plugin version in it.
+3. Asks which agents to install it in or upgrade. Press Enter to upgrade the copies you have. With no copy yet, Enter means every agent it found.
+4. Asks which channel to follow. Choose **stable**, the default.
+5. Installs or upgrades, then tells you what to restart, and how to sign in.
 
 It changes nothing before you answer.
 
@@ -66,7 +67,7 @@ After that, `dk` does the rest:
 | `dk install` | Asks which agents and which channel, then installs or upgrades the plugin |
 | `dk upgrade` | Upgrades `dk`, then the plugin in every agent that has it |
 | `dk channel` | Shows the channel. `dk channel nightly` or `dk channel stable` moves `dk` and every installed plugin to it |
-| `dk doctor` | Checks `dk`, each agent, the plugin versions and the DKOD server, and names each issue |
+| `dk doctor` | Checks `dk`, graphify, each agent, the plugin versions and the DKOD server, and names each issue |
 | `dk uninstall` | Asks what to remove: the plugin with its MCP server and skills in each agent, the marketplaces, and `dk`. `dk uninstall --all` removes everything with no question |
 
 `dk` never uses `sudo`, and it does not change a copy that your company or your Cursor team installed. To answer the questions in advance, for example in a script:
@@ -80,7 +81,7 @@ curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh
 <h2 id="what-it-adds"><sub><picture><img src="assets/readme/dot-yellow.svg" width="18" height="10" alt=""></picture>What it adds</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-adds-dark.svg"><img src="assets/readme/h-adds-light.svg" alt="Three parts, one plugin."></picture></h2>
 
 - **MCP server** `dkod`: your org's policy, templates, Deploy questions, Deploy, build answers, Deliver and Remove.
-- **Skill** `dkod`: tells Claude how to use them, in the right order.
+- **Skill** `dkod`: tells Claude how to use them, in the right order.<br>It also builds a [graphify](https://github.com/Graphify-Labs/graphify) code graph of your project, on this computer, and asks it instead of reading file after file: fewer tokens, faster work.
 - **Dkoder band and rules**: a band above the prompt shows whether you are signed in to DKOD.<br>DKOD's floor checks every command and file write, and once you sign in, so do your organization's Guard&nbsp;rules.
 
 <picture>
