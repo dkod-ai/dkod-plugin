@@ -1,22 +1,24 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/readme/hero-dark.svg">
-    <img src="assets/readme/hero-light.svg" width="100%" alt="DKOD plugin for Claude Code and Cursor. Keep your AI agent. Ship by your rules.">
+    <img src="assets/readme/hero-light.svg" width="100%" alt="DKOD plugin for Claude Code, Cursor, Codex and Copilot. Keep your AI agent. Ship by your rules.">
   </picture>
 </p>
 
-<p align="center">Keep using the AI agent you prefer.<br>This plugin brings your company's DKOD into Claude Code and Cursor.</p>
+<p align="center">Keep using the AI agent you prefer.<br>This plugin brings your company's DKOD into Claude Code, Cursor, Codex and GitHub Copilot&nbsp;CLI.</p>
 
 <p align="center">
   <a href="#claude"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/install-claude-code-dark.svg"><img src="assets/readme/install-claude-code-light.svg" height="76" alt="Install in Claude Code"></picture></a>
   <a href="#cursor"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/install-cursor-dark.svg"><img src="assets/readme/install-cursor-light.svg" height="76" alt="Install in Cursor"></picture></a>
+  <a href="#codex"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/install-codex-dark.svg"><img src="assets/readme/install-codex-light.svg" height="76" alt="Install in Codex"></picture></a>
+  <a href="#copilot"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/install-copilot-dark.svg"><img src="assets/readme/install-copilot-light.svg" height="76" alt="Install in Copilot"></picture></a>
   <a href="https://dkod.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/dkod-ai-dark.svg"><img src="assets/readme/dkod-ai-light.svg" height="76" alt="dkod.ai"></picture></a>
 </p>
 
 <p align="center">
   <a href="LICENSE"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/badge-license-dark.svg"><img src="assets/readme/badge-license-light.svg" alt="License: MIT"></picture></a>
   <a href="https://github.com/dkod-ai/dkod-plugin/commits/main"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/badge-version-dark.svg"><img src="assets/readme/badge-version-light.svg" alt="Plugin version"></picture></a>
-  <a href="#install"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/badge-agents-dark.svg"><img src="assets/readme/badge-agents-light.svg" alt="Works in Claude Code and Cursor"></picture></a>
+  <a href="#install"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/badge-agents-dark.svg"><img src="assets/readme/badge-agents-light.svg" alt="Works in Claude Code, Cursor, Codex and Copilot"></picture></a>
   <a href="#what-the-rules-check"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/badge-events-dark.svg"><img src="assets/readme/badge-events-light.svg" alt="Events: none sent"></picture></a>
   <a href="https://dashboard.dkod.app/docs"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/badge-docs-dark.svg"><img src="assets/readme/badge-docs-light.svg" alt="Docs: in the DKOD dashboard"></picture></a>
 </p>
@@ -28,6 +30,8 @@
   <a href="#claude-admin"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-claude-admin-dark.svg"><img src="assets/readme/nav-claude-admin-light.svg" alt="Anthropic admin"></picture></a>
   <a href="#cursor"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-cursor-dark.svg"><img src="assets/readme/nav-cursor-light.svg" alt="Cursor builder"></picture></a>
   <a href="#claude"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-claude-dark.svg"><img src="assets/readme/nav-claude-light.svg" alt="Claude Code builder"></picture></a>
+  <a href="#codex"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-codex-dark.svg"><img src="assets/readme/nav-codex-light.svg" alt="Codex builder"></picture></a>
+  <a href="#copilot"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-copilot-dark.svg"><img src="assets/readme/nav-copilot-light.svg" alt="Copilot builder"></picture></a>
   <a href="#dkoder-and-guard"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-guard-dark.svg"><img src="assets/readme/nav-guard-light.svg" alt="Dkoder and Guard"></picture></a>
   <a href="#what-the-rules-check"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-rules-dark.svg"><img src="assets/readme/nav-rules-light.svg" alt="What the rules check"></picture></a>
   <a href="#limits"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/nav-limits-dark.svg"><img src="assets/readme/nav-limits-light.svg" alt="Limits"></picture></a>
@@ -52,12 +56,14 @@
 | <picture><img src="assets/readme/agent-claude.svg" width="22" height="16" alt=""></picture>An admin of a Claude Team or Enterprise org | The plugin in every Claude Code of your company, and the DKOD server in claude.ai | [Anthropic org admin](#claude-admin) |
 | <picture><img src="assets/readme/agent-cursor.svg" width="22" height="16" alt=""></picture>A builder who uses Cursor | The plugin in your own Cursor, with no admin | [Cursor builder](#cursor) |
 | <picture><img src="assets/readme/agent-claude.svg" width="22" height="16" alt=""></picture>A builder who uses Claude Code | The plugin in your own Claude Code, with no admin | [Claude Code builder](#claude) |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/agent-codex-dark.svg"><img src="assets/readme/agent-codex-light.svg" width="22" height="16" alt=""></picture>A builder who uses Codex | The plugin in your own Codex CLI, with no admin | [Codex builder](#codex) |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/agent-copilot-dark.svg"><img src="assets/readme/agent-copilot-light.svg" width="22" height="16" alt=""></picture>A builder who uses GitHub Copilot CLI | The plugin in your own Copilot CLI, with no admin | [Copilot builder](#copilot) |
 
 Not sure? Run the [quick install](#install). It asks the questions.
 
 <h2 id="install"><sub><picture><img src="assets/readme/dot-cyan.svg" width="18" height="10" alt=""></picture>Quick install</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-install-dark.svg"><img src="assets/readme/h-install-light.svg" alt="One line, any agent."></picture></h2>
 
-**For:** one builder on a Mac or Linux computer, in Claude Code, Cursor or both.
+**For:** one builder on a Mac or Linux computer, in Claude Code, Cursor, Codex, GitHub Copilot CLI, or any of them together.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | sh
@@ -65,10 +71,12 @@ curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh
 
 The script:
 
-1. Finds the plugin where it is installed now, and upgrades it. It asks nothing for this step.
-2. Asks which agent to install it in: Claude Code, Cursor or both.
+1. Shows each agent, and the plugin version in it.
+2. Asks which agents to install it in or upgrade. Press Enter to upgrade the copies you have. With no copy yet, Enter means every agent it found.
 3. Asks which channel to follow. Choose **stable**, the default.
-4. Tells you what to restart, and how to sign in.
+4. Installs or upgrades, then tells you what to restart, and how to sign in.
+
+It changes nothing before you answer.
 
 | Channel | What you get |
 | -- | -- |
@@ -78,10 +86,10 @@ The script:
 Run the same line again to upgrade. It never uses `sudo`, and it does not change a copy that your company or your Cursor team installed. To answer the questions in advance, for example in a script:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | DKOD_AGENT=both DKOD_CHANNEL=stable sh
+curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | DKOD_AGENT=claude,codex DKOD_CHANNEL=stable sh
 ```
 
-`DKOD_AGENT` is `claude`, `cursor` or `both`. `DKOD_CHANNEL` is `stable` or `nightly`.
+`DKOD_AGENT` is `claude`, `cursor`, `codex`, `copilot` or `all`, with commas between them. `DKOD_CHANNEL` is `stable` or `nightly`. With no terminal and no `DKOD_AGENT`, it upgrades the copies you have, each on its own channel.
 
 <h2 id="cursor-admin"><sub><picture><img src="assets/readme/agent-cursor.svg" width="22" height="16" alt=""></picture>Cursor org admin</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-cursor-admin-dark.svg"><img src="assets/readme/h-cursor-admin-light.svg" alt="Your whole team, in Cursor."></picture></h2>
 
@@ -224,6 +232,56 @@ This list replaces the MCP allowlist in Cursor's settings, so copy those entries
 Until you sign in, the band above the prompt is yellow. To upgrade, run the install line again, or run `claude plugin update dkod@dkod-ai` and restart Claude Code.
 
 **Claude Code on the web, or the Desktop app's Cloud:** plugins do not load there. On claude.ai, open **Settings → Connectors**, add a custom connector with `https://dashboard.dkod.app/api/v1/dkoder/mcp` and sign in.
+
+<h2 id="codex"><sub><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/agent-codex-dark.svg"><img src="assets/readme/agent-codex-light.svg" width="22" height="16" alt=""></picture>Codex builder</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-codex-dark.svg"><img src="assets/readme/h-codex-light.svg" alt="Just you, in Codex."></picture></h2>
+
+**For:** one builder who uses the Codex CLI. Codex reads this repository's plugin marketplace.
+
+1. Install it, with the script:
+
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | DKOD_AGENT=codex sh
+   ```
+
+   Or with two commands:
+
+   ```sh
+   codex plugin marketplace add dkod-ai/dkod-plugin --ref stable
+   ```
+
+   ```sh
+   codex plugin add dkod@dkod-ai
+   ```
+
+2. Quit Codex and start it again. When Codex asks to trust the DKOD hook, trust it.
+3. Run `codex mcp login dkod`. You sign in with your company's own sign-in. DKOD never sees a password.
+
+In Codex, the plugin gives the `dkod` MCP server, the `dkod` skills and the Dkoder floor hook. The band runs only in Claude Code. To upgrade, run the install line again, or run `codex plugin marketplace upgrade dkod-ai`, then `codex plugin add dkod@dkod-ai`.
+
+<h2 id="copilot"><sub><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/agent-copilot-dark.svg"><img src="assets/readme/agent-copilot-light.svg" width="22" height="16" alt=""></picture>Copilot builder</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-copilot-dark.svg"><img src="assets/readme/h-copilot-light.svg" alt="Just you, in Copilot."></picture></h2>
+
+**For:** one builder who uses GitHub Copilot CLI. Copilot reads this repository's plugin marketplace.
+
+1. Install it, with the script:
+
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | DKOD_AGENT=copilot sh
+   ```
+
+   Or with two commands:
+
+   ```sh
+   copilot plugin marketplace add https://github.com/dkod-ai/dkod-plugin.git#stable
+   ```
+
+   ```sh
+   copilot plugin install dkod@dkod-ai
+   ```
+
+2. Quit Copilot CLI and start it again.
+3. Type `/mcp` and check `dkod`. When it asks you to sign in, use your company's own sign-in.
+
+In Copilot, the plugin gives the `dkod` MCP server, the `dkod` skills and the Dkoder floor hook. The band runs only in Claude Code. If your organization's Copilot policy blocks third-party MCP servers, ask your GitHub admin to allow DKOD. To upgrade, run the install line again, or run `copilot plugin update dkod@dkod-ai`.
 
 <h2 id="dkoder-and-guard"><sub><picture><img src="assets/readme/dot-mint.svg" width="18" height="10" alt=""></picture>Dkoder and Guard</sub><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/h-guard-dark.svg"><img src="assets/readme/h-guard-light.svg" alt="The floor, plus your rules."></picture></h2>
 
