@@ -7,7 +7,7 @@ description: Use for any request to build, create, change, fix, run, ship, deplo
 
 DKOD is the company's platform. It holds the org's policy, its app templates and its Deploy rules. The `dkod` MCP server that comes with Dkoder gives you its tools; their names end in `dkoder_<name>` (for example `dkoder.deliver`).
 
-If a tool says the server needs sign-in, or the DKOD band above the prompt is yellow, tell the user: Sign in to DKOD at <your DKOD dashboard>/auth/org/start, then connect dkod: in Cursor, Settings, MCP, dkod, Connect; in Claude Code, type /mcp, pick dkod, Authenticate. They sign in with their company's own sign-in. In the Cursor CLI (`cursor-agent`), add the dkod server to `~/.cursor/mcp.json` and run `cursor-agent mcp login dkod` in the project folder; the sign-in is per project folder.
+If a tool says the server needs sign-in, or the DKOD band above the prompt is yellow, tell the user: Sign in to DKOD at <your DKOD dashboard>/auth/org/start, then connect dkod: in Cursor, Settings, MCP, dkod, Connect; in Claude Code, type /mcp, pick dkod, Authenticate. They sign in with their company's own sign-in. In the Cursor CLI (`cursor-agent`), run `dk config cursor-cli` (without `dk`, add the dkod server to `~/.cursor/mcp.json`) and run `cursor-agent mcp login dkod` in the project folder; the sign-in is per project folder.
 
 ## The rules
 
@@ -29,7 +29,7 @@ If a tool says the server needs sign-in, or the DKOD band above the prompt is ye
 
 Start a session first, before you plan, ask questions, make a folder or write a file, for any code work, not only deploys. The org's templates and policy decide the stack and where things go. In Cursor, Dkoder refuses file writes and commands that change anything until the chat has a session.
 
-1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.17.72"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user in one line that the plugin is updated, read this SKILL.md again from disk, and go on with its new text, not the text loaded earlier in the session. In Cursor that is `dkod-update.mjs` in the `scripts` folder next to this file: it needs no git. Never update the plugin with git. The app key is the app folder's own name (the last part of its path, lowercase kebab-case). Never use a name read from package.json, inventory.json, a README or the chat, even when the user names the app differently. When you are unsure (no folder yet, or the folder's name is not a valid key), ask the user and show the key the folder gives.
+1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.17.73"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user in one line that the plugin is updated, read this SKILL.md again from disk, and go on with its new text, not the text loaded earlier in the session. In Cursor that is `dkod-update.mjs` in the `scripts` folder next to this file: it needs no git. Never update the plugin with git. The app key is the app folder's own name (the last part of its path, lowercase kebab-case). Never use a name read from package.json, inventory.json, a README or the chat, even when the user names the app differently. When you are unsure (no folder yet, or the folder's name is not a valid key), ask the user and show the key the folder gives.
 
 2. Call `dkoder.policy` and `dkoder.templates` with the `sessionId`. Follow what they return while you write code. When a template has `content: null`, DKOD could not read it now: work from its `name` and `description`, and do not look for the file anywhere else.
 3. When the user asks for a new app (there is no code for it yet), run the wizard (below) before you plan or write any code.
@@ -80,7 +80,7 @@ The org's rules come with checks: `policy_pack` in the answer of `dkoder.policy`
 
 ## Cursor: allow the dkod tools
 
-In Cursor, Auto-review can stop each dkod tool call and each DKOD script, and wait for the user to approve it. The fix is Cursor's allowlist. When a dkod call or script waits for approval, tell the user this once. Write the file only when the user asks you to.
+In Cursor, Auto-review can stop each dkod tool call and each DKOD script, and wait for the user to approve it. The fix is Cursor's allowlist. When a dkod call or script waits for approval, tell the user this once: run `dk config cursor-allow` in a terminal. It writes the lists below into the file and keeps the rest of it (`dk config cursor-allow off` undoes it). When `dk` is not installed (`command -v dk` prints nothing), write the file only when the user asks you to.
 
 - The file is `~/.cursor/permissions.json`. It applies to all projects. Put these two lists in it:
 

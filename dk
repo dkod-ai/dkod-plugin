@@ -13,7 +13,7 @@
 set -eu
 umask 022
 
-DK_VERSION=1.1.1
+DK_VERSION=1.2.0
 REPO="${DKOD_PLUGIN_REPO:-dkod-ai/dkod-plugin}"
 MARKET=dkod-ai
 PLUGIN_ID="dkod@$MARKET"
@@ -466,7 +466,10 @@ dk $DK_VERSION: the DKOD plugin in Claude Code, Cursor, Codex and GitHub Copilot
   dk upgrade          Upgrades dk, then the plugin in every agent that has it.
   dk channel          Shows the channel. dk channel stable or dk channel nightly switches dk and
                       every installed plugin to it.
-  dk doctor           Checks dk, each agent, the plugin versions and the DKOD server, and names any issue.
+  dk config           Shows the agent settings dk manages. dk config cursor-allow lets Cursor run the
+                      dkod tools and scripts with no approval stop; dk config cursor-cli gives the
+                      Cursor CLI the dkod server. Add off to undo one.
+  dk doctor           Checks dk, graphify, each agent, the plugin versions and the DKOD server, and names any issue.
   dk uninstall        Asks what to remove: the plugin, its MCP server and skills in each agent, and dk.
   dk version          Prints the version of dk.
 
@@ -673,7 +676,9 @@ cmd_doctor() {
     [ "$ch" = "$(dk_channel)" ] || [ ! -f "$DK_CHANNEL_FILE" ] || issue "The plugin follows $ch, dk follows $(dk_channel). Run dk channel $(dk_channel) to align them."
     case $a in
       cursor)
-        command -v node >/dev/null 2>&1 || issue "node is not installed. The DKOD hook in Cursor runs with node." ;;
+        command -v node >/dev/null 2>&1 || issue "node is not installed. The DKOD hook in Cursor runs with node."
+        if [ -f "$CURSOR_PERMISSIONS" ] && json_edit "$CURSOR_PERMISSIONS" allow-has "$(allow_entry || :)" 2>/dev/null; then ok "Cursor runs the dkod tools with no approval stop."
+        else say "  Cursor asks before each dkod tool. To stop that: dk config cursor-allow"; fi ;;
       codex)
         auth=$(codex mcp list 2>/dev/null | awk '$1 == "dkod" { print }')
         if [ -z "$auth" ]; then issue "Codex does not list the dkod MCP server. Run dk install to install the plugin again."
@@ -696,6 +701,7 @@ removable() {
   for d in "$HOME/.claude/skills/dkod" "$HOME/.claude/skills/dkod-migrate"; do [ -d "$d" ] && echo "skill:$d|Claude Code: the skill in $d"; done
   [ -n "$cursor_version" ] && [ -d "$CURSOR_DIR" ] && echo "cursor-plugin|Cursor: the dkod plugin $cursor_version, with its MCP server, skills and rule"
   [ -f "$HOME/.cursor/mcp.json" ] && grep -q '"dkod"' "$HOME/.cursor/mcp.json" && echo "cursor-mcp|Cursor: the dkod MCP server in ~/.cursor/mcp.json"
+  [ -f "$CURSOR_PERMISSIONS" ] && grep -qE '"(plugin-dkod-)?dkod:\*"|/dkod-"' "$CURSOR_PERMISSIONS" && echo "cursor-allow|Cursor: the dkod entries in ~/.cursor/permissions.json"
   [ -n "$codex_version" ] && echo "codex-plugin|Codex: the dkod plugin $codex_version, with its MCP server, skills and hook"
   [ "$codex_app" = true ] && has_marketplace codex && echo "codex-market|Codex: the $MARKET marketplace"
   for d in "${CODEX_HOME:-$HOME/.codex}/skills/dkod" "${CODEX_HOME:-$HOME/.codex}/skills/dkod-migrate"; do [ -d "$d" ] && echo "skill:$d|Codex: the skill in $d"; done
@@ -703,6 +709,132 @@ removable() {
   [ "$copilot_app" = true ] && has_marketplace copilot && echo "copilot-market|GitHub Copilot CLI: the $MARKET marketplace"
   [ -f "$DK_BIN" ] && echo "dk|dk itself ($DK_BIN) and its settings ($CONFIG_DIR)"
   return 0
+}
+
+# --- Cursor settings ------------------------------------------------------------------------------
+# dk config writes the two Cursor settings a builder needs, so no one edits Cursor's JSON by hand:
+#   cursor-allow  ~/.cursor/permissions.json lets the dkod tools and the DKOD scripts run with no approval stop
+#   cursor-cli    ~/.cursor/mcp.json gives cursor-agent (the Cursor CLI) the dkod server
+# Each edit keeps every other entry of the file. It needs node or python3 (Cursor's DKOD hook needs node).
+CURSOR_PERMISSIONS="$HOME/.cursor/permissions.json"
+CURSOR_MCP="$HOME/.cursor/mcp.json"
+ALLOW_MCP="dkod:* plugin-dkod-dkod:*"
+
+# The scripts folder of the DKOD plugin in Cursor: the copy dk installed, else the team marketplace's.
+cursor_scripts() {
+  if [ -d "$CURSOR_DIR/skills/dkod/scripts" ]; then printf '%s' "$CURSOR_DIR/skills/dkod/scripts"; return 0; fi
+  for d in "$HOME"/.cursor/plugins/cache/*/dkod/skills/dkod/scripts "$HOME"/.cursor/plugins/cache/*/dkod/*/skills/dkod/scripts; do
+    [ -d "$d" ] && { printf '%s' "$d"; return 0; }
+  done
+  return 1
+}
+
+# json_edit <file> <op> [args]: ops allow-on <terminal entry> | allow-off <terminal entry> | allow-has | cli-on <url> | cli-off | cli-has.
+# The *-has ops exit 0 when the setting is there. Exit 3: neither node nor python3.
+json_edit() {
+  if command -v node >/dev/null 2>&1; then
+    node -e '
+const fs = require("fs");
+const [file, op, arg = "", mcp = ""] = process.argv.slice(1);
+let j = {};
+try { j = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) { if (e.code !== "ENOENT") { console.error(`${file} is not valid JSON: fix it first.`); process.exit(2); } }
+const MCP = mcp.split(" ").filter(Boolean);
+const list = (k) => (Array.isArray(j[k]) ? j[k] : []);
+const has = () => MCP.every((x) => list("mcpAllowlist").includes(x)) && (arg === "" || list("terminalAllowlist").includes(arg));
+if (op === "allow-has") process.exit(has() ? 0 : 1);
+if (op === "cli-has") process.exit(j.mcpServers && j.mcpServers.dkod ? 0 : 1);
+if (op === "allow-on") {
+  j.mcpAllowlist = [...new Set([...list("mcpAllowlist"), ...MCP])];
+  if (arg) j.terminalAllowlist = [...new Set([...list("terminalAllowlist"), arg])];
+} else if (op === "allow-off") {
+  j.mcpAllowlist = list("mcpAllowlist").filter((x) => !MCP.includes(x));
+  j.terminalAllowlist = list("terminalAllowlist").filter((x) => !(x === arg || /^node .*\/dkod-$/.test(x)));
+} else if (op === "cli-on") {
+  j.mcpServers = { ...(j.mcpServers || {}), dkod: { url: arg } };
+} else if (op === "cli-off") {
+  if (j.mcpServers) delete j.mcpServers.dkod;
+} else process.exit(64);
+fs.mkdirSync(require("path").dirname(file), { recursive: true });
+fs.writeFileSync(file, JSON.stringify(j, null, 2) + "\n");
+' "$1" "$2" "${3:-}" "$ALLOW_MCP"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -I -c '
+import json, os, re, sys
+file, op, arg, mcp = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+j = {}
+if os.path.exists(file):
+    try:
+        j = json.load(open(file))
+    except ValueError:
+        print(f"{file} is not valid JSON: fix it first.", file=sys.stderr); sys.exit(2)
+MCP = [x for x in mcp.split(" ") if x]
+lst = lambda k: j[k] if isinstance(j.get(k), list) else []
+has = lambda: all(x in lst("mcpAllowlist") for x in MCP) and (arg == "" or arg in lst("terminalAllowlist"))
+if op == "allow-has": sys.exit(0 if has() else 1)
+if op == "cli-has": sys.exit(0 if isinstance(j.get("mcpServers"), dict) and "dkod" in j["mcpServers"] else 1)
+if op == "allow-on":
+    j["mcpAllowlist"] = list(dict.fromkeys(lst("mcpAllowlist") + MCP))
+    if arg: j["terminalAllowlist"] = list(dict.fromkeys(lst("terminalAllowlist") + [arg]))
+elif op == "allow-off":
+    j["mcpAllowlist"] = [x for x in lst("mcpAllowlist") if x not in MCP]
+    j["terminalAllowlist"] = [x for x in lst("terminalAllowlist") if not (x == arg or re.match(r"^node .*/dkod-$", x))]
+elif op == "cli-on":
+    j.setdefault("mcpServers", {})["dkod"] = {"url": arg}
+elif op == "cli-off":
+    if isinstance(j.get("mcpServers"), dict): j["mcpServers"].pop("dkod", None)
+else: sys.exit(64)
+os.makedirs(os.path.dirname(file), exist_ok=True)
+open(file, "w").write(json.dumps(j, indent=2) + "\n")
+' "$1" "$2" "${3:-}" "$ALLOW_MCP"
+  else
+    return 3
+  fi
+}
+
+allow_entry() { s=$(cursor_scripts) && printf 'node %s/dkod-' "$s"; }
+
+config_status() {
+  if [ -f "$CURSOR_PERMISSIONS" ] && json_edit "$CURSOR_PERMISSIONS" allow-has "$(allow_entry || :)" 2>/dev/null; then st=on; else st=off; fi
+  printf '  %-14s %-4s Cursor runs the dkod tools and the DKOD scripts with no approval stop.\n' cursor-allow "$st"
+  if [ -f "$CURSOR_MCP" ] && json_edit "$CURSOR_MCP" cli-has 2>/dev/null; then st=on; else st=off; fi
+  printf '  %-14s %-4s The Cursor CLI (cursor-agent) has the dkod server.\n' cursor-cli "$st"
+}
+
+cmd_config() {
+  open_tty
+  item=${1:-}; state=${2:-on}
+  case $state in on|off) ;; *) fail "dk config <setting> takes on or off." ;; esac
+  case $item in
+    '')
+      say "Settings dk manages:"
+      config_status
+      say "Turn one on with: dk config <setting>. Turn it off with: dk config <setting> off."
+      return 0 ;;
+    cursor-allow)
+      entry=$(allow_entry || :)
+      rc=0; json_edit "$CURSOR_PERMISSIONS" "allow-$state" "$entry" || rc=$?
+      [ $rc -ne 3 ] || fail "dk needs node or python3 to edit $CURSOR_PERMISSIONS. Install Node (Cursor's DKOD hook needs it too)."
+      [ $rc -eq 0 ] || fail "Could not edit $CURSOR_PERMISSIONS."
+      if [ "$state" = on ]; then
+        ok "Cursor runs the dkod tools$([ -n "$entry" ] && printf ' and the DKOD scripts') with no approval stop ($CURSOR_PERMISSIONS)."
+        [ -n "$entry" ] || note "The DKOD plugin is not in Cursor yet, so its scripts are not allowed. Run dk install, then dk config cursor-allow again."
+        say "  This file replaces the allowlists in Cursor's settings: if you allowed other tools there, add them to this file too."
+        say "  Cursor's Run Mode must be Auto-review, Allowlist or Run Everything. Cursor reads the file again by itself."
+      else
+        ok "Cursor asks again before each dkod tool and DKOD script ($CURSOR_PERMISSIONS)."
+      fi ;;
+    cursor-cli)
+      rc=0; json_edit "$CURSOR_MCP" "cli-$state" "$MCP_URL" || rc=$?
+      [ $rc -ne 3 ] || fail "dk needs node or python3 to edit $CURSOR_MCP."
+      [ $rc -eq 0 ] || fail "Could not edit $CURSOR_MCP."
+      if [ "$state" = off ]; then ok "The Cursor CLI no longer has the dkod server ($CURSOR_MCP)."; return 0; fi
+      ok "The Cursor CLI has the dkod server ($CURSOR_MCP)."
+      say "  The Cursor CLI signs in per project folder. In each project folder, run: cursor-agent mcp login dkod"
+      if command -v cursor-agent >/dev/null 2>&1 && [ -n "$TTY" ] && yes_no "Sign in for this folder ($(pwd)) now?" y; then
+        cursor-agent mcp login dkod <&3 || note "The sign-in did not finish. Run it again: cursor-agent mcp login dkod"
+      fi ;;
+    *) fail "Unknown setting: $item. dk config lists them." ;;
+  esac
 }
 
 # Removes the dkod entry from a JSON file of MCP servers, with node or python3. 1 when neither is here.
@@ -722,6 +854,7 @@ remove_item() {
     claude-market) claude plugin marketplace remove "$MARKET" >/dev/null ;;
     claude-mcp) claude mcp remove dkod --scope user >/dev/null 2>&1 || claude mcp remove dkod >/dev/null ;;
     cursor-plugin) rm -rf "$CURSOR_DIR" "$CURSOR_CHANNEL_FILE" ;;
+    cursor-allow) json_edit "$CURSOR_PERMISSIONS" allow-off "$(allow_entry || :)" ;;
     cursor-mcp) drop_json_key "$HOME/.cursor/mcp.json" || { note "Remove the \"dkod\" entry from ~/.cursor/mcp.json by hand: dk needs node or python3 to edit it."; return 0; } ;;
     codex-plugin) codex plugin remove "$PLUGIN_ID" >/dev/null ;;
     codex-market) codex plugin marketplace remove "$MARKET" >/dev/null ;;
@@ -758,7 +891,7 @@ cmd_uninstall() {
     yes_no "Remove $(printf '%s\n' $picks | sort -un | wc -l | tr -d ' ') item(s)?" n || { ok "Nothing removed."; return 0; }
   fi
   # The plugins first, so a marketplace is never removed under its own plugin; dk last.
-  for kind in plugin mcp skill market dk; do
+  for kind in plugin mcp allow skill market dk; do
     for n in $(printf '%s\n' $picks | sort -un); do
       line=$(printf '%s\n' "$list" | sed -n "${n}p")
       id=${line%%|*}; what=${line#*|}
@@ -776,6 +909,7 @@ case ${1:-help} in
   uninstall|remove) shift; cmd_uninstall "${1:-}" ;;
   doctor) cmd_doctor ;;
   channel) shift; cmd_channel "${1:-}" ;;
+  config) shift; cmd_config "${1:-}" "${2:-on}" ;;
   version|--version|-v) say "dk $DK_VERSION" ;;
   help|--help|-h) cmd_help ;;
   __upgrade-plugins) upgrade_plugins ;;
