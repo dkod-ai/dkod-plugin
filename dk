@@ -879,7 +879,8 @@ remove_item() {
     copilot-plugin) copilot plugin uninstall "$PLUGIN_ID" >/dev/null ;;
     copilot-market) copilot plugin marketplace remove "$MARKET" --force >/dev/null ;;
     skill:*) rm -rf "${1#skill:}" ;;
-    dk) rm -f "$DK_BIN" "$DK_BIN.cmd"; rm -rf "$CONFIG_DIR" ;;
+    # On Windows dk.cmd is running this: it deletes itself once dk is gone (install.ps1).
+    dk) rm -f "$DK_BIN"; rm -rf "$CONFIG_DIR" ;;
   esac
 }
 

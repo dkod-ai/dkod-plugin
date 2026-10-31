@@ -993,12 +993,17 @@ async function runImport(flags, io, cwd) {
     } catch {}
     const r = rec;
     const dbs = r && r.mode === "snapshot" && Array.isArray(r.databases) ? r.databases : [];
-    const found = dbs.map((d) => d.url).find((u) => typeof u === "string" && /^postgres(ql)?:\/\//i.test(u));
-    if (!found) {
+    const pg = dbs.find((d) => typeof d.url === "string" && /^postgres(ql)?:\/\//i.test(d.url));
+    if (!pg) {
       say(`The snapshot has no Postgres scratch database. ${IMPORT_LOCAL_ONLY}`);
       return 2;
     }
-    sourceRaw = found;
+    const base = pg.base?.url;
+    if (typeof base !== "string" || !/^postgres(ql)?:\/\//i.test(base)) {
+      say("The snapshot has no untouched base copy (made by an older plugin). Run `dkod-migrate.mjs snapshot` again, rerun the suite on the original and freeze again.");
+      return 2;
+    }
+    sourceRaw = base;
     snapshotMode = true;
   }
   let source;
@@ -1089,7 +1094,7 @@ async function runImport(flags, io, cwd) {
   if (srcCols.status !== 0)
     return failed("Could not read the original's tables.", srcCols.stderr);
   const sourceCols = readCols(srcCols.stdout);
-  const checked = Object.keys(frozenData.tables).filter((n) => !frozenData.suite_writes.includes(n));
+  const checked = Object.keys(frozenData.tables).filter((n) => snapshotMode || !frozenData.suite_writes.includes(n));
   const frozenRefs = checked.filter((n) => sourceCols.has(n)).map((name) => ({ name, cols: sourceCols.get(name) }));
   const sourceNow = await tallies(sourceUrl, frozenRefs, srcEnv, io.run, dir);
   if (sourceNow === null)

@@ -70,10 +70,14 @@
     if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force }
   }
 
-  # dk.cmd lets cmd and PowerShell run `dk ...`: it hands dk to Git Bash.
+  # dk.cmd lets cmd and PowerShell run `dk ...`: it hands dk to Git Bash and returns dk's exit code. Once
+  # `dk uninstall` removed dk, dk.cmd deletes itself: `(goto)` ends the batch first, so cmd never looks
+  # for the deleted file ("The batch file cannot be found").
   Set-Content -LiteralPath (Join-Path $binDir 'dk.cmd') -Encoding ASCII -Value @(
     '@echo off',
-    "`"$bash`" `"%~dp0dk`" %*"
+    "`"$bash`" `"%~dp0dk`" %*",
+    'if exist "%~dp0dk" exit /b %errorlevel%',
+    '(goto) 2>nul & del "%~f0"'
   )
 
   # The user PATH, for every new terminal, and this session's, so dk works at once.

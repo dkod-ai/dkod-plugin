@@ -2588,7 +2588,12 @@ async function copyDatabase(value, scratch, id, io) {
       return null;
     if ((await io.run("psql", [...connect, "-d", name, "-f", dump], env, io.cwd)).status !== 0)
       return null;
-    return { name, url: withDatabase(value, name) };
+    const baseName = `${name}_base`;
+    if ((await io.run("createdb", [...connect, baseName], env, io.cwd)).status !== 0)
+      return null;
+    if ((await io.run("psql", [...connect, "-d", baseName, "-f", dump], env, io.cwd)).status !== 0)
+      return null;
+    return { name, url: withDatabase(value, name), base: { name: baseName, url: withDatabase(value, baseName) } };
   }
   for (const tool of ["mysqldump", "mysql"])
     if (!io.hasTool(tool))
@@ -2628,8 +2633,11 @@ async function removeSnapshot(dir, io) {
   if (record !== null) {
     if (typeof record.scratch === "string" && record.scratch !== "")
       io.rm(record.scratch, { recursive: true, force: true });
-    for (const db of record.databases ?? [])
+    for (const db of record.databases ?? []) {
       await dropDatabase(db, io);
+      if (db.base)
+        await dropDatabase(db.base, io);
+    }
   }
   io.rm(snapshotPath(dir), { force: true });
   return record;
@@ -2666,8 +2674,9 @@ async function snapshot(folder, io) {
         const source = localDatabase(value);
         if (source.protocol.startsWith("postgres")) {
           const env2 = connection(source).env;
-          const cols = await readColumns(db.url, null, env2, io.run, io.cwd);
-          const got = cols === null ? null : await tallies(db.url, [...cols].map(([name, c]) => ({ name, cols: c })), env2, io.run, io.cwd);
+          const from = db.base?.url ?? db.url;
+          const cols = await readColumns(from, null, env2, io.run, io.cwd);
+          const got = cols === null ? null : await tallies(from, [...cols].map(([name, c]) => ({ name, cols: c })), env2, io.run, io.cwd);
           if (got !== null)
             Object.assign(db, { tables: got });
         }
@@ -2697,7 +2706,7 @@ async function clean(folder, io) {
   const dir = folder === "" ? io.cwd : folder;
   const record = await removeSnapshot(dir, io);
   io.rm(recordPath(dir), { force: true });
-  io.print(JSON.stringify({ ok: true, mode: "clean", removed: record?.scratch ?? null, databases: (record?.databases ?? []).map((d) => d.name) }));
+  io.print(JSON.stringify({ ok: true, mode: "clean", removed: record?.scratch ?? null, databases: (record?.databases ?? []).flatMap((d) => d.base ? [d.name, d.base.name] : [d.name]) }));
   return 0;
 }
 async function runMigrateCli(argv, io) {
