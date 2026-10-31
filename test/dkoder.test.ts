@@ -166,11 +166,14 @@ const DELIVER = 'mcp__plugin_dkod_dkod__dkoder_deliver'
 async function staleRun($: any, on: any, versions: string[]) {
   host(on, 'git@github.com:dkod-demo/rc-news-app.git')
   let at = 0
-  let asked = 0
   on('clock.now', () => ({ value: at }))
+  // The band's animation timer: never fired here, so the stale note comes from the tool calls alone.
+  on('clock.every', () => ({ value: { id: 'stale-test' } }))
   on('mcp.connect', () => ({ value: { isConnected: true, server: 'plugin:dkod:dkod' } }))
+  // The server's tool list version by time, not by call: session start asks more than once, so the
+  // first version is the one before the jump and the last one the one after it.
   on('mcp.call', () => {
-    const toolsVersion = versions[Math.min(asked++, versions.length - 1)]
+    const toolsVersion = at === 0 ? versions[0] : versions[versions.length - 1]
     return { value: { content: [{ type: 'text', text: JSON.stringify({ enabled: true, ...CONFIG, toolsVersion }) }] } }
   })
   on('session.start', ($: any, e: any) => ({ cwd: e.cwd }))
