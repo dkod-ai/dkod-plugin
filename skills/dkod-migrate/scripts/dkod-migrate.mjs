@@ -251,6 +251,18 @@ function readFreezeData(text) {
   }
   return { database: typeof d.database === "string" ? d.database : "", tables: tablesOut, suite_writes: d.suite_writes.filter((s) => typeof s === "string") };
 }
+async function rowHashes(url, tables, env, run, cwd = ".") {
+  const out = {};
+  for (const t of tables) {
+    const sql = `SELECT md5(r::text) FROM (SELECT ${t.cols.map(quoteIdent).join(", ")} FROM public.${quoteIdent(t.name)}) r ORDER BY 1;`;
+    const res = await run("psql", [...PSQL, "--dbname", url, "-c", PG_SETTINGS, "-c", sql], env, cwd);
+    if (res.status !== 0)
+      return null;
+    out[t.name] = res.stdout.split(`
+`).map((l) => l.trim()).filter((l) => /^[0-9a-f]{32}$/.test(l));
+  }
+  return out;
+}
 async function devDrift(dir, io) {
   const snap = json(io.readFile(join(dir, ".dkod/snapshot.json")));
   if (!isRec(snap) || snap.mode !== "snapshot" || snap.imported !== true)
@@ -281,10 +293,87 @@ async function devDrift(dir, io) {
   const now = await tallies(devUrl, refs, { ...PG_TIMEOUT, PGSSLMODE: "disable" }, run, dir);
   if (now === null)
     return noPassword ? [NO_PASSWORD] : unreadable;
-  return changedTables(before, now).map((n) => {
+  const problems = changedTables(before, now).map((n) => {
     const t = now[n];
     return `Dev changed after the import: db:seed or hand-written rows (${n}: ${t === undefined ? "table missing" : `${String(t.rows)} rows`}, imported ${String(before[n].rows)}). Never run db:seed or insert rows after \`dkod-db.mjs import\`; import again into an empty Dev.`;
   });
+  const rowRefs = [];
+  for (const [name, t] of Object.entries(imported)) {
+    if (!allowed.has(name) || !isRec(t) || !Array.isArray(t.cols) || !Array.isArray(t.row_md5))
+      continue;
+    rowRefs.push({ name, cols: t.cols.filter((c) => typeof c === "string"), rows: Number(t.rows), row_md5: t.row_md5.filter((h) => typeof h === "string") });
+  }
+  if (rowRefs.length > 0) {
+    const nowRows = await rowHashes(devUrl, rowRefs, { ...PG_TIMEOUT, PGSSLMODE: "disable" }, run, dir);
+    if (nowRows === null)
+      return noPassword ? [NO_PASSWORD] : unreadable;
+    for (const r of rowRefs) {
+      const left = new Map;
+      for (const h of nowRows[r.name])
+        left.set(h, (left.get(h) ?? 0) + 1);
+      let lost = 0;
+      for (const h of r.row_md5) {
+        const c = left.get(h) ?? 0;
+        if (c > 0)
+          left.set(h, c - 1);
+        else
+          lost++;
+      }
+      if (lost > 0)
+        problems.push(`Dev changed after the import: ${String(lost)} imported rows of ${r.name} are missing or edited (${String(r.row_md5.length)} imported). Never edit or delete Dev rows by hand; import again into an empty Dev. The suite's own @data rows are fine.`);
+    }
+  }
+  return problems;
+}
+var REFERENCE_CHANGED = (what) => `the original's reference data changed after the freeze (${what}): snapshot/import is the only source of reference rows. If the capture missed a fixture state, unfreeze, run snapshot again, redo the map and suite, and freeze again; never insert rows.`;
+async function referenceDrift(dir, io) {
+  const snap = json(io.readFile(join(dir, ".dkod/snapshot.json")));
+  if (!isRec(snap) || snap.mode !== "snapshot")
+    return [];
+  const problems = [];
+  const frozen = readFreezeData(io.readFile(join(dir, ".dkod/parity/freeze.json")));
+  let noPassword = false;
+  const run = async (cmd, args, env, cwd) => {
+    const res = await io.run(cmd, args, env, cwd);
+    if (res.status !== 0 && isNoPassword(res.stderr))
+      noPassword = true;
+    return res;
+  };
+  const env = { ...PG_TIMEOUT, PGSSLMODE: "disable" };
+  const unreadable = ["The original's snapshot data cannot be read to check it after the freeze: start the snapshot's Postgres server and run this again."];
+  if (frozen !== null && Object.keys(frozen.tables).length > 0 && Array.isArray(snap.databases)) {
+    const pg = snap.databases.find((d) => isRec(d) && typeof d.url === "string" && /^postgres(ql)?:\/\//i.test(d.url));
+    if (pg !== undefined) {
+      const names = Object.keys(frozen.tables);
+      const scratchNames = names.filter((n) => !frozen.suite_writes.includes(n));
+      const scratch = await tallyNamed(pg.url, scratchNames, env, run, dir);
+      if (scratch === null)
+        return noPassword ? [NO_PASSWORD] : unreadable;
+      for (const n of changedTables(Object.fromEntries(scratchNames.filter((s) => frozen.tables[s] !== undefined).map((s) => [s, frozen.tables[s]])), scratch.tallies))
+        problems.push(REFERENCE_CHANGED(`${n} in the snapshot database`));
+      const base = isRec(pg.base) && typeof pg.base.url === "string" ? pg.base.url : "";
+      if (base !== "") {
+        const copy = await tallyNamed(base, names, env, run, dir);
+        if (copy === null)
+          return noPassword ? [NO_PASSWORD] : unreadable;
+        for (const n of changedTables(frozen.tables, copy.tallies))
+          problems.push(REFERENCE_CHANGED(`${n} in the base copy`));
+      }
+    }
+  }
+  if (io.sha256 !== undefined && Array.isArray(snap.bases)) {
+    for (const b of snap.bases) {
+      if (!isRec(b) || typeof b.base !== "string" || typeof b.sha256 !== "string")
+        continue;
+      let now = "";
+      try {
+        now = io.sha256([b.base]);
+      } catch {}
+      if (now !== b.sha256)
+        problems.push(REFERENCE_CHANGED(`the base file ${typeof b.rel === "string" ? b.rel : "?"}`));
+    }
+  }
+  return problems;
 }
 async function migrationRows(dir, io) {
   let noPassword = false;
@@ -2099,6 +2188,19 @@ var TITLE = /\b(?:test|it)(?:\.(?:only|fixme|slow))?\(\s*(["'`])((?:\\.|(?!\1)[^
 var isRec4 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 var list2 = (v) => Array.isArray(v) ? v.filter(isRec4) : [];
 var same2 = (a, b) => a.trim().replace(/\s+/g, " ").toLowerCase() === b.trim().replace(/\s+/g, " ").toLowerCase();
+function mapFiles(dir, io) {
+  return io.walk(join3(dir, ".dkod/map"), ["node_modules"]).map((rel) => `.dkod/map/${rel}`).sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
+}
+var mapSha256 = (dir, io) => io.sha256([...mapFiles(dir, io)].map((f) => join3(dir, f)));
+function mapDrift(dir, frozen, io) {
+  if (typeof frozen.map_sha256 !== "string")
+    return [];
+  let now = "";
+  try {
+    now = mapSha256(dir, io);
+  } catch {}
+  return now === frozen.map_sha256 ? [] : [".dkod/map: the migration map (app-map.json or the design files) changed after the freeze (sha256 differs). Put the frozen map back; to change it, unfreeze, redo the map and the suite, and freeze again."];
+}
 var freezePath = (dir) => join3(dir, ".dkod/parity/freeze.json");
 function testBlocks(text) {
   const ms = [...text.matchAll(TITLE)];
@@ -2351,6 +2453,14 @@ async function freeze(folder, reportFile, io) {
     for (const n of mapped)
       frozenTables[n] = before[n];
     frozenData = { database: typeof pg.name === "string" ? pg.name : "", tables: frozenTables, suite_writes: changedTables(frozenTables, now.tallies) };
+    if (isRec4(pg.base) && typeof pg.base.url === "string") {
+      const copy = await tallyNamed(pg.base.url, mapped, {}, io.run, dir);
+      if (copy === null)
+        return fail(io, { problems: [`The snapshot's base copy cannot be read to check it. ${again}`] });
+      const moved = changedTables(frozenTables, copy.tallies);
+      if (moved.length > 0)
+        return fail(io, { problems: [`The snapshot's base copy differs from the snapshot's tallies (${moved.join(", ")}): the reference data was changed. ${again}`] });
+    }
   }
   const flatBases = isRec4(snap) && snap.mode === "snapshot" ? list2(snap.bases).filter((b) => (b.kind === "csv" || b.kind === "json") && typeof b.file === "string" && typeof b.rel === "string" && typeof b.sha256 === "string") : [];
   if (pg === undefined && flatBases.length > 0) {
@@ -2369,7 +2479,7 @@ async function freeze(folder, reportFile, io) {
   }
   const files = suiteFiles(dir, io);
   const sha256 = io.sha256(files.map((f) => join3(dir, f)));
-  const record = { sha256, files, baseline: { tests: run.map((t) => t.title), passed: passed.size }, frozenAt: new Date().toISOString(), platform: process.platform, data: frozenData };
+  const record = { sha256, files, baseline: { tests: run.map((t) => t.title), passed: passed.size }, frozenAt: new Date().toISOString(), platform: process.platform, data: frozenData, map_sha256: mapSha256(dir, io) };
   io.writeFile(freezePath(dir), `${JSON.stringify(record, null, 2)}
 `);
   io.print(JSON.stringify({ ok: true, sha256, counts: { tests: run.length, tagged, original_passed: passed.size, original_failed: 0 }, missing, original_failures: [] }));
@@ -2475,6 +2585,7 @@ async function checkBuild(folder, reportFile, io) {
     if (files.length === 0 || io.sha256(files.map((f) => join4(dir, f))) !== record.sha256) {
       problems.push("tests/parity: the suite changed after the freeze (sha256 differs). Put the frozen files back; never edit them.");
     }
+    problems.push(...mapDrift(dir, record, io));
     const reportText = reportFile === undefined ? null : io.readFile(reportFile);
     const run = reportText === null ? null : reportTests(reportText);
     if (reportFile === undefined)
@@ -2610,6 +2721,7 @@ async function checkBuild(folder, reportFile, io) {
     }
   }
   problems.push(...await devDrift(dir, io));
+  problems.push(...await referenceDrift(dir, io));
   problems.push(...await migrationRows(dir, io));
   if (io.readFile(join4(dir, ".env.local")) !== null && !ignoresEnvLocal(io.readFile(join4(dir, ".gitignore")) ?? "")) {
     problems.push(".env.local: not covered by .gitignore. Add it before anything is committed.");
@@ -2769,6 +2881,7 @@ async function sideBySide(folder, originalReport, dkReport, io, args = []) {
     if (files.length === 0 || io.sha256(files.map((f) => join6(dir, f))) !== record.sha256) {
       problems.push("tests/parity: the suite changed after the freeze (sha256 differs). Put the frozen files back; never edit them.");
     }
+    problems.push(...mapDrift(dir, record, io));
     const load = (file, label) => {
       const text = file === undefined ? null : io.readFile(file);
       const run = text === null ? null : reportTests(text);
@@ -2828,6 +2941,7 @@ async function sideBySide(folder, originalReport, dkReport, io, args = []) {
   const snapshot = json4(io.readFile(join6(dir, ".dkod/snapshot.json")));
   const dataImported = isRec6(snapshot) && snapshot.mode === "snapshot" && snapshot.imported === true;
   problems.push(...await devDrift(dir, io));
+  problems.push(...await referenceDrift(dir, io));
   const runDir = flagValue(args, "--run-dir");
   let serversStopped = null;
   if (runDir !== undefined && runDir !== "") {

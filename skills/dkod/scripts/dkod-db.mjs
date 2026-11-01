@@ -708,6 +708,7 @@ function connectWebSocket(rawUrl, headers, handlers) {
   };
 }
 
+var ROW_HASH_CAP = 20000;
 var NO_PASSWORD = "Postgres refused the connection, the key is missing or wrong. Put the right one in the PGPASSWORD env var or in ~/.pgpass, then run again.";
 var isNoPassword = (stderr) => /fe_sendauth: no password supplied|password authentication failed/i.test(stderr);
 var PG_TIMEOUT = { PGCONNECT_TIMEOUT: "10" };
@@ -794,6 +795,29 @@ function readFreezeData(text) {
     tablesOut[n] = { rows: t.rows, md5: t.md5 };
   }
   return { database: typeof d.database === "string" ? d.database : "", tables: tablesOut, suite_writes: d.suite_writes.filter((s) => typeof s === "string") };
+}
+async function rowHashes(url, tables, env, run, cwd = ".") {
+  const out = {};
+  for (const t of tables) {
+    const sql = `SELECT md5(r::text) FROM (SELECT ${t.cols.map(quoteIdent).join(", ")} FROM public.${quoteIdent(t.name)}) r ORDER BY 1;`;
+    const res = await run("psql", [...PSQL, "--dbname", url, "-c", PG_SETTINGS, "-c", sql], env, cwd);
+    if (res.status !== 0)
+      return null;
+    out[t.name] = res.stdout.split(`
+`).map((l) => l.trim()).filter((l) => /^[0-9a-f]{32}$/.test(l));
+  }
+  return out;
+}
+async function addRowHashes(imported, writes, url, env, run, cwd = ".") {
+  const refs = Object.entries(imported).filter(([n, t]) => writes.includes(n) && t.rows > 0 && t.rows <= ROW_HASH_CAP).map(([name, t]) => ({ name, cols: t.cols, rows: t.rows }));
+  if (refs.length === 0)
+    return;
+  const got = await rowHashes(url, refs, env, run, cwd);
+  if (got === null)
+    return;
+  for (const r of refs)
+    if (got[r.name].length === r.rows)
+      imported[r.name].row_md5 = got[r.name];
 }
 
 var DB_APP_KEY = /^[a-z0-9][a-z0-9-]{0,62}$/;
@@ -1690,6 +1714,7 @@ END $$;
   inOrder.forEach((t, i) => {
     importedTables[t.name] = { cols: t.cols, rows: actual[i].rows, md5: actual[i].md5 };
   });
+  await addRowHashes(importedTables, readFreezeData(io.readFile(join2(c.dir, ".dkod/parity/freeze.json")))?.suite_writes ?? [], c.devUrl, c.devEnv, io.run, c.dir);
   let record = null;
   try {
     record = JSON.parse(io.readFile(c.snapshotFile) ?? "null");
@@ -1842,6 +1867,7 @@ END $$;
   tables.forEach((t, i) => {
     importedTables[t.name] = { cols: t.cols, rows: actual[i].rows, md5: actual[i].md5 };
   });
+  await addRowHashes(importedTables, readFreezeData(io.readFile(join2(c.dir, ".dkod/parity/freeze.json")))?.suite_writes ?? [], c.devUrl, c.devEnv, io.run, c.dir);
   let record = null;
   try {
     record = JSON.parse(io.readFile(c.snapshotFile) ?? "null");
@@ -2162,6 +2188,7 @@ END $$;
   inOrder.forEach((t, i) => {
     importedTables[t.name] = { cols: t.cols, rows: report[i].dev.rows, md5: report[i].dev.md5 };
   });
+  await addRowHashes(importedTables, frozenData.suite_writes, devUrl, devEnv, io.run, dir);
   const marks = { imported: true, imported_tables: importedTables, dev_url: devUrl };
   let record = null;
   try {

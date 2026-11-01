@@ -3703,6 +3703,34 @@ function parityRefusal() {
     message: "The parity suite (tests/parity/) is frozen: its sha256 was reported with the run on the original, and a changed suite would not match it. To change it, run dkod-migrate.mjs unfreeze <folder> and start the attempt again (dkoder.migrate.start)."
   };
 }
+var SQL_WRITE = /\b(?:insert\s+into|update\s+[\w."`\[\]]+\s+set|delete\s+from|truncate(?:\s+table)?\s+[\w"`]|drop\s+(?:table|database|schema|index|view|sequence)|alter\s+(?:table|database|schema|sequence)|replace\s+into|copy\s+[^;]*?\s+from\b)|(?:^|[\s'"])\.import\s/i;
+var SQL_CLIENT = /\b(?:psql|sqlite3|pg_restore)\b/;
+var INLINE_SCRIPT = /\b(?:bun|bunx|node|deno|python3?|ruby|perl)\s+(?:-[\w-]+\s+)*(?:-e|-c|-p|--eval)\b/;
+function sqlFilesOf(command) {
+  const out = [];
+  for (const m of command.matchAll(/(?:\s-f\s*|\s--file[=\s]\s*|\s<\s*|\.read\s+)([^\s;&|<>'"]+)/g))
+    out.push(m[1]);
+  for (const m of command.matchAll(/\b(?:cat|head|tail|tac)\s+([^;&|]*)\|\s*(?:\S*\/)?(?:psql|sqlite3)\b/g)) {
+    for (const t of m[1].split(/\s+/))
+      if (t !== "" && !t.startsWith("-"))
+        out.push(t.replace(/^['"]|['"]$/g, ""));
+  }
+  return out;
+}
+function writesSql(command, fileTexts = []) {
+  if (SQL_CLIENT.test(command)) {
+    if (/\bpg_restore\b/.test(command) && !/\s(?:-l|--list)\b/.test(command) && !(/\s(?:-f|--file)\b/.test(command) && !/\s(?:-d|--dbname)\b/.test(command)))
+      return true;
+    return SQL_WRITE.test(command) || fileTexts.some((t) => SQL_WRITE.test(t));
+  }
+  return INLINE_SCRIPT.test(command) && SQL_WRITE.test(command);
+}
+function sqlWriteRefusal() {
+  return {
+    rule: "parity-frozen",
+    message: "The parity suite is frozen, so the original's reference data (the snapshot, its base copy, the map and the baselines) and Dev rows cannot be changed by hand: no INSERT, UPDATE, DELETE, TRUNCATE, DROP, ALTER or COPY ... FROM through psql, sqlite3, pg_restore or an inline script. Snapshot and `node dkod-db.mjs import` are the only source of reference rows. If a fixture state is missing, unfreeze (dkod-migrate.mjs unfreeze <folder>), run snapshot again, redo the map and the suite, and freeze again. `bun run db:migrate`, the import, read only queries and playwright test still run."
+  };
+}
 var DELIVER = "App code ships through Deliver (the dkoder.deliver tool), never a direct push or merge.";
 function governanceMessage(repo) {
   return `${repo} is your org's governance repo. It changes only through the DKOD dashboard, by an org admin. Dkoder does not push, merge or write to it.`;
@@ -4652,6 +4680,14 @@ Do not try another way to run it. Tell the person why, and offer the allowed way
     const suite = await frozenSuite(io);
     if (suite !== null && changesOriginal(suite, await io.cwd(), await io.home() ?? "", cmds))
       return refuse(io, "Bash", [parityRefusal()], "write");
+    if (suite !== null) {
+      const cwd = (await io.cwd()).replace(/\/$/, "");
+      const texts = [];
+      for (const f of sqlFilesOf(command))
+        texts.push(await readOrNull(io, f.startsWith("/") ? f : `${cwd}/${f}`) ?? "");
+      if (writesSql(command, texts))
+        return refuse(io, "Bash", [sqlWriteRefusal()], "write");
+    }
     const at = await migrationAt(io);
     const record = at?.record ?? null;
     if (at !== null && record !== null) {

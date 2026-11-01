@@ -306,6 +306,36 @@ function frozenSuite(dir) {
 const parityDeny = () =>
   "The parity suite (tests/parity/) is frozen: its sha256 was reported with the run on the original, and a changed suite would not match it. To change it, run dkod-migrate.mjs unfreeze <folder> and start the attempt again (dkoder.migrate.start).";
 
+// DKO-1488: while the suite is frozen, write SQL through psql, sqlite3, pg_restore or an inline script is denied
+// for any store. Same rule as rules.ts writesSql (the Claude guard).
+const SQL_WRITE = /\b(?:insert\s+into|update\s+[\w."`\[\]]+\s+set|delete\s+from|truncate(?:\s+table)?\s+[\w"`]|drop\s+(?:table|database|schema|index|view|sequence)|alter\s+(?:table|database|schema|sequence)|replace\s+into|copy\s+[^;]*?\s+from\b)|(?:^|[\s'"])\.import\s/i;
+const SQL_CLIENT = /\b(?:psql|sqlite3|pg_restore)\b/;
+const INLINE_SCRIPT = /\b(?:bun|bunx|node|deno|python3?|ruby|perl)\s+(?:-[\w-]+\s+)*(?:-e|-c|-p|--eval)\b/;
+
+function writesSql(dir, command) {
+  if (SQL_CLIENT.test(command)) {
+    if (/\bpg_restore\b/.test(command) && !/\s(?:-l|--list)\b/.test(command) && !(/\s(?:-f|--file)\b/.test(command) && !/\s(?:-d|--dbname)\b/.test(command))) return true;
+    if (SQL_WRITE.test(command)) return true;
+    const files = [];
+    for (const m of command.matchAll(/(?:\s-f\s*|\s--file[=\s]\s*|\s<\s*|\.read\s+)([^\s;&|<>'"]+)/g)) files.push(m[1]);
+    for (const m of command.matchAll(/\b(?:cat|head|tail|tac)\s+([^;&|]*)\|\s*(?:\S*\/)?(?:psql|sqlite3)\b/g)) {
+      for (const t of m[1].split(/\s+/)) if (t !== "" && !t.startsWith("-")) files.push(t.replace(/^['"]|['"]$/g, ""));
+    }
+    for (const f of files) {
+      try {
+        if (SQL_WRITE.test(readFileSync(f.startsWith("/") ? f : join(String(dir), f), "utf8"))) return true;
+      } catch {
+        /* an unreadable file is not SQL we can see */
+      }
+    }
+    return false;
+  }
+  return INLINE_SCRIPT.test(command) && SQL_WRITE.test(command);
+}
+
+const sqlDeny = () =>
+  "The parity suite is frozen, so the original's reference data (the snapshot, its base copy, the map and the baselines) and Dev rows cannot be changed by hand: no INSERT, UPDATE, DELETE, TRUNCATE, DROP, ALTER or COPY ... FROM through psql, sqlite3, pg_restore or an inline script. Snapshot and `node dkod-db.mjs import` are the only source of reference rows. If a fixture state is missing, unfreeze (dkod-migrate.mjs unfreeze <folder>), run snapshot again, redo the map and the suite, and freeze again. `bun run db:migrate`, the import, read only queries and playwright test still run.";
+
 /** A posix path with `.`, `..` and duplicate slashes collapsed: the folder the OS writes in. */
 function norm(p) {
   const parts = [];
@@ -955,6 +985,7 @@ if (event === "preToolUse") {
     if (suite !== null && !readOnly(command) && touchesSuite(suite, dir, command)) {
       out({ permission: "deny", user_message: "DKOD: the parity suite is frozen.", agent_message: parityDeny() });
     }
+    if (suite !== null && writesSql(dir, command)) out({ permission: "deny", user_message: "DKOD: the parity suite is frozen, so no SQL writes.", agent_message: sqlDeny() });
     if (original !== null && !readOnly(command) && touchesOriginal(original, dir, command)) {
       out({ permission: "deny", user_message: "DKOD: the original app is read only while a migration is open.", agent_message: migrationDeny(original) });
     }
@@ -1044,6 +1075,7 @@ if (event === "beforeShellExecution" || (event === "" && "command" in input)) {
   if (suite !== null && !readOnly(command) && touchesSuite(suite, dir, command)) {
     out({ permission: "deny", user_message: "DKOD: the parity suite is frozen.", agent_message: parityDeny() });
   }
+  if (suite !== null && writesSql(dir, command)) out({ permission: "deny", user_message: "DKOD: the parity suite is frozen, so no SQL writes.", agent_message: sqlDeny() });
   if (original !== null && !readOnly(command)) {
     if (touchesOriginal(original, dir, command)) {
       out({ permission: "deny", user_message: "DKOD: the original app is read only while a migration is open.", agent_message: migrationDeny(original) });
