@@ -1131,6 +1131,29 @@ function gitignoreCoversEnvLocal(text) {
 `).some((l) => [".env.local", "/.env.local", ".env*", ".env.*", "*.local"].includes(l.trim()));
 }
 var join2 = (dir, name) => dir.endsWith("/") || dir.endsWith("\\") ? `${dir}${name}` : `${dir}/${name}`;
+var trimSlashes = (p) => p.length > 1 ? p.replace(/[\\/]+$/, "") : p;
+function originalFolderRefusal(dir, cwd, readFile) {
+  const here = trimSlashes(resolvePath(cwd, dir));
+  if (readFile(join2(here, ".dkod/migration.json")) != null)
+    return null;
+  const cut = here.lastIndexOf("/");
+  const name = here.slice(cut + 1);
+  if (!name || name.startsWith("dk-"))
+    return null;
+  const dkDir = `${cut > 0 ? here.slice(0, cut) : ""}/dk-${name}`;
+  const raw = readFile(join2(dkDir, ".dkod/migration.json"));
+  if (raw == null)
+    return null;
+  let original;
+  try {
+    original = JSON.parse(raw)?.original;
+  } catch {
+    return null;
+  }
+  if (typeof original !== "string" || trimSlashes(resolvePath(dkDir, original)) !== here)
+    return null;
+  return `${here} is the original app of the migration in ${dkDir}, and the original is read only: run this in the dk- app's folder (--dir ${dkDir}).`;
+}
 async function startUp(flags, io, cwd) {
   const fail = (code, sentence) => {
     io.print(`dkod-db: ${sentence}`);
@@ -1143,6 +1166,9 @@ async function startUp(flags, io, cwd) {
   if (port === null)
     return fail(2, "--port must be a number from 0 to 65535.");
   const dir = flags.get("dir") ?? cwd;
+  const refusal = originalFolderRefusal(dir, cwd, io.readFile);
+  if (refusal)
+    return fail(2, refusal);
   let creds;
   const code = flags.get("code");
   if (code !== undefined) {
@@ -1421,6 +1447,11 @@ var APPLIED = /running upgrade|\bapplied\b|migrat\w* (?:complete|done|success)|\
 async function runMigrate(flags, io, cwd, exists) {
   const say = (line) => io.print(`dkod-db: ${line}`);
   const dir = flags.get("dir") ?? cwd;
+  const refusal = originalFolderRefusal(dir, cwd, io.readFile);
+  if (refusal) {
+    say(refusal);
+    return 2;
+  }
   const url = readDatabaseUrl(io.readFile(join2(dir, ".env.local")));
   if (!url) {
     say("There is no DATABASE_URL in .env.local. Run `node dkod-db.mjs up --app <app key>` first.");
@@ -1836,6 +1867,11 @@ async function runImport(flags, io, cwd) {
     return 2;
   }
   const dir = flags.get("dir") ?? cwd;
+  const refusal = originalFolderRefusal(dir, cwd, io.readFile);
+  if (refusal) {
+    say(refusal);
+    return 2;
+  }
   const snapshotFile = join2(dir, ".dkod/snapshot.json");
   let sourceRaw = from;
   let snapshotMode = false;
@@ -2192,6 +2228,11 @@ async function runUpDetached(flags, io) {
   const say = (sentence) => io.print(`dkod-db: ${sentence}`);
   if (!DB_APP_KEY.test(app)) {
     say("Give the app's key with --app: lowercase letters, digits and dashes.");
+    return 2;
+  }
+  const refusal = originalFolderRefusal(flags.get("dir") ?? io.cwd, io.cwd, io.readFile);
+  if (refusal) {
+    say(refusal);
     return 2;
   }
   const waitRaw = flags.get("wait");
