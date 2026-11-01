@@ -1993,10 +1993,14 @@ var PARITY_RESTART_SOURCE = `// Shipped by dkod-migrate.mjs install-restart. Par
 // (run from PARITY_START_CWD, else the current folder). The new server stays in this process's session and group
 // (never detached), and its PID goes to $PARITY_RUN_DIR/pids and its port to $PARITY_RUN_DIR/ports, where
 // \`dkod-migrate.mjs stop-servers\` finds them.
+// The app gets a minimal env, not the runner's: PATH, HOME, PORT, TMPDIR, LANG, SHELL, PIP_CACHE_DIR, the PARITY_*
+// names, and the variables of the file(s) named by PARITY_START_ENV (a path relative to PARITY_START_CWD or absolute,
+// several separated by ':'). The runner's PORT and PARITY_* win over the file. So a dk- app never sees the original's
+// DATABASE_URL or REDIS_URL, and the original's run names the snapshot's env file to keep running on the copy.
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, mkdirSync, openSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { createConnection } from "node:net";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -2007,6 +2011,30 @@ function portOf(): number {
   const port = u.port === "" ? (u.protocol === "https:" ? 443 : 80) : Number(u.port);
   if (!Number.isInteger(port) || port <= 0) throw new Error("restartApp: no port in PARITY_BASE_URL " + url);
   return port;
+}
+
+function appEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  const own: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined && (/^(PATH|HOME|PORT|TMPDIR|LANG|SHELL|PIP_CACHE_DIR)$/.test(k) || k.startsWith("PARITY_"))) own[k] = v;
+  }
+  const files = process.env.PARITY_START_ENV;
+  if (!files) return own;
+  const cwd = process.env.PARITY_START_CWD || process.cwd();
+  for (const f of files.split(":").filter((s) => s !== "")) {
+    const path = resolve(cwd, f);
+    if (!existsSync(path)) throw new Error("restartApp: PARITY_START_ENV names a file that does not exist: " + path);
+    for (const raw of readFileSync(path, "utf8").split(/\\r?\\n/)) {
+      const m = /^\\s*(?:export\\s+)?([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*(.*?)\\s*$/.exec(raw);
+      if (!m || raw.trim().startsWith("#")) continue;
+      let val = m[2] ?? "";
+      if (val.length >= 2 && (val[0] === '"' || val[0] === "'") && val.endsWith(val[0])) val = val.slice(1, -1);
+      else val = val.replace(/\\s+#.*$/, "");
+      env[m[1] as string] = val;
+    }
+  }
+  return { ...env, ...own };
 }
 
 function pidsOut(cmd: string, args: string[]): number[] {
@@ -2052,7 +2080,7 @@ export async function restartApp(): Promise<void> {
   if (await isUp(port)) throw new Error("restartApp: port " + String(port) + " is still in use after the app was stopped");
 
   const log = openSync(join(runDir, "app-" + String(port) + ".log"), "a");
-  const child = spawn(cmd, { shell: true, detached: false, stdio: ["ignore", log, log], cwd: process.env.PARITY_START_CWD || process.cwd(), env: process.env });
+  const child = spawn(cmd, { shell: true, detached: false, stdio: ["ignore", log, log], cwd: process.env.PARITY_START_CWD || process.cwd(), env: appEnv() });
   if (child.pid === undefined) throw new Error("restartApp: could not start: " + cmd);
   started = child.pid;
   appendFileSync(join(runDir, "pids"), String(child.pid) + "\\n");
@@ -2808,6 +2836,7 @@ async function sideBySide(folder, originalReport, dkReport, io, args = []) {
   return ok ? 0 : 1;
 }
 
+var ENV_FILE2 = ".dkod-snapshot.env";
 var USAGE = [
   "Usage:",
   "  node dkod-migrate.mjs snapshot <the dk- app's folder> [--db-url [KEY=]<url>] [--original-url http://localhost:<port>]",
@@ -3256,6 +3285,9 @@ async function snapshot(folder, io, args = []) {
   record.seal = sealOf(record, record.nonce);
   if (!empty)
     io.writeFile(join7(scratch, SEAL_FILE), record.seal);
+  if (!empty)
+    io.writeFile(join7(scratch, ENV_FILE2), Object.entries(env).map(([k, v]) => `${k}=${v.includes("'") ? `"${v}"` : `'${v}'`}
+`).join(""));
   io.writeFile(snapshotPath(dir), `${JSON.stringify(record, null, 2)}
 `);
   io.print(JSON.stringify(record));
@@ -3961,15 +3993,15 @@ var ENV_READS = [
   /\bos\.getenv\(\s*(["'])([A-Za-z_]\w*)\1/g
 ];
 var VITE_BUILTIN = new Set(["MODE", "DEV", "PROD", "SSR", "BASE_URL"]);
-var ENV_FILE2 = /^(?:.*\.)?env(?:\..+)?$|\.example$/;
+var ENV_FILE3 = /^(?:.*\.)?env(?:\..+)?$|\.example$/;
 var ENV_SCHEMA = /^env\.[cm]?[jt]s$/;
 function discoverSettings(original, io) {
   const names = new Set;
   for (const f of io.walk(original, SKIP3)) {
     const base = f.split("/").pop();
-    if (IS_TEST.test(f) && ENV_FILE2.test(base))
+    if (IS_TEST.test(f) && ENV_FILE3.test(base))
       continue;
-    if (ENV_FILE2.test(base) && !CODE3.test(base) && !PY.test(base) && !VUE.test(base)) {
+    if (ENV_FILE3.test(base) && !CODE3.test(base) && !PY.test(base) && !VUE.test(base)) {
       for (const line of (io.readFile(join8(original, f)) ?? "").split(/\r?\n/)) {
         const key = /^\s*(?:export\s+)?([A-Za-z_]\w*)\s*=/.exec(line)?.[1];
         if (key !== undefined)
@@ -4194,7 +4226,7 @@ function discoverServices(original, io) {
   for (const f of io.walk(original, SKIP3)) {
     const isPkg = f === "package.json" || f.endsWith("/package.json");
     const py = PY.test(f);
-    const plain = HOST_FILE.test(f) || ENV_FILE2.test(f.split("/").pop()) && !CODE3.test(f) && !py;
+    const plain = HOST_FILE.test(f) || ENV_FILE3.test(f.split("/").pop()) && !CODE3.test(f) && !py;
     if (IS_TEST.test(f) || !isPkg && !plain && !CODE3.test(f) && !py)
       continue;
     const raw = io.readFile(join8(original, f));
