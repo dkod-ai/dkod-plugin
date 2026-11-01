@@ -3303,7 +3303,9 @@ function runDirRefusal(runDir, dkDir, io) {
     return null;
   const real = norm(realRaw);
   const tmp = io.realpath(io.tmpdir());
-  const root = tmp === null ? null : norm(tmp);
+  let root = tmp === null ? null : norm(tmp);
+  if (root !== null && real === root && /^tmp\.[A-Za-z0-9]{6,}$/.test(real.slice(real.lastIndexOf("/") + 1)))
+    root = real.slice(0, real.lastIndexOf("/"));
   const rest = root !== null && real.startsWith(`${root}/`) ? real.slice(root.length + 1) : "";
   if (rest === "" || rest.includes("/"))
     return `${runDir} is not a folder directly under ${tmp ?? "$TMPDIR"}, so it was not removed and nothing else was cleaned. Pass the folder \`mktemp -d\` printed.`;
