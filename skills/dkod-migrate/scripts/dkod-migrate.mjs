@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join as join8 } from "node:path";
+import { dirname, join as join9 } from "node:path";
 
 import { createHash as createHash2 } from "node:crypto";
 
@@ -98,10 +98,51 @@ import { randomBytes } from "node:crypto";
 import { createHash } from "node:crypto";
 var SEAL_FILE = ".dkod-snapshot-seal";
 function sealOf(r, nonce) {
-  const body = { mode: r.mode, scratch: r.scratch, files: r.files, databases: (r.databases ?? []).map((d) => ({ name: d.name, url: d.url, tables: d.tables ?? null })), env: r.env, message: r.message ?? null };
+  const body = { mode: r.mode, scratch: r.scratch, files: r.files, databases: (r.databases ?? []).map((d) => ({ name: d.name, url: d.url, tables: d.tables ?? null, ...d.source === undefined ? {} : { source: d.source } })), env: r.env, message: r.message ?? null, ...r.bases === undefined ? {} : { bases: r.bases }, ...r.source === undefined ? {} : { source: r.source }, ...r.checks === undefined ? {} : { checks: r.checks } };
   return createHash("sha256").update(JSON.stringify(body)).update(nonce).digest("hex");
 }
 
+var asText = (v) => {
+  if (v === null || v === undefined)
+    return null;
+  if (typeof v === "string")
+    return v;
+  if (typeof v === "object")
+    return JSON.stringify(v);
+  return String(v);
+};
+function parseJsonRows(text) {
+  let data;
+  try {
+    data = JSON.parse(text.charCodeAt(0) === 65279 ? text.slice(1) : text);
+  } catch {
+    return { ok: false, reason: "the file is not valid JSON" };
+  }
+  let list = data;
+  if (data !== null && typeof data === "object" && !Array.isArray(data)) {
+    const arrays = Object.values(data).filter(Array.isArray);
+    if (arrays.length !== 1)
+      return { ok: false, reason: "the JSON is an object without exactly one array of rows" };
+    list = arrays[0];
+  }
+  if (!Array.isArray(list))
+    return { ok: false, reason: "the JSON is not an array of objects" };
+  const cols = [];
+  for (const item of list) {
+    if (item === null || typeof item !== "object" || Array.isArray(item))
+      return { ok: false, reason: "the JSON rows are not all objects" };
+    for (const k of Object.keys(item))
+      if (!cols.includes(k))
+        cols.push(k);
+  }
+  if (cols.length === 0)
+    return { ok: false, reason: "the JSON has no rows with keys" };
+  return { ok: true, cols, rows: list.map((item) => cols.map((c) => asText(item[c]))) };
+}
+
+var NO_PASSWORD = "Postgres refused the connection, the key is missing or wrong. Put the right one in the PGPASSWORD env var or in ~/.pgpass, then run again.";
+var isNoPassword = (stderr) => /fe_sendauth: no password supplied|password authentication failed/i.test(stderr);
+var PG_TIMEOUT = { PGCONNECT_TIMEOUT: "10" };
 var PG_SETTINGS = "SET TimeZone='UTC'; SET DateStyle='ISO, YMD'; SET extra_float_digits=1; SET bytea_output='hex'; SET IntervalStyle='postgres';";
 var quoteIdent = (name) => `"${name.replace(/"/g, '""')}"`;
 var quoteLit = (text) => `'${text.replace(/'/g, "''")}'`;
@@ -153,7 +194,7 @@ function readMapTables(text) {
   }
   return names;
 }
-var PSQL = ["-X", "-q", "-At", "-F", "\t", "-v", "ON_ERROR_STOP=1"];
+var PSQL = ["-w", "-X", "-q", "-At", "-F", "\t", "-v", "ON_ERROR_STOP=1"];
 async function readColumns(url, names, env, run, cwd = ".") {
   const filter = names === null ? "" : ` AND c.table_name IN (${names.map(quoteLit).join(",")})`;
   const sql = `SELECT c.table_name, c.column_name FROM information_schema.columns c JOIN information_schema.tables t ON t.table_schema=c.table_schema AND t.table_name=c.table_name AND t.table_type='BASE TABLE' WHERE c.table_schema='public' AND c.is_generated='NEVER'${filter} ORDER BY c.table_name, c.ordinal_position`;
@@ -229,15 +270,29 @@ async function devDrift(dir, io) {
     before[name] = { rows: t.rows, md5: t.md5 };
   }
   const unreadable = ["Dev data cannot be read to check it after the import: start `node dkod-db.mjs up --app <app key>` in the background and run this again."];
-  const now = await tallies(devUrl, refs, { PGSSLMODE: "disable" }, io.run, dir);
+  let noPassword = false;
+  const run = async (cmd, args, env, cwd) => {
+    const res = await io.run(cmd, args, env, cwd);
+    if (res.status !== 0 && isNoPassword(res.stderr))
+      noPassword = true;
+    return res;
+  };
+  const now = await tallies(devUrl, refs, { ...PG_TIMEOUT, PGSSLMODE: "disable" }, run, dir);
   if (now === null)
-    return unreadable;
+    return noPassword ? [NO_PASSWORD] : unreadable;
   return changedTables(before, now).map((n) => {
     const t = now[n];
     return `Dev changed after the import: db:seed or hand-written rows (${n}: ${t === undefined ? "table missing" : `${String(t.rows)} rows`}, imported ${String(before[n].rows)}). Never run db:seed or insert rows after \`dkod-db.mjs import\`; import again into an empty Dev.`;
   });
 }
 async function migrationRows(dir, io) {
+  let noPassword = false;
+  const run = async (cmd, args, env, cwd) => {
+    const res = await io.run(cmd, args, env, cwd);
+    if (res.status !== 0 && isNoPassword(res.stderr))
+      noPassword = true;
+    return res;
+  };
   const snap = json(io.readFile(join(dir, ".dkod/snapshot.json")));
   if (!isRec(snap) || snap.mode !== "snapshot" || !Array.isArray(snap.databases))
     return [];
@@ -257,27 +312,27 @@ async function migrationRows(dir, io) {
   const freshObj = new URL(sourceUrl);
   freshObj.pathname = `/${fresh}`;
   const freshUrl = freshObj.toString();
-  const env = { PGSSLMODE: "disable", ...password ? { PGPASSWORD: password } : {} };
-  const connect = ["-h", source.hostname.replace(/^\[|\]$/g, ""), "-p", source.port || "5432", ...source.username ? ["-U", decodeURIComponent(source.username)] : []];
-  const failed = (step) => step === "bun run db:migrate" ? [`The dk- app's migrations could not be run on a fresh database (${step} failed): fix \`bun run db:migrate\` so it creates the schema and its rows on an empty database.`] : [`The snapshot's local Postgres could not be used to check the dk- app's migrations (${step} failed): start the snapshot's Postgres server, then run check-build again.`];
-  await io.run("dropdb", ["--if-exists", ...connect, fresh], env, dir);
+  const env = { ...PG_TIMEOUT, PGSSLMODE: "disable", ...password ? { PGPASSWORD: password } : {} };
+  const connect = ["-w", "-h", source.hostname.replace(/^\[|\]$/g, ""), "-p", source.port || "5432", ...source.username ? ["-U", decodeURIComponent(source.username)] : []];
+  const failed = (step) => noPassword ? [NO_PASSWORD] : step === "bun run db:migrate" ? [`The dk- app's migrations could not be run on a fresh database (${step} failed): fix \`bun run db:migrate\` so it creates the schema and its rows on an empty database.`] : [`The snapshot's local Postgres could not be used to check the dk- app's migrations (${step} failed): start the snapshot's Postgres server, then run check-build again.`];
+  await run("dropdb", ["--if-exists", ...connect, fresh], env, dir);
   try {
-    if ((await io.run("createdb", [...connect, fresh], env, dir)).status !== 0)
+    if ((await run("createdb", [...connect, fresh], env, dir)).status !== 0)
       return failed("createdb");
     const migrateEnv = { ...env, DATABASE_URL: freshUrl, PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" };
-    if ((await io.run("bun", ["run", "db:migrate"], migrateEnv, dir)).status !== 0)
+    if ((await run("bun", ["run", "db:migrate"], migrateEnv, dir)).status !== 0)
       return failed("bun run db:migrate");
     const names = readMapTables(io.readFile(join(dir, ".dkod/map/app-map.json")));
     if (names.length === 0)
       return [];
-    const mine = await tallyNamed(freshUrl, names, env, io.run, dir);
+    const mine = await tallyNamed(freshUrl, names, env, run, dir);
     if (mine === null)
       return failed("psql");
     const written = new Set(readFreezeData(io.readFile(join(dir, ".dkod/parity/freeze.json")))?.suite_writes ?? []);
     const filled = names.filter((n) => !written.has(n) && (mine.tallies[n]?.rows ?? 0) > 0);
     if (filled.length === 0)
       return [];
-    const theirCols = await readColumns(sourceUrl, filled, env, io.run, dir);
+    const theirCols = await readColumns(sourceUrl, filled, env, run, dir);
     if (theirCols === null)
       return failed("psql");
     const refs = [];
@@ -292,14 +347,14 @@ async function migrationRows(dir, io) {
       if (shared.length > 0)
         refs.push({ name: n, cols: shared });
     }
-    const orig = await tallies(sourceUrl, refs, env, io.run, dir);
-    const own = await tallies(freshUrl, refs, env, io.run, dir);
+    const orig = await tallies(sourceUrl, refs, env, run, dir);
+    const own = await tallies(freshUrl, refs, env, run, dir);
     if (orig === null || own === null)
       return failed("psql");
     const missing = absent.map((n) => `table ${n}: the dk- app's migrations insert ${String(mine.tallies[n].rows)} rows on an empty database, but the original has no such table. Change those migrations to insert no rows there; CI and Prod run them on an empty database. Never delete or edit Dev rows by hand.`);
     return [...missing, ...refs.filter((t) => !same(orig[t.name], own[t.name])).map((t) => `table ${t.name}: the dk- app's migrations insert ${String(own[t.name].rows)} rows on an empty database, unlike the original's ${String(orig[t.name].rows)} (count or md5 differ). Change those migrations to insert exactly the original's rows (or none); CI and Prod run them on an empty database. Never delete or edit Dev rows by hand.`)];
   } finally {
-    await io.run("dropdb", ["--if-exists", ...connect, fresh], env, dir);
+    await run("dropdb", ["--if-exists", ...connect, fresh], env, dir);
   }
 }
 
@@ -1932,15 +1987,109 @@ function localStoreProblems(sources, read) {
   return problems;
 }
 
+var PARITY_RESTART_SOURCE = `// Shipped by dkod-migrate.mjs install-restart. Part of the frozen parity suite: never edit it.
+// restartApp() stops the app that listens on PARITY_BASE_URL's port and starts it again from PARITY_START_CMD
+// (run from PARITY_START_CWD, else the current folder). The new server stays in this process's session and group
+// (never detached), and its PID goes to $PARITY_RUN_DIR/pids and its port to $PARITY_RUN_DIR/ports, where
+// \`dkod-migrate.mjs stop-servers\` finds them.
+import { spawn, spawnSync } from "node:child_process";
+import { appendFileSync, mkdirSync, openSync } from "node:fs";
+import { createConnection } from "node:net";
+import { join } from "node:path";
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+function portOf(): number {
+  const url = process.env.PARITY_BASE_URL;
+  if (!url) throw new Error("restartApp: PARITY_BASE_URL is not set");
+  const u = new URL(url);
+  const port = u.port === "" ? (u.protocol === "https:" ? 443 : 80) : Number(u.port);
+  if (!Number.isInteger(port) || port <= 0) throw new Error("restartApp: no port in PARITY_BASE_URL " + url);
+  return port;
+}
+
+function pidsOut(cmd: string, args: string[]): number[] {
+  const res = spawnSync(cmd, args, { encoding: "utf8" });
+  return String(res.stdout ?? "").split(/\\s+/).filter((s) => /^[0-9]+$/.test(s)).map(Number);
+}
+
+const listeners = (port: number): number[] => pidsOut("lsof", ["-ti", "tcp:" + String(port), "-sTCP:LISTEN"]);
+
+function withChildren(pid: number): number[] {
+  return [pid, ...pidsOut("pgrep", ["-P", String(pid)]).flatMap(withChildren)];
+}
+
+function tryHost(port: number, host: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const s = createConnection({ port, host });
+    s.once("connect", () => { s.destroy(); resolve(true); });
+    s.once("error", () => resolve(false));
+  });
+}
+
+async function isUp(port: number): Promise<boolean> {
+  return (await tryHost(port, "127.0.0.1")) || (await tryHost(port, "::1"));
+}
+
+let started: number | null = null;
+
+export async function restartApp(): Promise<void> {
+  const port = portOf();
+  const cmd = process.env.PARITY_START_CMD;
+  const runDir = process.env.PARITY_RUN_DIR;
+  if (!cmd) throw new Error("restartApp: PARITY_START_CMD (the command that starts the app) is not set");
+  if (!runDir) throw new Error("restartApp: PARITY_RUN_DIR (the run's mktemp folder) is not set");
+  mkdirSync(runDir, { recursive: true });
+
+  const old = [...new Set([...(started === null ? [] : [started]), ...listeners(port)].flatMap(withChildren))];
+  for (const pid of old) try { process.kill(pid, "SIGTERM"); } catch { /* gone */ }
+  for (let i = 0; i < 100 && (await isUp(port)); i++) await sleep(100);
+  if (await isUp(port)) {
+    for (const pid of old) try { process.kill(pid, "SIGKILL"); } catch { /* gone */ }
+    for (let i = 0; i < 50 && (await isUp(port)); i++) await sleep(100);
+  }
+  if (await isUp(port)) throw new Error("restartApp: port " + String(port) + " is still in use after the app was stopped");
+
+  const log = openSync(join(runDir, "app-" + String(port) + ".log"), "a");
+  const child = spawn(cmd, { shell: true, detached: false, stdio: ["ignore", log, log], cwd: process.env.PARITY_START_CWD || process.cwd(), env: process.env });
+  if (child.pid === undefined) throw new Error("restartApp: could not start: " + cmd);
+  started = child.pid;
+  appendFileSync(join(runDir, "pids"), String(child.pid) + "\\n");
+  appendFileSync(join(runDir, "ports"), String(port) + "\\n");
+  let exited = false;
+  child.once("exit", () => { exited = true; });
+  for (let i = 0; i < 300 && !exited && !(await isUp(port)); i++) await sleep(100);
+  if (!(await isUp(port))) throw new Error("restartApp: the app did not answer on port " + String(port) + " (see " + join(runDir, "app-" + String(port) + ".log") + ")");
+}
+`;
+
 var join3 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var TEST_FILE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
+var DETACHING = /\b(?:setsid|nohup|disown)\b|\bdetached\s*:\s*true\b|\.unref\s*\(/;
 var TITLE = /\b(?:test|it)(?:\.(?:only|fixme|slow))?\(\s*(["'`])((?:\\.|(?!\1)[^\\])*)\1/g;
 var isRec4 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 var list2 = (v) => Array.isArray(v) ? v.filter(isRec4) : [];
 var same2 = (a, b) => a.trim().replace(/\s+/g, " ").toLowerCase() === b.trim().replace(/\s+/g, " ").toLowerCase();
 var freezePath = (dir) => join3(dir, ".dkod/parity/freeze.json");
-function testTitles(text) {
-  return [...text.matchAll(TITLE)].map((m) => m[2]);
+function testBlocks(text) {
+  const ms = [...text.matchAll(TITLE)];
+  return ms.map((m, i) => {
+    const start = m.index + m[0].length;
+    let end = ms[i + 1]?.index ?? text.length;
+    const indent = text.slice(text.lastIndexOf(`
+`, m.index - 1) + 1, m.index).match(/^\s*/)[0];
+    const close = text.slice(start, end).indexOf(`
+${indent}});`);
+    if (close >= 0)
+      end = start + close;
+    return { title: m[2], body: text.slice(start, end) };
+  });
+}
+function hasRestart(body) {
+  const code = body.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+  const call = /\b(?:fetch|request\.\w+|page\.\w+|api\.\w+|post|put|patch|delete|get)\s*\(/;
+  const restart = /\brestart\w*\s*\(/i.exec(code);
+  return restart !== null && call.test(code.slice(0, restart.index)) && call.test(code.slice(restart.index + restart[0].length));
 }
 var REPORT_REFUSAL = "not a raw Playwright JSON report; a hand-written summary is refused. Save the real one with `bunx playwright test --reporter=json > report.json` (PLAYWRIGHT_JSON_OUTPUT_NAME=report.json also works).";
 function isReporterShape(json) {
@@ -2069,12 +2218,27 @@ async function freeze(folder, reportFile, io) {
   const passed = new Set(run.filter((t) => t.ok).map((t) => t.title));
   const have = new Map;
   const notRun = [];
+  const problems = [];
   let tagged = 0;
+  for (const f of io.walk(join3(dir, "tests/parity"), ["node_modules"])) {
+    if (!/\.[cm]?[jt]sx?$|\.sh$/.test(f))
+      continue;
+    const text = io.readFile(join3(dir, `tests/parity/${f}`)) ?? "";
+    if (f === "restart.ts" && text === PARITY_RESTART_SOURCE)
+      continue;
+    const hit = DETACHING.exec(text.replace(/\/\*[\s\S]*?\*\/|(^|[^:])\/\/.*$/gm, "$1"));
+    if (hit !== null)
+      problems.push(`tests/parity/${f}: \`${hit[0]}\` detaches a server from the run, so nothing stops it later. Delete this restart and call restartApp() from tests/parity/restart.ts (\`dkod-migrate.mjs install-restart <folder>\`)`);
+  }
   for (const f of specs) {
-    for (const title of testTitles(io.readFile(join3(dir, `tests/parity/${f}`)) ?? "")) {
-      const tags = tagsOf(title);
+    for (const { title, body } of testBlocks(io.readFile(join3(dir, `tests/parity/${f}`)) ?? "")) {
+      let tags = tagsOf(title);
       if (tags.length === 0)
         continue;
+      if (tags.some((t) => t.kind === "data") && !hasRestart(body)) {
+        problems.push(`${title}: an @data test must write, read back, restart the app, then read again; this body has no restart between the write and the second read. Add the restart step (a restartApp() helper) and run the suite on the original again`);
+        tags = tags.filter((t) => t.kind !== "data");
+      }
       if (!run.some((t) => t.title === title)) {
         notRun.push(`${title} (not in the report)`);
         continue;
@@ -2122,8 +2286,8 @@ async function freeze(folder, reportFile, io) {
   const missing = { routes, pages, flows, data, design };
   const gaps = routes.length + pages.length + flows.length + data.length + design.length;
   const original_failures = [...failures, ...notRun];
-  if (gaps > 0 || original_failures.length > 0) {
-    return fail(io, { missing, original_failures, counts: { tests: run.length, original_passed: passed.size, original_failed: original_failures.length } });
+  if (gaps > 0 || original_failures.length > 0 || problems.length > 0) {
+    return fail(io, { problems, missing, original_failures, counts: { tests: run.length, original_passed: passed.size, original_failed: original_failures.length } });
   }
   let frozenData = null;
   let snap = null;
@@ -2420,6 +2584,106 @@ async function checkBuild(folder, reportFile, io) {
 }
 
 var join5 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+var numbers = (text) => (text ?? "").split(/[\s,]+/).filter((s) => /^[0-9]+$/.test(s)).map(Number);
+var KILL_WAIT_MS = 1500;
+var alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+var signal = (pid, sig, group) => {
+  try {
+    process.kill(group ? -pid : pid, sig);
+  } catch {}
+};
+function recorded(runDir, extraPorts, io) {
+  const pids = new Set;
+  const ports = new Set(numbers(extraPorts ?? ""));
+  for (const n of numbers(io.readFile(join5(runDir, "pids"))))
+    pids.add(n);
+  for (const n of numbers(io.readFile(join5(runDir, "ports"))))
+    ports.add(n);
+  return { pids: [...pids], ports: [...ports] };
+}
+async function listeners(port, io) {
+  if (!io.hasTool("lsof"))
+    return null;
+  const res = await io.run("lsof", ["-nP", `-iTCP:${String(port)}`, "-sTCP:LISTEN", "-t"], {}, io.cwd);
+  return numbers(res.stdout);
+}
+async function stopServers(runDir, extraPorts, io) {
+  const { pids, ports } = recorded(runDir, extraPorts, io);
+  const problems = [];
+  const table = new Map;
+  if (io.hasTool("ps")) {
+    for (const line of (await io.run("ps", ["-A", "-o", "pid=,ppid=,pgid="], {}, io.cwd)).stdout.split(`
+`)) {
+      const [pid, ppid, pgid] = numbers(line);
+      if (pid !== undefined && ppid !== undefined && pgid !== undefined)
+        table.set(pid, { ppid, pgid });
+    }
+  }
+  const targets = new Map;
+  const add = (pid) => {
+    if (pid === process.pid || pid <= 1 || targets.has(pid))
+      return;
+    targets.set(pid, table.get(pid)?.pgid === pid && table.get(process.pid)?.pgid !== pid);
+    for (const [child, info] of table)
+      if (info.ppid === pid)
+        add(child);
+  };
+  for (const pid of pids)
+    if (table.has(pid))
+      add(pid);
+  const stopped = [...targets.keys()].filter(alive);
+  for (const [pid, group] of targets)
+    signal(pid, "SIGTERM", group);
+  const deadline = Date.now() + KILL_WAIT_MS;
+  while (Date.now() < deadline && stopped.some(alive))
+    await new Promise((r) => setTimeout(r, 50));
+  for (const [pid, group] of targets) {
+    if (alive(pid))
+      signal(pid, "SIGKILL", group);
+  }
+  if (pids.length > 0)
+    io.writeFile(join5(runDir, "pids"), "");
+  await new Promise((r) => setTimeout(r, 100));
+  for (const port of ports) {
+    const held = await listeners(port, io);
+    if (held === null)
+      problems.push(`port ${String(port)}: lsof is not installed, so the check that nothing listens there cannot run`);
+    else if (held.length > 0)
+      problems.push(`port ${String(port)} is still held by PID ${held.join(", ")}: stop it (it was not recorded in ${runDir}), then run stop-servers again`);
+  }
+  if (ports.length === 0)
+    problems.push(`no port to check: ${runDir}/ports is empty or missing. Pass --ports <a,b> (the parity ports), or let restartApp() record them`);
+  return { ok: problems.length === 0, ports, stopped, problems };
+}
+function flagValue(args, name) {
+  for (let i = 0;i < args.length; i++) {
+    const a = args[i];
+    if (a === name)
+      return args[i + 1];
+    if (a.startsWith(`${name}=`))
+      return a.slice(name.length + 1);
+  }
+  return;
+}
+async function stopServersCommand(args, io) {
+  const runDir = flagValue(args, "--run-dir");
+  if (runDir === undefined || runDir === "") {
+    io.print("dkod-migrate: stop-servers needs --run-dir <the run's mktemp folder>: stop-servers <folder> --run-dir <dir> [--ports a,b]");
+    return 2;
+  }
+  const res = await stopServers(runDir, flagValue(args, "--ports"), io);
+  io.print(JSON.stringify({ ok: res.ok, ports: res.ports, stopped: res.stopped, problems: res.problems }));
+  return res.ok ? 0 : 1;
+}
+
+var join6 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var isRec6 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 var json4 = (text) => {
   try {
@@ -2430,9 +2694,9 @@ var json4 = (text) => {
 };
 var READY = "Ready to deploy";
 var NOT_YET = "Not yet";
-async function sideBySide(folder, originalReport, dkReport, io) {
+async function sideBySide(folder, originalReport, dkReport, io, args = []) {
   const dir = folder === "" ? io.cwd : folder;
-  if (originalOf(io.readFile(join5(dir, ".dkod/migration.json"))) === null) {
+  if (originalOf(io.readFile(join6(dir, ".dkod/migration.json"))) === null) {
     io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
     return 2;
   }
@@ -2440,13 +2704,15 @@ async function sideBySide(folder, originalReport, dkReport, io) {
   const original = { tests: 0, passed: 0, failed: 0 };
   const dk = { tests: 0, passed: 0, failed: 0 };
   let visual = 0;
+  let restart = { original: "n/a", dk: "n/a" };
+  let restartFailed = 0;
   const frozen = json4(io.readFile(freezePath(dir)));
   if (!isRec6(frozen) || typeof frozen.sha256 !== "string" || !isRec6(frozen.baseline) || !Array.isArray(frozen.baseline.tests)) {
     problems.push(".dkod/parity/freeze.json: missing. Freeze the suite (step 3) first.");
   } else {
     const record = frozen;
     const files = suiteFiles(dir, io);
-    if (files.length === 0 || io.sha256(files.map((f) => join5(dir, f))) !== record.sha256) {
+    if (files.length === 0 || io.sha256(files.map((f) => join6(dir, f))) !== record.sha256) {
       problems.push("tests/parity: the suite changed after the freeze (sha256 differs). Put the frozen files back; never edit them.");
     }
     const load = (file, label) => {
@@ -2484,18 +2750,43 @@ async function sideBySide(folder, originalReport, dkReport, io) {
         }
       }
     }
+    const baseline = new Set(record.baseline.tests);
+    const dataTests = files.filter((f) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(f)).flatMap((f) => testBlocks(io.readFile(join6(dir, f)) ?? "")).filter((t) => baseline.has(t.title) && tagsOf(t.title).some((tag) => tag.kind === "data"));
+    const verdict = (run, label) => {
+      if (dataTests.length === 0)
+        return "n/a";
+      let pass = true;
+      for (const t of dataTests) {
+        const has = hasRestart(t.body);
+        if (has && run?.get(t.title)?.ok === true)
+          continue;
+        pass = false;
+        restartFailed += 1;
+        if (!has)
+          problems.push(`${t.title}: has no restart between write and read (restart: fail on the ${label})`);
+      }
+      return pass ? "pass" : "fail";
+    };
+    restart = { original: verdict(onOriginal, "original app"), dk: verdict(onDk, "dk- app") };
   }
-  const map = json4(io.readFile(join5(dir, ".dkod/map/app-map.json")));
+  const map = json4(io.readFile(join6(dir, ".dkod/map/app-map.json")));
   const count = (key) => isRec6(map) && Array.isArray(map[key]) ? map[key].length : 0;
-  const snapshot = json4(io.readFile(join5(dir, ".dkod/snapshot.json")));
+  const snapshot = json4(io.readFile(join6(dir, ".dkod/snapshot.json")));
   const dataImported = isRec6(snapshot) && snapshot.mode === "snapshot" && snapshot.imported === true;
   problems.push(...await devDrift(dir, io));
+  const runDir = flagValue(args, "--run-dir");
+  let serversStopped = null;
+  if (runDir !== undefined && runDir !== "") {
+    const stop = await stopServers(runDir, flagValue(args, "--ports"), io);
+    serversStopped = stop.ok;
+    problems.push(...stop.problems);
+  }
   const ok = problems.length === 0;
   io.print(JSON.stringify({
     ok,
     problems,
-    report: { routes: count("routes"), flows: count("flows"), pages: count("pages"), original, dk, visual_diff: visual, data_imported: dataImported },
-    counts: { tests: dk.tests, original_passed: original.passed, original_failed: original.failed, new_passed: dk.passed, new_failed: dk.failed, visual_diff: visual },
+    report: { routes: count("routes"), flows: count("flows"), pages: count("pages"), original, dk, visual_diff: visual, data_imported: dataImported, restart, ...serversStopped === null ? {} : { servers_stopped: serversStopped } },
+    counts: { tests: dk.tests, original_passed: original.passed, original_failed: original.failed, new_passed: dk.passed, new_failed: dk.failed, visual_diff: visual, restart_failed: restartFailed },
     question: { text: "The dk- app is running next to the original. Does it match, and is it ready to deploy?", options: [READY, NOT_YET] }
   }));
   return ok ? 0 : 1;
@@ -2509,17 +2800,27 @@ var USAGE = [
   "  node dkod-migrate.mjs unfreeze <the dk- app's folder>",
   "  node dkod-migrate.mjs render <template.md> <the dk- app's folder> [values.json] [--force]",
   "  node dkod-migrate.mjs check-build <the dk- app's folder> <report.json>",
-  "  node dkod-migrate.mjs side-by-side <the dk- app's folder> <original report.json> <dk report.json>",
+  "  node dkod-migrate.mjs install-restart <the dk- app's folder>",
+  "  node dkod-migrate.mjs side-by-side <the dk- app's folder> <original report.json> <dk report.json> [--run-dir <mktemp folder>]",
+  "  node dkod-migrate.mjs stop-servers <the dk- app's folder> --run-dir <mktemp folder> [--ports a,b]",
   "  node dkod-migrate.mjs clean <the dk- app's folder>"
 ].join(`
 `);
+var SOURCE_MAX_AGE_MIN = 10;
+var SCRATCH_NAME = /_dkod_migrate(_[A-Za-z0-9_]+)?(_base)?$/;
+var CHECKS = ["name", "age (pg_database file time / pg_stat_database.stats_reset, when readable)"];
+var USE_OWN_STORE = "Snapshot the original's own store: its .env/.env.local URL, its running process (--original-url), or the --db-url the builder gives. Never make a database for the original or run its seed, fixtures, db push or reset to get data.";
 var NEW_APP_ONLY = "The original app has no data files and no local database this computer can copy. The migration is new-app-only: its tests run only on the dk- app. Ask the builder how the original reads its data. If it reads its database from its environment, run snapshot again with --db-url <url> or, with the original running, --original-url http://localhost:<port>. Never write .dkod/snapshot.json by hand.";
-var join6 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+var join7 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var norm = (p) => p.replace(/\/\.\//g, "/").replace(/\/+/g, "/");
-var snapshotPath = (dir) => join6(dir, ".dkod/snapshot.json");
-var recordPath = (dir) => join6(dir, ".dkod/migration.json");
+var snapshotPath = (dir) => join7(dir, ".dkod/snapshot.json");
+var recordPath = (dir) => join7(dir, ".dkod/migration.json");
 var SKIP2 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor"];
 var DATA2 = /\.(?:sqlite|sqlite3|db|db3)$/i;
+var FLAT = /\.(?:csv|json)$/i;
+var NOT_DATA = /(?:^|\/)(?:package(?:-lock)?|composer(?:\.lock)?|tsconfig[^/]*|jsconfig[^/]*|app|vercel|now|firebase|deno|bun|manifest|renovate|[^/]*\.config|\.eslintrc[^/]*|\.prettierrc[^/]*|\.babelrc)\.json$|(?:^|\/)\.dkod\/|(?:^|\/)composer\.lock$/i;
+var CODE2 = /\.(?:py|js|mjs|cjs|jsx|ts|tsx|rb|php|go|java|cs|rs|sh)$/i;
+var CODE_CAP = 256 * 1024;
 var LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 var DB_SCHEMES = new Set(["postgres:", "postgresql:", "mysql:", "mariadb:"]);
 function checkSnapshot(dir, io) {
@@ -2535,7 +2836,7 @@ function checkSnapshot(dir, io) {
   }
   if (typeof r !== "object" || r === null || typeof r.seal !== "string" || typeof r.nonce !== "string" || sealOf(r, r.nonce) !== r.seal)
     return bad;
-  if (r.mode === "snapshot" && typeof r.scratch === "string" && r.scratch !== "" && io.readFile(join6(r.scratch, SEAL_FILE))?.trim() !== r.seal)
+  if (r.mode === "snapshot" && typeof r.scratch === "string" && r.scratch !== "" && io.readFile(join7(r.scratch, SEAL_FILE))?.trim() !== r.seal)
     return bad;
   return [];
 }
@@ -2614,8 +2915,9 @@ var scratchName = (source, id) => `${source.replace(/[^A-Za-z0-9_]/g, "_")}_dkod
 function connection(url) {
   const host = url.hostname.replace(/^\[|\]$/g, "");
   const port = url.port || (url.protocol.startsWith("postgres") ? "5432" : "3306");
+  const pg = url.protocol.startsWith("postgres");
   const password = url.password === "" ? null : { [url.protocol.startsWith("postgres") ? "PGPASSWORD" : "MYSQL_PWD"]: decodeURIComponent(url.password) };
-  return { host, port, user: decodeURIComponent(url.username), env: password ?? {} };
+  return { host, port, user: decodeURIComponent(url.username), env: { ...pg ? PG_TIMEOUT : {}, ...password ?? {} } };
 }
 function withDatabase(value, name) {
   const url = new URL(value);
@@ -2628,11 +2930,61 @@ function copiedFile(original, files, value) {
   const raw = isUrl ? value.slice(5) : value;
   if (raw === "" || !isUrl && /^[a-z][a-z0-9+.-]*:/i.test(raw))
     return null;
-  const rel = norm(raw.startsWith("/") ? raw : join6(original, raw)).slice(norm(original).length).replace(/^\//, "");
+  const rel = norm(raw.startsWith("/") ? raw : join7(original, raw)).slice(norm(original).length).replace(/^\//, "");
   if (rel === "")
     return null;
   const copy = files.find((f) => norm(f).endsWith(`/${rel}`));
   return copy === undefined ? null : `${isUrl ? "file:" : ""}${copy}`;
+}
+function relOfValue(original, value) {
+  const isUrl = value.startsWith("file:");
+  const raw = isUrl ? value.slice(5) : value;
+  if (raw === "" || !isUrl && /^[a-z][a-z0-9+.-]*:/i.test(raw))
+    return null;
+  const rel = norm(raw.startsWith("/") ? raw : join7(original, raw)).slice(norm(original).length).replace(/^\//, "");
+  return rel === "" ? null : rel;
+}
+function flatData(original, rels, named, mapText, io) {
+  const found = new Map;
+  const flat = rels.filter((r) => FLAT.test(r) && !NOT_DATA.test(r));
+  if (flat.length === 0)
+    return found;
+  for (const [key, value] of named) {
+    const rel = relOfValue(original, value);
+    const hit = rel === null ? undefined : flat.find((f) => f === rel || norm(`/${f}`).endsWith(norm(`/${rel}`)));
+    if (hit === undefined || found.has(hit))
+      continue;
+    if (/\.json$/i.test(hit)) {
+      const text = io.readFile(join7(original, hit));
+      if (text === null || !parseJsonRows(text).ok)
+        continue;
+    }
+    found.set(hit, { how: "env", key });
+  }
+  const rest = flat.filter((f) => !found.has(f));
+  if (rest.length > 0) {
+    for (const file of rels) {
+      if (!CODE2.test(file))
+        continue;
+      const text = io.readFile(join7(original, file));
+      if (text === null || text.length > CODE_CAP)
+        continue;
+      for (const f of rest) {
+        const name = f.split("/").pop();
+        if (!found.has(f) && (text.includes(`"${f}"`) || text.includes(`'${f}'`) || text.includes(`"${name}"`) || text.includes(`'${name}'`)))
+          found.set(f, { how: "code", file });
+      }
+    }
+  }
+  for (const f of flat)
+    if (!found.has(f) && /(?:^|\/)data\//.test(f))
+      found.set(f, { how: "data-folder" });
+  if (mapText !== null) {
+    for (const f of flat)
+      if (!found.has(f) && mapText.includes(`"${f}"`))
+        found.set(f, { how: "map" });
+  }
+  return found;
 }
 async function copyDatabase(value, scratch, id, io) {
   const url = localDatabase(value);
@@ -2647,17 +2999,23 @@ async function copyDatabase(value, scratch, id, io) {
       if (!io.hasTool(tool))
         return null;
     const dump = `${scratch}/${name}.sql`;
-    const connect = ["-h", host, "-p", port, ...user ? ["-U", user] : []];
-    if ((await io.run("pg_dump", ["--dbname", value, "--file", dump], env, io.cwd)).status !== 0)
+    const connect = ["-w", "-h", host, "-p", port, ...user ? ["-U", user] : []];
+    const ok = async (cmd, args) => {
+      const res = await io.run(cmd, args, env, io.cwd);
+      if (res.status !== 0 && isNoPassword(res.stderr))
+        throw new Error(NO_PASSWORD);
+      return res.status === 0;
+    };
+    if (!await ok("pg_dump", ["-w", "--dbname", withDatabase(value, source), "--file", dump]))
       return null;
-    if ((await io.run("createdb", [...connect, name], env, io.cwd)).status !== 0)
+    if (!await ok("createdb", [...connect, name]))
       return null;
-    if ((await io.run("psql", [...connect, "-d", name, "-f", dump], env, io.cwd)).status !== 0)
+    if (!await ok("psql", [...connect, "-d", name, "-f", dump]))
       return null;
     const baseName = `${name}_base`;
-    if ((await io.run("createdb", [...connect, baseName], env, io.cwd)).status !== 0)
+    if (!await ok("createdb", [...connect, baseName]))
       return null;
-    if ((await io.run("psql", [...connect, "-d", baseName, "-f", dump], env, io.cwd)).status !== 0)
+    if (!await ok("psql", [...connect, "-d", baseName, "-f", dump]))
       return null;
     return { name, url: withDatabase(value, name), base: { name: baseName, url: withDatabase(value, baseName) } };
   }
@@ -2682,9 +3040,40 @@ async function dropDatabase(db, io) {
     return;
   const { host, port, user, env } = connection(url);
   if (url.protocol.startsWith("postgres"))
-    await io.run("dropdb", ["-h", host, "-p", port, ...user ? ["-U", user] : [], db.name], env, io.cwd);
+    await io.run("dropdb", ["-w", "-h", host, "-p", port, ...user ? ["-U", user] : [], db.name], env, io.cwd);
   else
     await io.run("mysql", ["-h", host, "-P", port, ...user ? ["-u", user] : [], "-e", `DROP DATABASE IF EXISTS \`${db.name}\``], env, io.cwd);
+}
+async function refusedSource(value, io) {
+  const url = localDatabase(value);
+  if (url === null)
+    return null;
+  const database = databaseOf(url);
+  if (database.endsWith("_dkod_migrate"))
+    return `the source database ${database} was refused: its name ends in _dkod_migrate. ${USE_OWN_STORE}`;
+  if (SCRATCH_NAME.test(database))
+    return `the source database ${database} was refused: it has a dkod-migrate scratch name. ${USE_OWN_STORE}`;
+  if (!url.protocol.startsWith("postgres") || !io.hasTool("psql"))
+    return null;
+  const { host, port, user, env } = connection(url);
+  const queries = [
+    "select extract(epoch from now()-(pg_stat_file('base/'||oid||'/PG_VERSION')).modification) from pg_database where datname=current_database()",
+    "select extract(epoch from now()-stats_reset) from pg_stat_database where datname=current_database()"
+  ];
+  let text = "";
+  for (const sql of queries) {
+    const res = await io.run("psql", ["-w", "-h", host, "-p", port, ...user ? ["-U", user] : [], "-d", database, "-At", "-c", sql], env, io.cwd).catch(() => null);
+    if (res !== null && res.status === 0 && /^\d+(\.\d+)?$/.test(res.stdout.trim())) {
+      text = res.stdout.trim();
+      break;
+    }
+  }
+  if (text === "")
+    return null;
+  const minutes = Math.floor(Number(text) / 60);
+  if (minutes >= SOURCE_MAX_AGE_MIN)
+    return null;
+  return `the source database ${database} was refused: it was created ${String(minutes)} minutes ago (under ${String(SOURCE_MAX_AGE_MIN)}), so the agent probably made it. ${USE_OWN_STORE}`;
 }
 async function removeSnapshot(dir, io) {
   const text = io.readFile(snapshotPath(dir));
@@ -2716,19 +3105,36 @@ async function snapshot(folder, io, args = []) {
     return 2;
   }
   await removeSnapshot(dir, io);
-  const scratch = io.mkdtemp(join6(io.tmpdir(), "dkod-migrate-"));
+  const scratch = io.mkdtemp(join7(io.tmpdir(), "dkod-migrate-"));
   const id = (scratch.split(/[\\/]/).pop() ?? "run").replace(/[^A-Za-z0-9]/g, "_");
   const files = [];
-  for (const rel of io.walk(original, SKIP2)) {
-    if (!DATA2.test(rel))
+  const bases = [];
+  const flags = snapshotArgs(args);
+  const named = flags.pairs.map(([k, v]) => [k, v, "db-url"]);
+  if (flags.originalUrl !== "")
+    for (const [k, v] of await processPairs(flags.originalUrl, io))
+      named.push([k, v, "process"]);
+  for (const file of [".env.local", ".env"])
+    for (const [k, v] of envPairs(io.readFile(join7(original, file))))
+      named.push([k, v, file]);
+  const walked = io.walk(original, SKIP2);
+  const flatFound = flatData(original, walked, named.map(([k, v]) => [k, v]), io.readFile(join7(dir, ".dkod/map/app-map.json")), io);
+  for (const rel of walked) {
+    const flat = flatFound.get(rel);
+    if (!DATA2.test(rel) && flat === undefined)
       continue;
-    const to = join6(scratch, rel);
-    io.copyFile(join6(original, rel), to);
+    const to = join7(scratch, rel);
+    io.copyFile(join7(original, rel), to);
     files.push(to);
+    const base = join7(scratch, `.dkod-base/${rel}`);
+    io.copyFile(join7(original, rel), base);
+    bases.push({ file: to, base, rel, sha256: io.sha256([base]), ...flat !== undefined ? { kind: /\.csv$/i.test(rel) ? "csv" : "json", found: flat } : {} });
   }
   const env = { DKOD_MIGRATE_DATA: scratch };
   const databases = [];
-  const pair = async (key, value) => {
+  let noPassword = false;
+  let refused = null;
+  const pair = async (key, value, how) => {
     if (key in env)
       return;
     const copied = copiedFile(original, files, value);
@@ -2736,7 +3142,27 @@ async function snapshot(folder, io, args = []) {
       env[key] = copied;
       return;
     }
-    const db = await copyDatabase(value, scratch, id, io);
+    if (noPassword || refused !== null)
+      return;
+    if (localDatabase(value) !== null) {
+      try {
+        refused = await refusedSource(value, io);
+      } catch {
+        refused = null;
+      }
+      if (refused !== null)
+        return;
+    }
+    let db;
+    try {
+      db = await copyDatabase(value, scratch, id, io);
+    } catch (e) {
+      if (e instanceof Error && e.message === NO_PASSWORD) {
+        noPassword = true;
+        return;
+      }
+      throw e;
+    }
     if (db === null)
       return;
     const source = localDatabase(value);
@@ -2748,18 +3174,33 @@ async function snapshot(folder, io, args = []) {
       if (got !== null)
         Object.assign(db, { tables: got });
     }
+    const from0 = connection(source);
+    db.source = { host: from0.host, port: from0.port, database: databaseOf(source), how };
     databases.push(db);
     env[key] = db.url;
   };
-  const flags = snapshotArgs(args);
-  for (const [key, value] of flags.pairs)
-    await pair(key, value);
-  if (flags.originalUrl !== "")
-    for (const [key, value] of await processPairs(flags.originalUrl, io))
-      await pair(key, value);
-  for (const file of [".env.local", ".env"])
-    for (const [key, value] of envPairs(io.readFile(join6(original, file))))
-      await pair(key, value);
+  for (const [key, value, how] of named)
+    await pair(key, value, how);
+  if (refused !== null) {
+    for (const db of databases) {
+      await dropDatabase(db, io);
+      if (db.base)
+        await dropDatabase(db.base, io);
+    }
+    io.rm(scratch, { recursive: true, force: true });
+    io.print(`dkod-migrate: ${refused}`);
+    return 1;
+  }
+  if (noPassword) {
+    for (const db of databases) {
+      await dropDatabase(db, io);
+      if (db.base)
+        await dropDatabase(db.base, io);
+    }
+    io.rm(scratch, { recursive: true, force: true });
+    io.print(`dkod-migrate: ${NO_PASSWORD}`);
+    return 1;
+  }
   const empty = files.length === 0 && databases.length === 0;
   if (empty)
     io.rm(scratch, { recursive: true, force: true });
@@ -2769,13 +3210,16 @@ async function snapshot(folder, io, args = []) {
     scratch: empty ? "" : scratch,
     files,
     databases,
+    ...bases.length > 0 ? { bases } : {},
     env: empty ? {} : env,
+    ...databases[0]?.source ? { source: databases[0].source } : files.length > 0 ? { source: { how: "file", file: files[0] } } : {},
+    ...empty ? {} : { checks: CHECKS },
     ...empty ? { message: NEW_APP_ONLY } : {}
   };
   record.nonce = randomBytes(16).toString("hex");
   record.seal = sealOf(record, record.nonce);
   if (!empty)
-    io.writeFile(join6(scratch, SEAL_FILE), record.seal);
+    io.writeFile(join7(scratch, SEAL_FILE), record.seal);
   io.writeFile(snapshotPath(dir), `${JSON.stringify(record, null, 2)}
 `);
   io.print(JSON.stringify(record));
@@ -2796,7 +3240,15 @@ async function runMigrateCli(argv, io) {
       return code;
   }
   if (command === "side-by-side" && folder !== undefined)
-    return await sideBySide(folder, reportFile, dkReportFile, io);
+    return await sideBySide(folder, reportFile, dkReportFile, io, argv.slice(2));
+  if (command === "stop-servers" && folder !== undefined)
+    return await stopServersCommand(argv.slice(2), io);
+  if (command === "install-restart" && folder !== undefined) {
+    const to = join7(folder === "" ? io.cwd : folder, "tests/parity/restart.ts");
+    io.writeFile(to, PARITY_RESTART_SOURCE);
+    io.print(JSON.stringify({ ok: true, file: to }));
+    return 0;
+  }
   if (command === "freeze" && folder !== undefined)
     return await freeze(folder, reportFile, io);
   if (command === "unfreeze" && folder !== undefined)
@@ -2967,7 +3419,7 @@ async function discoverRuntime(baseUrl, mapped, codeRoutes, io) {
   return out;
 }
 
-var join7 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+var join8 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var SKIP3 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".dkod", "__pycache__"];
 var ASSET_KINDS = ["css", "font", "icon", "image"];
 var TEXT_MAX2 = 200;
@@ -3207,7 +3659,7 @@ function normalizeRoute(path) {
   p = `/${p.replace(/^\/+/, "")}`.replace(/\/+/g, "/");
   return p.length > 1 ? p.replace(/\/$/, "") : p;
 }
-var CODE2 = /\.(?:[cm]?[jt]sx?|svelte)$/;
+var CODE3 = /\.(?:[cm]?[jt]sx?|svelte)$/;
 var PY = /\.py$/;
 var VUE = /\.vue$/i;
 var scriptsOf = (text) => [...text.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).join(`
@@ -3256,7 +3708,7 @@ function packageDirs(files, needle, io, original) {
   for (const f of files) {
     if (f !== "package.json" && !f.endsWith("/package.json"))
       continue;
-    if (needle.test(io.readFile(join7(original, f)) ?? ""))
+    if (needle.test(io.readFile(join8(original, f)) ?? ""))
       out.push(f.slice(0, f.length - "package.json".length));
   }
   return out;
@@ -3287,7 +3739,7 @@ function fileRoutes(files, io, original) {
   const out = [];
   const add = (path, file, method = "GET") => out.push({ path: normalizeRoute(path), method, file, relative: false });
   const addHandler = (path, file) => {
-    for (const method of handlerMethods(io.readFile(join7(original, file)) ?? ""))
+    for (const method of handlerMethods(io.readFile(join8(original, file)) ?? ""))
       add(path, file, method);
   };
   const next = packageDirs(files, /"next"\s*:/, io, original);
@@ -3332,16 +3784,16 @@ function sourceRoutes(files, io, original) {
     if (IS_TEST.test(f))
       continue;
     if (/(?:^|\/)netlify\.toml$/.test(f)) {
-      const toml = io.readFile(join7(original, f));
+      const toml = io.readFile(join8(original, f));
       for (const m of (toml ?? "").matchAll(/^\s*from\s*=\s*(["'])(\/[^"']*)\1/gm)) {
         if (!SPA_CATCH_ALL.test(m[2]) && !/\s/.test(m[2]))
           out.push({ path: normalizeRoute(m[2]), method: "ANY", file: f, relative: false });
       }
       continue;
     }
-    if (!CODE2.test(f) && !PY.test(f))
+    if (!CODE3.test(f) && !PY.test(f))
       continue;
-    const text = io.readFile(join7(original, f));
+    const text = io.readFile(join8(original, f));
     if (text === null)
       continue;
     const add = (path, method = "GET") => {
@@ -3426,13 +3878,13 @@ function discoverTables(original, io) {
     if (IS_TEST.test(f))
       continue;
     if (/(?:^|\/)data\/.+\.csv$/i.test(f)) {
-      const header = (io.readFile(join7(original, f)) ?? "").split(/\r?\n/, 1)[0] ?? "";
+      const header = (io.readFile(join8(original, f)) ?? "").split(/\r?\n/, 1)[0] ?? "";
       put((f.split("/").pop() ?? f).replace(/\.csv$/i, ""), header.split(",").map((c) => bare(c.trim())).filter((c) => c !== ""));
       continue;
     }
-    if (!/\.sql$/i.test(f) && !CODE2.test(f) && !PY.test(f))
+    if (!/\.sql$/i.test(f) && !CODE3.test(f) && !PY.test(f))
       continue;
-    const raw = io.readFile(join7(original, f));
+    const raw = io.readFile(join8(original, f));
     if (raw === null)
       continue;
     const text = raw.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
@@ -3481,17 +3933,17 @@ function discoverSettings(original, io) {
     const base = f.split("/").pop();
     if (IS_TEST.test(f) && ENV_FILE2.test(base))
       continue;
-    if (ENV_FILE2.test(base) && !CODE2.test(base) && !PY.test(base) && !VUE.test(base)) {
-      for (const line of (io.readFile(join7(original, f)) ?? "").split(/\r?\n/)) {
+    if (ENV_FILE2.test(base) && !CODE3.test(base) && !PY.test(base) && !VUE.test(base)) {
+      for (const line of (io.readFile(join8(original, f)) ?? "").split(/\r?\n/)) {
         const key = /^\s*(?:export\s+)?([A-Za-z_]\w*)\s*=/.exec(line)?.[1];
         if (key !== undefined)
           names.add(key);
       }
       continue;
     }
-    if (IS_TEST.test(f) || !CODE2.test(f) && !PY.test(f) && !VUE.test(f))
+    if (IS_TEST.test(f) || !CODE3.test(f) && !PY.test(f) && !VUE.test(f))
       continue;
-    const raw = io.readFile(join7(original, f));
+    const raw = io.readFile(join8(original, f));
     if (raw === null)
       continue;
     const text = codeOf(f, raw);
@@ -3532,13 +3984,13 @@ function discoverColors(original, io) {
     if (/\.[cm]?[jt]sx?$/.test(f)) {
       if (IS_TEST.test(f))
         continue;
-      for (const c of colorsInCode(io.readFile(join7(original, f)) ?? ""))
+      for (const c of colorsInCode(io.readFile(join8(original, f)) ?? ""))
         colors.add(c);
       continue;
     }
     if (!/\.(?:css|scss|sass|less)$/i.test(f))
       continue;
-    for (const c of colorsInCss(io.readFile(join7(original, f)) ?? ""))
+    for (const c of colorsInCss(io.readFile(join8(original, f)) ?? ""))
       colors.add(c);
   }
   return [...colors].sort();
@@ -3548,9 +4000,9 @@ var MARKUP = /\.(?:html?|vue)$/i;
 function discoverFunctions(original, io) {
   const names = new Set;
   for (const f of io.walk(original, SKIP3)) {
-    if (IS_TEST.test(f) || !CODE2.test(f) && !PY.test(f) && !VUE.test(f))
+    if (IS_TEST.test(f) || !CODE3.test(f) && !PY.test(f) && !VUE.test(f))
       continue;
-    const raw = io.readFile(join7(original, f));
+    const raw = io.readFile(join8(original, f));
     if (raw === null)
       continue;
     const text = codeOf(f, raw);
@@ -3583,9 +4035,9 @@ var LITERAL = /"""([\s\S]*?)"""|'''([\s\S]*?)'''|`([^`]*)`|"((?:[^"\\\n]|\\.)*)"
 function discoverQueries(original, io) {
   const out = new Set;
   for (const f of io.walk(original, SKIP3)) {
-    if (IS_TEST.test(f) || !CODE2.test(f) && !PY.test(f) && !VUE.test(f) && !/\.(?:html?|sql)$/i.test(f))
+    if (IS_TEST.test(f) || !CODE3.test(f) && !PY.test(f) && !VUE.test(f) && !/\.(?:html?|sql)$/i.test(f))
       continue;
-    const text = io.readFile(join7(original, f));
+    const text = io.readFile(join8(original, f));
     if (text === null)
       continue;
     for (const m of text.matchAll(LITERAL)) {
@@ -3625,9 +4077,9 @@ function scanFonts(original, io) {
   const fonts = new Map;
   const stacks = new Set;
   for (const f of io.walk(original, SKIP3)) {
-    if (IS_TEST.test(f) || !STYLE.test(f) && !CODE2.test(f) && !MARKUP.test(f))
+    if (IS_TEST.test(f) || !STYLE.test(f) && !CODE3.test(f) && !MARKUP.test(f))
       continue;
-    const text = io.readFile(join7(original, f));
+    const text = io.readFile(join8(original, f));
     if (text === null)
       continue;
     for (const name of fontsIn(text, STYLE.test(f), stacks))
@@ -3677,9 +4129,9 @@ function discoverButtons(original, io) {
   const buttons = new Set;
   const tooltips = new Set;
   for (const f of io.walk(original, SKIP3)) {
-    if (IS_TEST.test(f) || !CODE2.test(f) && !MARKUP.test(f))
+    if (IS_TEST.test(f) || !CODE3.test(f) && !MARKUP.test(f))
       continue;
-    const text = io.readFile(join7(original, f));
+    const text = io.readFile(join8(original, f));
     if (text === null)
       continue;
     idsIn(text, buttons, tooltips);
@@ -3706,10 +4158,10 @@ function discoverServices(original, io) {
   for (const f of io.walk(original, SKIP3)) {
     const isPkg = f === "package.json" || f.endsWith("/package.json");
     const py = PY.test(f);
-    const plain = HOST_FILE.test(f) || ENV_FILE2.test(f.split("/").pop()) && !CODE2.test(f) && !py;
-    if (IS_TEST.test(f) || !isPkg && !plain && !CODE2.test(f) && !py)
+    const plain = HOST_FILE.test(f) || ENV_FILE2.test(f.split("/").pop()) && !CODE3.test(f) && !py;
+    if (IS_TEST.test(f) || !isPkg && !plain && !CODE3.test(f) && !py)
       continue;
-    const raw = io.readFile(join7(original, f));
+    const raw = io.readFile(join8(original, f));
     if (raw === null)
       continue;
     if (isPkg) {
@@ -3776,7 +4228,7 @@ function installedServers(map, original, io) {
   ];
   for (const f of io.walk(original, SKIP3)) {
     const base = f.split("/").pop();
-    const text = /^package\.json$|^requirements[\w.-]*\.txt$|^pyproject\.toml$/.test(base) ? io.readFile(join7(original, f)) : null;
+    const text = /^package\.json$|^requirements[\w.-]*\.txt$|^pyproject\.toml$/.test(base) ? io.readFile(join8(original, f)) : null;
     if (text === null)
       continue;
     let deps;
@@ -3835,11 +4287,11 @@ function recordsDevOverlay(value, top = true) {
 }
 function devOverlayStates(mapDir, io) {
   const out = [];
-  for (const rel of io.walk(join7(mapDir, "design"), [])) {
+  for (const rel of io.walk(join8(mapDir, "design"), [])) {
     const m = /^pages[/]([^/]+)[/]([^/]+)[.]json$/.exec(rel);
     if (m === null)
       continue;
-    const parsed = readJson(io.readFile(join7(join7(mapDir, "design"), rel)));
+    const parsed = readJson(io.readFile(join8(join8(mapDir, "design"), rel)));
     if (parsed.ok && recordsDevOverlay(parsed.value))
       out.push(`${m[1]}/${m[2]}`);
   }
@@ -3849,18 +4301,18 @@ async function checkMap(folder, io, args = []) {
   const flag = args.findIndex((a) => a === "--original-url" || a.startsWith("--original-url="));
   const originalUrl = flag < 0 ? "" : args[flag].startsWith("--original-url=") ? args[flag].slice(15) : args[flag + 1] ?? "";
   const dir = folder === "" ? io.cwd : folder;
-  const original = originalOf(io.readFile(join7(dir, ".dkod/migration.json")));
+  const original = originalOf(io.readFile(join8(dir, ".dkod/migration.json")));
   if (original === null) {
     io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
     return 2;
   }
-  const mapDir = join7(dir, ".dkod/map");
+  const mapDir = join8(dir, ".dkod/map");
   const problems = [];
   const missing = [];
   const noShot = [];
   const counts = { routes: 0, pages: 0, stores: 0, tables: 0, services: 0, settings: 0, queries: 0, functions: 0, design: 0, found_routes: 0, screenshots: 0, assets: 0 };
-  const parsed = readJson(io.readFile(join7(mapDir, "app-map.json")));
-  const designFiles = new Set(io.walk(join7(mapDir, "design"), []));
+  const parsed = readJson(io.readFile(join8(mapDir, "app-map.json")));
+  const designFiles = new Set(io.walk(join8(mapDir, "design"), []));
   let map = null;
   if (!parsed.ok)
     problems.push(`app-map.json: ${parsed.why}`);
@@ -4014,12 +4466,12 @@ async function checkMap(folder, io, args = []) {
     const rel = `pages/${pageSlug(page.path)}/default.png`;
     if (!designFiles.has(rel))
       continue;
-    const sha = io.sha256([join7(join7(mapDir, "design"), rel)]);
+    const sha = io.sha256([join8(join8(mapDir, "design"), rel)]);
     byImage.set(sha, [...byImage.get(sha) ?? [], page.path]);
   }
   const shotPages = [...byImage.values()].reduce((n, g) => n + g.length, 0);
   const placeholders = [...byImage.values()].filter((g) => g.length >= 3 || g.length === shotPages && shotPages >= 2).flat();
-  const assets = readJson(io.readFile(join7(mapDir, "assets/assets.json")));
+  const assets = readJson(io.readFile(join8(mapDir, "assets/assets.json")));
   if (!assets.ok)
     problems.push(`assets/assets.json: ${assets.why}`);
   else if (!Array.isArray(assets.value))
@@ -4112,7 +4564,7 @@ function walk(dir, skip) {
     for (const name of names) {
       if (skip.includes(name))
         continue;
-      const full = join8(at, name);
+      const full = join9(at, name);
       const next = rel === "" ? name : `${rel}/${name}`;
       if (statSync(full).isDirectory())
         visit(full, next);
@@ -4159,7 +4611,7 @@ var io = {
         return [];
       }
     })
-  ].some((dir) => dir !== "" && existsSync(join8(dir, program))),
+  ].some((dir) => dir !== "" && existsSync(join9(dir, program))),
   print: (line) => process.stdout.write(`${line}
 `),
   run: (cmd, args, env, cwd) => new Promise((resolve) => {
