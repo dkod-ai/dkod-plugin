@@ -3,11 +3,201 @@ import { createHash as createHash4, randomUUID } from "node:crypto";
 import { spawn as spawn2 } from "node:child_process";
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join as join2, resolve } from "node:path";
+import { dirname, join as join3, resolve } from "node:path";
 
 import { createHash as createHash3, randomBytes as randomBytes2 } from "node:crypto";
 import net2 from "node:net";
 import { resolve as resolvePath } from "node:path";
+
+import { join } from "node:path";
+var SKIP = new Set(["node_modules", ".git", ".venv", "venv", "dist", "build", ".next", ".turbo", ".dkod", "coverage", "test-results", "playwright-report", "__pycache__", ".cache"]);
+var MAX_DEPTH = 3;
+var MAX_FILES = 5000;
+var ENV_FILE = /^\.env(\..+)?$/;
+var COMPOSE_FILE = /^(docker-)?compose(\.[\w-]+)?\.ya?ml$/;
+var SQLITE_FILE = /\.(sqlite3?|db)$/i;
+var CONFIG_FILES = [
+  [/^schema\.prisma$/, "prisma"],
+  [/^drizzle\.config\.(ts|js|mjs|cjs|json)$/, "drizzle"],
+  [/^alembic\.ini$/, "alembic"],
+  [/^knexfile\.(ts|js|mjs|cjs)$/, "knex"],
+  [/^ormconfig\.(ts|js|json|ya?ml)$/, "typeorm"],
+  [/^\.sequelizerc$/, "sequelize"],
+  [/^manage\.py$/, "django"]
+];
+var JS_DRIVERS = ["pg", "postgres", "@neondatabase/serverless", "@vercel/postgres", "mysql", "mysql2", "better-sqlite3", "sqlite3", "@libsql/client", "@prisma/client", "prisma", "drizzle-orm", "knex", "sequelize", "typeorm", "kysely", "mongoose", "mongodb"];
+var PY_DRIVERS = ["psycopg", "psycopg2", "psycopg2-binary", "asyncpg", "sqlalchemy", "sqlmodel", "alembic", "pymysql", "mysqlclient", "aiosqlite", "django", "pymongo", "tortoise-orm", "peewee"];
+function kindOfUrl(value) {
+  const m = /^([a-z][a-z0-9+.-]*):/i.exec(value.trim());
+  if (m === null)
+    return null;
+  const scheme = m[1].toLowerCase();
+  if (scheme.startsWith("postgres"))
+    return "postgres";
+  if (scheme.startsWith("mysql") || scheme.startsWith("mariadb"))
+    return "mysql";
+  if (scheme.startsWith("sqlite") || scheme === "file" || scheme === "libsql")
+    return "sqlite";
+  if (scheme.startsWith("mongodb"))
+    return "mongodb";
+  return null;
+}
+function isLocal(value, kind) {
+  if (kind === "sqlite")
+    return true;
+  try {
+    const host = new URL(value.trim()).hostname.replace(/^\[|\]$/g, "");
+    return ["localhost", "127.0.0.1", "::1", "0.0.0.0", "db", "postgres", "mysql", "database"].includes(host) || host === "";
+  } catch {
+    return false;
+  }
+}
+function kindOfImage(image) {
+  const name = image.toLowerCase().split("@")[0].split(":")[0].split("/").pop() ?? "";
+  if (/postgres|postgis|timescale|pgvector/.test(name))
+    return "postgres";
+  if (/mysql|mariadb/.test(name))
+    return "mysql";
+  if (/mongo/.test(name))
+    return "mongodb";
+  return null;
+}
+function composeServices(text) {
+  const out = [];
+  let inServices = false;
+  let current = null;
+  for (const line of text.split(`
+`)) {
+    if (/^services:\s*$/.test(line)) {
+      inServices = true;
+      continue;
+    }
+    if (/^\S/.test(line)) {
+      inServices = false;
+      current = null;
+      continue;
+    }
+    if (!inServices)
+      continue;
+    const svc = /^ {2}([A-Za-z0-9_.-]+):\s*$/.exec(line) ?? /^\t([A-Za-z0-9_.-]+):\s*$/.exec(line);
+    if (svc !== null) {
+      current = svc[1];
+      continue;
+    }
+    const img = /^\s+image:\s*["']?([^"'\s#]+)/.exec(line);
+    if (img !== null && current !== null) {
+      const kind = kindOfImage(img[1]);
+      if (kind !== null && !out.some((o) => o.service === current))
+        out.push({ service: current, kind });
+    }
+  }
+  return out;
+}
+function envKeys(text) {
+  const out = [];
+  for (const line of text.split(`
+`)) {
+    const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    if (m === null)
+      continue;
+    const value = m[2].trim().replace(/^(["'])(.*)\1$/, "$2");
+    const kind = kindOfUrl(value);
+    if (kind !== null && (kind !== "sqlite" || /DATABASE|DB|SQLITE/i.test(m[1])))
+      out.push({ key: m[1], kind, local: isLocal(value, kind) });
+    else if (value === "" && /^(DATABASE_URL|POSTGRES_URL|POSTGRES_PRISMA_URL|DB_URL|MYSQL_URL|SQLITE_PATH|MONGODB_URI)$/.test(m[1]))
+      out.push({ key: m[1], kind: "unknown", local: false });
+  }
+  return out;
+}
+function jsDrivers(text) {
+  try {
+    const pkg = JSON.parse(text);
+    const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+    return JS_DRIVERS.filter((d) => (d in deps));
+  } catch {
+    return [];
+  }
+}
+function pyDrivers(text) {
+  const lower = text.toLowerCase();
+  return PY_DRIVERS.filter((d) => new RegExp(`(^|[\\s"'\\[,])${d.replace(/[-]/g, "[-_]")}([\\s"'<>=~!;,\\[\\]]|$)`, "m").test(lower));
+}
+function kindOfDriver(d) {
+  if (["pg", "postgres", "@neondatabase/serverless", "@vercel/postgres", "psycopg", "psycopg2", "psycopg2-binary", "asyncpg"].includes(d))
+    return "postgres";
+  if (["mysql", "mysql2", "pymysql", "mysqlclient"].includes(d))
+    return "mysql";
+  if (["better-sqlite3", "sqlite3", "@libsql/client", "aiosqlite"].includes(d))
+    return "sqlite";
+  if (["mongoose", "mongodb", "pymongo"].includes(d))
+    return "mongodb";
+  return null;
+}
+function detectDatabase(root, io) {
+  const env = [];
+  const compose = [];
+  const configs = new Set;
+  const drivers = new Set;
+  const sqlite = [];
+  const kinds = new Set;
+  let seen = 0;
+  const walk = (rel, depth) => {
+    for (const entry of io.listDir(rel === "" ? root : join(root, rel))) {
+      if (++seen > MAX_FILES)
+        return;
+      const path = rel === "" ? entry.name : `${rel}/${entry.name}`;
+      if (entry.dir) {
+        if (depth < MAX_DEPTH && !SKIP.has(entry.name))
+          walk(path, depth + 1);
+        continue;
+      }
+      const name = entry.name;
+      if (ENV_FILE.test(name)) {
+        for (const k of envKeys(io.readFile(join(root, path)) ?? "")) {
+          env.push({ file: path, ...k });
+          if (k.kind !== "unknown")
+            kinds.add(k.kind);
+        }
+      } else if (COMPOSE_FILE.test(name)) {
+        for (const s of composeServices(io.readFile(join(root, path)) ?? "")) {
+          compose.push({ file: path, ...s });
+          kinds.add(s.kind);
+        }
+      } else if (name === "package.json") {
+        for (const d of jsDrivers(io.readFile(join(root, path)) ?? ""))
+          drivers.add(d);
+      } else if (name === "requirements.txt" || name === "pyproject.toml" || name === "Pipfile") {
+        for (const d of pyDrivers(io.readFile(join(root, path)) ?? ""))
+          drivers.add(d);
+      } else if (SQLITE_FILE.test(name)) {
+        sqlite.push(path);
+        kinds.add("sqlite");
+      }
+      for (const [re, label] of CONFIG_FILES)
+        if (re.test(name))
+          configs.add(label);
+    }
+  };
+  walk("", 0);
+  for (const d of drivers) {
+    const k = kindOfDriver(d);
+    if (k !== null)
+      kinds.add(k);
+  }
+  const uses = env.length > 0 || compose.length > 0 || configs.size > 0 || drivers.size > 0 || sqlite.length > 0;
+  const next = uses ? "The app keeps data. Give it its Dev database before you run or test it here: dkoder.devdb.status, dkoder.devdb.make with confirm: true when it says missing, then dkod-db.mjs up and migrate. Never start a local database for it, also when the app does not run here without one." : "Nothing says the app keeps data. Ask the person whether it does; when it does not, deploy with no_database: true.";
+  return {
+    ok: true,
+    uses_database: uses,
+    kinds: [...kinds].sort(),
+    env,
+    compose,
+    configs: [...configs].sort(),
+    drivers: [...drivers].sort(),
+    sqlite_files: sqlite.sort(),
+    next
+  };
+}
 
 import { createHash } from "node:crypto";
 function sealOf(r, nonce) {
@@ -623,7 +813,8 @@ var FLAGS = {
   down: ["dir"],
   migrate: ["dir", "port"],
   explain: [],
-  import: ["app", "from", "dir", "port"]
+  import: ["app", "from", "dir", "port"],
+  detect: ["dir"]
 };
 var BOOLEAN_FLAGS = { up: ["detach"], down: ["all"] };
 function parseArgs(argv) {
@@ -650,7 +841,8 @@ var USAGE = [
   "  node dkod-db.mjs up --app <app key> [--port 6543] [--dir <app folder>] [--wait <seconds>] [--detach]",
   "  node dkod-db.mjs down [--dir <app folder>] [--all]",
   "  node dkod-db.mjs migrate [--dir <app folder>] [--port 6543]",
-  "  node dkod-db.mjs import --app <app key> --from <local postgres URL | snapshot> [--dir <app folder>] [--port 6543]"
+  "  node dkod-db.mjs import --app <app key> --from <local postgres URL | snapshot> [--dir <app folder>] [--port 6543]",
+  "  node dkod-db.mjs detect [--dir <app folder>]"
 ].join(`
 `);
 function portOf(raw, fallback) {
@@ -938,7 +1130,7 @@ function gitignoreCoversEnvLocal(text) {
   return text.split(`
 `).some((l) => [".env.local", "/.env.local", ".env*", ".env.*", "*.local"].includes(l.trim()));
 }
-var join = (dir, name) => dir.endsWith("/") || dir.endsWith("\\") ? `${dir}${name}` : `${dir}/${name}`;
+var join2 = (dir, name) => dir.endsWith("/") || dir.endsWith("\\") ? `${dir}${name}` : `${dir}/${name}`;
 async function startUp(flags, io, cwd) {
   const fail = (code, sentence) => {
     io.print(`dkod-db: ${sentence}`);
@@ -1196,9 +1388,9 @@ async function startUp(flags, io, cwd) {
     return fail(3, listening === "busy" ? `Port ${port} is in use. Stop what uses it, or pick another with --port.` : `Could not listen on port ${port}.`);
   }
   const actualPort = listening;
-  const envPath = join(dir, ".env.local");
+  const envPath = join2(dir, ".env.local");
   io.writeFile(envPath, mergeDatabaseUrl(io.readFile(envPath), databaseUrlOf(app, actualPort)));
-  if (!gitignoreCoversEnvLocal(io.readFile(join(dir, ".gitignore"))))
+  if (!gitignoreCoversEnvLocal(io.readFile(join2(dir, ".gitignore"))))
     io.print("dkod-db: warning: .gitignore does not ignore .env.local. Add it so it is never committed.");
   io.print(`dkod-db: ${app} Dev database on 127.0.0.1:${actualPort} (DATABASE_URL in .env.local)`);
   return {
@@ -1229,7 +1421,7 @@ var APPLIED = /running upgrade|\bapplied\b|migrat\w* (?:complete|done|success)|\
 async function runMigrate(flags, io, cwd, exists) {
   const say = (line) => io.print(`dkod-db: ${line}`);
   const dir = flags.get("dir") ?? cwd;
-  const url = readDatabaseUrl(io.readFile(join(dir, ".env.local")));
+  const url = readDatabaseUrl(io.readFile(join2(dir, ".env.local")));
   if (!url) {
     say("There is no DATABASE_URL in .env.local. Run `node dkod-db.mjs up --app <app key>` first.");
     return 2;
@@ -1247,8 +1439,8 @@ async function runMigrate(flags, io, cwd, exists) {
     say("The Dev database is not up. Run `node dkod-db.mjs up --app <app key>` first, in the background.");
     return 2;
   }
-  const drizzle = ["drizzle.config.ts", "drizzle.config.js", "drizzle.config.mjs"].some((f) => exists(join(dir, f)));
-  const tool = drizzle ? { name: "drizzle-kit", cmd: "bunx", args: ["drizzle-kit", "migrate"] } : exists(join(dir, "alembic.ini")) ? { name: "alembic", cmd: "alembic", args: ["upgrade", "head"] } : null;
+  const drizzle = ["drizzle.config.ts", "drizzle.config.js", "drizzle.config.mjs"].some((f) => exists(join2(dir, f)));
+  const tool = drizzle ? { name: "drizzle-kit", cmd: "bunx", args: ["drizzle-kit", "migrate"] } : exists(join2(dir, "alembic.ini")) ? { name: "alembic", cmd: "alembic", args: ["upgrade", "head"] } : null;
   if (!tool) {
     say("No migration tool found: expected drizzle.config.ts (or .js, .mjs) or alembic.ini in the app folder.");
     return 2;
@@ -1336,7 +1528,7 @@ async function importSqlite(c) {
       return 1;
     }
   }
-  const mapped = readSqliteMapTables(io.readFile(join(dir, ".dkod/map/app-map.json")));
+  const mapped = readSqliteMapTables(io.readFile(join2(dir, ".dkod/map/app-map.json")));
   if (mapped.length === 0) {
     say("The migration map has no tables to import (.dkod/map/app-map.json).");
     return 2;
@@ -1492,7 +1684,7 @@ function pickFlat(c) {
       return 1;
     }
   }
-  const mapped = readFlatMapTables(io.readFile(join(dir, ".dkod/map/app-map.json")));
+  const mapped = readFlatMapTables(io.readFile(join2(dir, ".dkod/map/app-map.json")));
   const stem = (rel) => (rel.split("/").pop() ?? rel).replace(/\.[^.]*$/, "");
   const storeHit = (store, rel) => store !== null && (store === rel || rel.endsWith(`/${store}`) || store.endsWith(`/${rel}`));
   const picked = [];
@@ -1644,7 +1836,7 @@ async function runImport(flags, io, cwd) {
     return 2;
   }
   const dir = flags.get("dir") ?? cwd;
-  const snapshotFile = join(dir, ".dkod/snapshot.json");
+  const snapshotFile = join2(dir, ".dkod/snapshot.json");
   let sourceRaw = from;
   let snapshotMode = false;
   let sqliteBases = null;
@@ -1656,7 +1848,7 @@ async function runImport(flags, io, cwd) {
     }
     let rec = null;
     try {
-      rec = JSON.parse(io.readFile(from === "snapshot" ? snapshotFile : /^([/\\]|[a-z]:[/\\])/i.test(from) ? from : join(dir, from)) ?? "null");
+      rec = JSON.parse(io.readFile(from === "snapshot" ? snapshotFile : /^([/\\]|[a-z]:[/\\])/i.test(from) ? from : join2(dir, from)) ?? "null");
     } catch {}
     const r = rec;
     const dbs = r && r.mode === "snapshot" && Array.isArray(r.databases) ? r.databases : [];
@@ -1710,7 +1902,7 @@ async function runImport(flags, io, cwd) {
   const password = sourcePassword || io.env.PGPASSWORD || "";
   source.password = "";
   const sourceUrl = source.toString();
-  const devRaw = readDatabaseUrl(io.readFile(join(dir, ".env.local")));
+  const devRaw = readDatabaseUrl(io.readFile(join2(dir, ".env.local")));
   if (!devRaw) {
     say("There is no DATABASE_URL in .env.local. Run `node dkod-db.mjs up --app <app key>` first, in the background.");
     return 2;
@@ -1734,7 +1926,7 @@ async function runImport(flags, io, cwd) {
   dev.port = String(port);
   dev.password = "";
   const devUrl = dev.toString();
-  const freezeText = io.readFile(join(dir, ".dkod/parity/freeze.json"));
+  const freezeText = io.readFile(join2(dir, ".dkod/parity/freeze.json"));
   if (freezeText === null) {
     say("There is no .dkod/parity/freeze.json. Freeze the parity suite (step 3 of the dkod-migrate skill) before the import.");
     return 2;
@@ -1775,7 +1967,7 @@ async function runImport(flags, io, cwd) {
     say("freeze.json records no data identity (no Postgres scratch database was frozen on). Run `dkod-migrate.mjs snapshot`, rerun the suite and freeze again.");
     return 1;
   }
-  const mapped = readMapTables(io.readFile(join(dir, ".dkod/map/app-map.json")));
+  const mapped = readMapTables(io.readFile(join2(dir, ".dkod/map/app-map.json")));
   if (mapped.length === 0) {
     say("The migration map has no tables to import (.dkod/map/app-map.json).");
     return 2;
@@ -1953,7 +2145,7 @@ END $$;
 }
 function statePaths(io, dir) {
   const resolved = resolvePath(dir);
-  const base = join(io.stateDir(), `dkod-db-${createHash3("sha256").update(resolved).digest("hex").slice(0, 16)}`);
+  const base = join2(io.stateDir(), `dkod-db-${createHash3("sha256").update(resolved).digest("hex").slice(0, 16)}`);
   return { state: `${base}.json`, log: `${base}.log`, dir: resolved };
 }
 function readState(io, path) {
@@ -2040,7 +2232,7 @@ async function runUpDetached(flags, io) {
     await sleep(io, POLL_MS);
     const log = io.readFile(paths.log) ?? "";
     const port = Number(READY_LINE.exec(log)?.[1] ?? 0);
-    if (port > 0 && readDatabaseUrl(io.readFile(join(paths.dir, ".env.local"))) !== null && await probe(port)) {
+    if (port > 0 && readDatabaseUrl(io.readFile(join2(paths.dir, ".env.local"))) !== null && await probe(port)) {
       io.writeFile(paths.state, JSON.stringify({ pid, app, dir: paths.dir, log: paths.log, port }));
       io.print(JSON.stringify({ ok: true, app, port, pid, log: paths.log }));
       return 0;
@@ -2123,6 +2315,11 @@ async function runDbCli(argv, io) {
     case "explain":
       io.print("dkod-db: explain is coming in DKO-1052");
       return 2;
+    case "detect": {
+      const dir = resolvePath(io.cwd, args.flags.get("dir") ?? ".");
+      io.print(JSON.stringify(detectDatabase(dir, { readFile: io.readFile, listDir: io.listDir ?? (() => []) })));
+      return 0;
+    }
     default:
       return await runImport(args.flags, io, io.cwd);
   }
@@ -2152,7 +2349,7 @@ function runProcess(cmd, args, env, cwd, input) {
 }
 
 function stateDir() {
-  const dir = join2(homedir(), ".dkod", "db");
+  const dir = join3(homedir(), ".dkod", "db");
   mkdirSync(dir, { recursive: true, mode: 448 });
   chmodSync(dir, 448);
   return dir;
@@ -2176,7 +2373,7 @@ process.exitCode = await runDbCli(process.argv.slice(2), {
     }
   },
   writeFile: (path, text) => writeFileSync(path, text, "utf8"),
-  devicePath: () => join2(stateDir(), "device.json"),
+  devicePath: () => join3(stateDir(), "device.json"),
   writePrivate: (path, text) => {
     writeFileSync(path, text, { encoding: "utf8", mode: 384 });
     chmodSync(path, 384);
@@ -2229,10 +2426,17 @@ process.exitCode = await runDbCli(process.argv.slice(2), {
       rmSync(path, { force: true });
     } catch {}
   },
+  listDir: (path) => {
+    try {
+      return readdirSync(path, { withFileTypes: true }).map((e) => ({ name: e.name, dir: e.isDirectory() }));
+    } catch {
+      return [];
+    }
+  },
   listStates: () => {
     try {
       const dir = stateDir();
-      return readdirSync(dir).filter((name) => /^dkod-db-[0-9a-f]{16}\.json$/.test(name)).map((name) => join2(dir, name));
+      return readdirSync(dir).filter((name) => /^dkod-db-[0-9a-f]{16}\.json$/.test(name)).map((name) => join3(dir, name));
     } catch {
       return [];
     }
