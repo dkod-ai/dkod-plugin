@@ -2077,6 +2077,120 @@ function localStoreProblems(sources, read) {
   return problems;
 }
 
+var TITLE = /\b(?:test|it)(?:\.(?:only|fixme|slow))?\(\s*(["'`])((?:\\.|(?!\1)[^\\])*)\1/g;
+function testBlocks(text) {
+  const ms = [...text.matchAll(TITLE)];
+  return ms.map((m, i) => {
+    const start = m.index + m[0].length;
+    let end = ms[i + 1]?.index ?? text.length;
+    const indent = text.slice(text.lastIndexOf(`
+`, m.index - 1) + 1, m.index).match(/^\s*/)[0];
+    const close = text.slice(start, end).indexOf(`
+${indent}});`);
+    if (close >= 0)
+      end = start + close;
+    return { title: m[2], body: text.slice(start, end) };
+  });
+}
+var stripComments2 = (code) => code.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+function balanced(code, open) {
+  const pair = { "(": ")", "[": "]", "{": "}" };
+  const stack = [];
+  let quote = "";
+  for (let i = open;i < code.length; i++) {
+    const c = code[i];
+    if (quote !== "") {
+      if (c === "\\")
+        i += 1;
+      else if (c === quote)
+        quote = "";
+      continue;
+    }
+    if (c === "'" || c === '"' || c === "`")
+      quote = c;
+    else if (pair[c] !== undefined)
+      stack.push(pair[c]);
+    else if (c === ")" || c === "]" || c === "}") {
+      if (stack.pop() !== c)
+        return null;
+      if (stack.length === 0)
+        return code.slice(open + 1, i);
+    }
+  }
+  return null;
+}
+var IFRAME_MASK = /^\s*page\s*\.\s*locator\s*\(\s*(["'`])iframe\1\s*\)\s*,?\s*$/;
+function designProblems(blocks, framed) {
+  const out = [];
+  for (const { title, body } of blocks) {
+    if (!/@design\b/.test(title))
+      continue;
+    const code = stripComments2(body);
+    const isFramed = framed(title);
+    let sawMask = false;
+    for (const m of code.matchAll(/\.toHaveScreenshot\s*\(/g)) {
+      const before = code.slice(0, m.index).replace(/\s+$/, "");
+      if (!/\bexpect\s*\(\s*page\s*\)(?:\s*\.\s*not)?$/.test(before)) {
+        out.push(`${title}: a page baseline is a full-page shot of \`page\`: write \`await expect(page).toHaveScreenshot(...)\`, never a shot of one element or locator. Fix it the same on the original and the dk- app`);
+      }
+      const args = balanced(code, m.index + m[0].length - 1) ?? "";
+      if (!/\bfullPage\s*:\s*true\b/.test(args) || /\bfullPage\s*:\s*false\b/.test(args)) {
+        out.push(`${title}: a page baseline is a full-page shot: pass \`{ fullPage: true }\` as the options of toHaveScreenshot (the default and \`fullPage: false\` take only the viewport)`);
+      }
+      const second = splitTop(args).slice(1).join(",").trim();
+      if (/\.\.\./.test(second) || /\b(?:style|stylePath)\s*:/.test(second) || second !== "" && !second.startsWith("{")) {
+        out.push(`${title}: write the options of toHaveScreenshot as one object literal with no spread, no \`style\`/\`stylePath\` and no variable (they can hide content like a mask), and call it in the test body itself, not in a helper. \`expect.soft(page)\` is refused too`);
+      }
+      const mask = /\bmask\s*:\s*/.exec(args);
+      if (mask === null)
+        continue;
+      sawMask = true;
+      const at = mask.index + mask[0].length;
+      const entries = args[at] === "[" ? balanced(args, at) : null;
+      const parts = entries === null ? null : splitTop(entries);
+      if (parts === null || parts.length === 0 || !parts.every((p) => IFRAME_MASK.test(p))) {
+        out.push(`${title}: the only allowed mask is the cross-origin iframe, \`mask: [page.locator("iframe")]\`. Remove the other mask entries; fix times and dates with page.clock (one fixed time on the original and the dk- app), never a mask`);
+      } else if (!isFramed) {
+        out.push(`${title}: this state's json lists no cross-origin frames, so it takes no mask. Remove \`mask:\`; fix times and dates with page.clock, never a mask`);
+      }
+    }
+    if (isFramed && !sawMask) {
+      out.push(`${title}: the state json lists cross-origin frames, so add \`mask: [page.locator("iframe")]\` to this test's toHaveScreenshot, the same on the original and the dk- app`);
+    }
+  }
+  return out;
+}
+function splitTop(text) {
+  const parts = [];
+  let depth = 0;
+  let quote = "";
+  let cur = "";
+  for (let i = 0;i < text.length; i++) {
+    const c = text[i];
+    if (quote !== "") {
+      cur += c;
+      if (c === "\\")
+        cur += text[++i] ?? "";
+      else if (c === quote)
+        quote = "";
+      continue;
+    }
+    if (c === "'" || c === '"' || c === "`")
+      quote = c;
+    else if ("([{".includes(c))
+      depth += 1;
+    else if (")]}".includes(c))
+      depth -= 1;
+    if (c === "," && depth === 0) {
+      parts.push(cur);
+      cur = "";
+    } else
+      cur += c;
+  }
+  parts.push(cur);
+  return parts.filter((p) => p.trim() !== "");
+}
+
 var PARITY_RESTART_SOURCE = `// Shipped by dkod-migrate.mjs install-restart. Part of the frozen parity suite: never edit it.
 // restartApp() stops the app that listens on PARITY_BASE_URL's port and starts it again from PARITY_START_CMD
 // (run from PARITY_START_CWD, else the current folder). The new server stays in this process's session and group
@@ -2184,10 +2298,62 @@ export async function restartApp(): Promise<void> {
 var join3 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var TEST_FILE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
 var DETACHING = /\b(?:setsid|nohup|disown)\b|\bdetached\s*:\s*true\b|\.unref\s*\(/;
-var TITLE = /\b(?:test|it)(?:\.(?:only|fixme|slow))?\(\s*(["'`])((?:\\.|(?!\1)[^\\])*)\1/g;
 var isRec4 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 var list2 = (v) => Array.isArray(v) ? v.filter(isRec4) : [];
 var same2 = (a, b) => a.trim().replace(/\s+/g, " ").toLowerCase() === b.trim().replace(/\s+/g, " ").toLowerCase();
+var ORIGINAL_SKIP = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".dkod", "__pycache__", "test-results", "out", ".output", ".svelte-kit", ".nuxt", ".turbo", "coverage", "next-env.d.ts"];
+function originalSha256(original, io) {
+  const files = io.walk(original, ORIGINAL_SKIP).filter((f) => !f.endsWith(".tsbuildinfo")).sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
+  return io.sha256(files.map((f) => join3(original, f)));
+}
+var COPY_ADVICE = "Run the original from an unchanged copy; to run a production build, set env, never edit its code.";
+var tryHash = (dir, io) => {
+  try {
+    return originalSha256(dir, io);
+  } catch {
+    return null;
+  }
+};
+var serveCopyPath = (dir) => join3(dir, ".dkod/serve-copy.json");
+function serveCopyOf(dir, io) {
+  try {
+    const r = JSON.parse(io.readFile(serveCopyPath(dir)) ?? "null");
+    return isRec4(r) && typeof r.copy === "string" && r.copy !== "" ? r.copy : null;
+  } catch {
+    return null;
+  }
+}
+function serveCopy(folder, copy, io) {
+  const dir = folder === "" ? io.cwd : folder;
+  const original = originalOf(io.readFile(join3(dir, ".dkod/migration.json")));
+  if (original === null) {
+    io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
+    return 2;
+  }
+  if (copy === undefined || copy === "") {
+    io.print("dkod-migrate: serve-copy needs the folder of the copy: serve-copy <folder> <copy folder>");
+    return 2;
+  }
+  const there = tryHash(copy, io);
+  const here = tryHash(original, io);
+  if (there === null || here === null || there !== here)
+    return fail(io, { problems: [`${copy}: the copy does not hold the original's source files (sha256 differs, or it is missing). Copy the original without .git again, before any edit. ${COPY_ADVICE}`] });
+  io.writeFile(serveCopyPath(dir), `${JSON.stringify({ copy, sha256: here, recordedAt: new Date().toISOString() }, null, 2)}
+`);
+  io.print(JSON.stringify({ ok: true, copy, sha256: here }));
+  return 0;
+}
+function originalDrift(original, frozen, io) {
+  if (typeof frozen.original_sha256 !== "string")
+    return [];
+  const out = [];
+  if (typeof frozen.original_copy === "string" && tryHash(frozen.original_copy, io) !== frozen.original_sha256) {
+    out.push(`original: the copy that served the original (${frozen.original_copy}) differs from the one frozen, or it was moved or removed (sha256 differs). ${COPY_ADVICE}`);
+  }
+  if (tryHash(original, io) !== frozen.original_sha256)
+    out.push(`original: the original differs from the one frozen (sha256 differs). It is read only. ${COPY_ADVICE}`);
+  return out;
+}
 function mapFiles(dir, io) {
   return io.walk(join3(dir, ".dkod/map"), ["node_modules"]).map((rel) => `.dkod/map/${rel}`).sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
 }
@@ -2202,20 +2368,6 @@ function mapDrift(dir, frozen, io) {
   return now === frozen.map_sha256 ? [] : [".dkod/map: the migration map (app-map.json or the design files) changed after the freeze (sha256 differs). Put the frozen map back; to change it, unfreeze, redo the map and the suite, and freeze again."];
 }
 var freezePath = (dir) => join3(dir, ".dkod/parity/freeze.json");
-function testBlocks(text) {
-  const ms = [...text.matchAll(TITLE)];
-  return ms.map((m, i) => {
-    const start = m.index + m[0].length;
-    let end = ms[i + 1]?.index ?? text.length;
-    const indent = text.slice(text.lastIndexOf(`
-`, m.index - 1) + 1, m.index).match(/^\s*/)[0];
-    const close = text.slice(start, end).indexOf(`
-${indent}});`);
-    if (close >= 0)
-      end = start + close;
-    return { title: m[2], body: text.slice(start, end) };
-  });
-}
 function hasRestart(body) {
   const code = body.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
   const call = /\b(?:fetch|request\.\w+|page\.\w+|api\.\w+|post|put|patch|delete|get)\s*\(/;
@@ -2317,10 +2469,18 @@ async function freeze(folder, reportFile, io) {
   if (packaged.size > 0) {
     return fail(io, { problems: [...packaged].map((f) => `tests/parity/${f}: a package file or node_modules does not belong in the suite. Keep package.json, the lockfile and node_modules at the dk- folder root, and delete this.`) });
   }
-  if (originalOf(io.readFile(join3(dir, ".dkod/migration.json"))) === null) {
+  const originalDir = originalOf(io.readFile(join3(dir, ".dkod/migration.json")));
+  if (originalDir === null) {
     io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
     return 2;
   }
+  const copyDir = serveCopyOf(dir, io);
+  if (copyDir === null)
+    return fail(io, { problems: [".dkod/serve-copy.json: missing. Right after copying the original to the run's scratch folder (step 1), run `dkod-migrate.mjs serve-copy <folder> <copy folder>`, then run the suite on that copy."] });
+  const copyHash = tryHash(copyDir, io);
+  const origHash = tryHash(originalDir, io);
+  if (copyHash === null || origHash === null || copyHash !== origHash)
+    return fail(io, { problems: [`original: the copy that served the original (${copyDir}) differs from the original, or one of them cannot be read (sha256 differs). ${COPY_ADVICE}`] });
   if (reportFile === undefined)
     return fail(io, { problems: ["freeze needs the Playwright JSON report of the run on the original: freeze <folder> <report.json>"] });
   let map;
@@ -2363,22 +2523,15 @@ async function freeze(folder, reportFile, io) {
       problems.push(`tests/parity/${f}: \`${hit[0]}\` detaches a server from the run, so nothing stops it later. Delete this restart and call restartApp() from tests/parity/restart.ts (\`dkod-migrate.mjs install-restart <folder>\`)`);
   }
   for (const f of specs) {
-    for (const { title, body } of testBlocks(io.readFile(join3(dir, `tests/parity/${f}`)) ?? "")) {
+    const blocks = testBlocks(io.readFile(join3(dir, `tests/parity/${f}`)) ?? "");
+    problems.push(...designProblems(blocks, designFramed(framed)));
+    for (const { title, body } of blocks) {
       let tags = tagsOf(title);
       if (tags.length === 0)
         continue;
       if (tags.some((t) => t.kind === "data") && !hasRestart(body)) {
         problems.push(`${title}: an @data test must write, read back, restart the app, then read again; this body has no restart between the write and the second read. Add the restart step (a restartApp() helper) and run the suite on the original again`);
         tags = tags.filter((t) => t.kind !== "data");
-      }
-      for (const t of tags) {
-        if (t.kind !== "design")
-          continue;
-        const [path, state] = t.key.split(" ");
-        const code = body.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
-        if (framed.has(`${pageSlug(path)}/${state}`) && !/\bmask\s*:[^;]*?locator\s*\(/.test(code)) {
-          problems.push(`${title}: the state json lists cross-origin frames, so add \`mask: [page.locator("iframe")]\` to this test's toHaveScreenshot, the same on the original and the dk- app`);
-        }
       }
       if (!run.some((t) => t.title === title)) {
         notRun.push(`${title} (not in the report)`);
@@ -2479,7 +2632,7 @@ async function freeze(folder, reportFile, io) {
   }
   const files = suiteFiles(dir, io);
   const sha256 = io.sha256(files.map((f) => join3(dir, f)));
-  const record = { sha256, files, baseline: { tests: run.map((t) => t.title), passed: passed.size }, frozenAt: new Date().toISOString(), platform: process.platform, data: frozenData, map_sha256: mapSha256(dir, io) };
+  const record = { sha256, files, baseline: { tests: run.map((t) => t.title), passed: passed.size }, frozenAt: new Date().toISOString(), platform: process.platform, data: frozenData, map_sha256: mapSha256(dir, io), original_sha256: origHash, original_copy: copyDir };
   io.writeFile(freezePath(dir), `${JSON.stringify(record, null, 2)}
 `);
   io.print(JSON.stringify({ ok: true, sha256, counts: { tests: run.length, tagged, original_passed: passed.size, original_failed: 0 }, missing, original_failures: [] }));
@@ -2532,7 +2685,7 @@ var DESTRUCTIVE_SEED = [
   /\.destroy\s*\(\s*\{/i,
   /\.del\s*\(/i
 ];
-var stripComments2 = (text) => text.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/.*$/gm, "$1").replace(/(^|\s)--.*$/gm, "$1");
+var stripComments3 = (text) => text.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/.*$/gm, "$1").replace(/(^|\s)--.*$/gm, "$1");
 var SEED_FILE = /\.(?:[cm]?[jt]s|sql|py)$/i;
 var NEXT_MARKERS = ["__NEXT_DATA__", "/_next/static/", "next-route-announcer"];
 var isRec5 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -2586,6 +2739,7 @@ async function checkBuild(folder, reportFile, io) {
       problems.push("tests/parity: the suite changed after the freeze (sha256 differs). Put the frozen files back; never edit them.");
     }
     problems.push(...mapDrift(dir, record, io));
+    problems.push(...originalDrift(original, record, io));
     const reportText = reportFile === undefined ? null : io.readFile(reportFile);
     const run = reportText === null ? null : reportTests(reportText);
     if (reportFile === undefined)
@@ -2636,7 +2790,7 @@ async function checkBuild(folder, reportFile, io) {
       ]);
       for (const f of seeds) {
         const text = io.readFile(join4(dir, f)) ?? "";
-        const code = stripComments2(/\.py$/i.test(f) ? text.replace(/(^|\s)#.*$/gm, "$1") : text);
+        const code = stripComments3(/\.py$/i.test(f) ? text.replace(/(^|\s)#.*$/gm, "$1") : text);
         const hit = DESTRUCTIVE_SEED.map((re) => re.exec(code)).find((m) => m !== null);
         if (hit)
           problems.push(`${f}: db:seed deletes, truncates or drops rows (${hit[0].trim()}). Dev is shared by every builder in the org and CI runs db:seed too: insert the original's rows idempotently (insert ... on conflict do nothing, or skip a table that already has rows) and never delete, truncate or update rows.`);
@@ -2965,6 +3119,7 @@ var USAGE = [
   "Usage:",
   "  node dkod-migrate.mjs snapshot <the dk- app's folder> [--db-url [KEY=]<url>] [--original-url http://localhost:<port>]",
   "  node dkod-migrate.mjs check-map <the dk- app's folder> [--original-url http://localhost:<port>]",
+  "  node dkod-migrate.mjs serve-copy <the dk- app's folder> <the folder of the original's copy>",
   "  node dkod-migrate.mjs freeze <the dk- app's folder> <report.json>",
   "  node dkod-migrate.mjs unfreeze <the dk- app's folder>",
   "  node dkod-migrate.mjs render <template.md> <the dk- app's folder> [values.json] [--force]",
@@ -3480,6 +3635,8 @@ async function runMigrateCli(argv, io) {
     io.print(JSON.stringify({ ok: true, file: to }));
     return 0;
   }
+  if (command === "serve-copy" && folder !== undefined)
+    return serveCopy(folder, reportFile, io);
   if (command === "freeze" && folder !== undefined)
     return await freeze(folder, reportFile, io);
   if (command === "unfreeze" && folder !== undefined)
@@ -4541,6 +4698,10 @@ function frameStates(mapDir, io) {
   }
   return out.sort();
 }
+var designFramed = (framed) => (title) => {
+  const m = /@design\s+(\/\S*)\s+([a-z_]+)/.exec(title);
+  return m !== null && framed.has(`${pageSlug(normalizeRoute(m[1]))}/${m[2]}`);
+};
 async function checkMap(folder, io, args = []) {
   const flag = args.findIndex((a) => a === "--original-url" || a.startsWith("--original-url="));
   const originalUrl = flag < 0 ? "" : args[flag].startsWith("--original-url=") ? args[flag].slice(15) : args[flag + 1] ?? "";
@@ -4703,6 +4864,12 @@ async function checkMap(folder, io, args = []) {
   const devOverlayPages = devOverlayStates(mapDir, io);
   for (const s of devOverlayPages)
     problems.push(`design/pages/${s}.json: the capture shows a framework dev overlay (dev_overlay). Run the original's production build and start (Next.js: next build, then next start), never a dev server, and capture ${s} again`);
+  const framed = new Set(frameStates(mapDir, io));
+  for (const f of io.walk(join8(dir, "tests/parity"), ["node_modules"])) {
+    if (!/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(f))
+      continue;
+    problems.push(...designProblems(testBlocks(io.readFile(join8(dir, `tests/parity/${f}`)) ?? ""), designFramed(framed)));
+  }
   const byImage = new Map;
   for (const page of pages) {
     if (typeof page.path !== "string")
