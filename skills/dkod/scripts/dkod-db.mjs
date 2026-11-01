@@ -612,7 +612,7 @@ var WAIT_LIMIT_MS = 10 * 60000;
 var CHECK_TIMEOUT_MS = 15000;
 var CHECK_RETRY_MS = 1e4;
 var UNKNOWN_APP = "unknown_app";
-var GATEWAY_LOAD_BUDGET_MS = 6 * 60000;
+var GATEWAY_LOAD_BUDGET_MS = 2 * 60000;
 var PHASE_LABEL = { gateway_loading: "gateway loading", database_making: "database being made", not_answering: "not answering" };
 var PENDING_CAP = 1 << 20;
 var RENEW_BEFORE_MS = 5 * 60000;
@@ -978,7 +978,7 @@ async function startUp(flags, io, cwd) {
     io.print(sawSyncing && !sawNoDatabase ? `dkod-db: waiting for the Dev database gateway to load ${app}; DKOD has made it, the gateway gets it within a few minutes (${Math.round(elapsed / 1000)} s of ${Math.round(waitMs / 1000)} s)` : phase === "not_answering" ? `dkod-db: the Dev database gateway for ${app} is reached but refuses or does not answer the login${lastDetail ? `: ${lastDetail}` : ""} (${Math.round(elapsed / 1000)} s of ${Math.round(waitMs / 1000)} s)` : `dkod-db: waiting for DKOD to make the ${app} Dev database (${Math.round(elapsed / 1000)} s of ${Math.round(waitMs / 1000)} s)`);
     if (phase === "gateway_loading" && !warnedOverBudget && spent.gateway_loading + (io.now() - phaseSince) > GATEWAY_LOAD_BUDGET_MS) {
       warnedOverBudget = true;
-      io.print(`dkod-db: the gateway has not loaded ${app} for longer than the usual sync (about ${GATEWAY_LOAD_BUDGET_MS / 60000} min). Check that Argo CD synced platform/dkod-devdb/access.yaml for the dkod-devdb-gateway Application, and that the gateway reloaded access.`);
+      io.print(`dkod-db: the gateway has not loaded ${app} for longer than the usual sync (about ${GATEWAY_LOAD_BUDGET_MS / 60000} min). Check that Argo CD synced platform/dkod-devdb/access.yaml (the refresh may have been refused), and that the gateway can read the dkod-devdb-gateway-access ConfigMap.`);
     }
     await new Promise((resolve) => {
       io.schedule(CHECK_RETRY_MS, resolve);
