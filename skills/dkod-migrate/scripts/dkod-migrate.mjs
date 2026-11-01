@@ -3349,15 +3349,25 @@ async function copyDatabase(value, scratch, id, io) {
     };
     if (!await ok("pg_dump", ["-w", "--dbname", withDatabase(value, source), "--file", dump]))
       return null;
-    if (!await ok("createdb", [...connect, name]))
-      return null;
-    if (!await ok("psql", [...connect, "-d", name, "-f", dump]))
-      return null;
+    const made = [];
+    const step = async (cmd, args, making) => {
+      const res = await io.run(cmd, args, env, io.cwd);
+      if (res.status === 0) {
+        if (making !== undefined)
+          made.push(making);
+        return;
+      }
+      if (isNoPassword(res.stderr))
+        throw new Error(NO_PASSWORD);
+      for (const m of made)
+        await dropDatabase({ name: m, url: withDatabase(value, m) }, io);
+      throw new CopyFailed(copyFailedMessage(cmd, res.stderr, { host, port, user, database: source }));
+    };
+    await step("createdb", [...connect, name], name);
+    await step("psql", [...connect, "-d", name, "-f", dump]);
     const baseName = `${name}_base`;
-    if (!await ok("createdb", [...connect, baseName]))
-      return null;
-    if (!await ok("psql", [...connect, "-d", baseName, "-f", dump]))
-      return null;
+    await step("createdb", [...connect, baseName], baseName);
+    await step("psql", [...connect, "-d", baseName, "-f", dump]);
     return { name, url: withDatabase(value, name), base: { name: baseName, url: withDatabase(value, baseName) } };
   }
   for (const tool of ["mysqldump", "mysql"])
@@ -3374,6 +3384,30 @@ async function copyDatabase(value, scratch, id, io) {
   if ((await io.run("mysql", [...connect, name, "-e", `source ${dump}`], env, io.cwd)).status !== 0)
     return null;
   return { name, url: withDatabase(value, name) };
+}
+var PRINT_CAP = 50;
+function printable(record) {
+  const long = record.files.length > PRINT_CAP || (record.bases?.length ?? 0) > PRINT_CAP;
+  if (!long)
+    return record;
+  return {
+    ...record,
+    files: record.files.slice(0, PRINT_CAP),
+    files_total: record.files.length,
+    ...record.bases ? { bases: record.bases.slice(0, PRINT_CAP), bases_total: record.bases.length } : {},
+    lists_cut: `files and bases list the first ${PRINT_CAP}; .dkod/snapshot.json has all of them`
+  };
+}
+
+class CopyFailed extends Error {
+}
+function copyFailedMessage(cmd, stderr, at) {
+  const first = stderr.split(`
+`).map((l) => l.trim()).find((l) => l !== "") ?? "no error text";
+  const where = `${at.database} on ${at.host}:${at.port}`;
+  const noRight = cmd === "createdb" && /permission denied|must be (?:superuser|owner)|not allowed/i.test(first);
+  const why = noRight ? `the user ${at.user || "(default)"} may not create databases there, and the snapshot makes its two scratch copies on the same server` : `${cmd} failed: ${first.replace(/postgres(?:ql)?:\/\/\S+/gi, "<url>")}`;
+  return `Could not copy the database ${where}: ${why}. Nothing was copied. Run snapshot again with --db-url <the original's local Postgres, where its user can create databases>, or ask the builder for one. Never point it at a DKOD Dev database (a dkod-db helper port).`;
 }
 async function dropDatabase(db, io) {
   const url = localDatabase(db.url);
@@ -3505,6 +3539,10 @@ async function snapshot(folder, io, args = []) {
         noPassword = true;
         return;
       }
+      if (e instanceof CopyFailed) {
+        refused = e.message;
+        return;
+      }
       throw e;
     }
     if (db === null)
@@ -3569,7 +3607,7 @@ async function snapshot(folder, io, args = []) {
 `).join(""));
   io.writeFile(snapshotPath(dir), `${JSON.stringify(record, null, 2)}
 `);
-  io.print(JSON.stringify(record));
+  io.print(JSON.stringify(printable(record)));
   return 0;
 }
 function runDirRefusal(runDir, dkDir, io) {
@@ -4977,7 +5015,13 @@ function walk(dir, skip) {
         continue;
       const full = join9(at, name);
       const next = rel === "" ? name : `${rel}/${name}`;
-      if (statSync(full).isDirectory())
+      let dirEntry;
+      try {
+        dirEntry = statSync(full).isDirectory();
+      } catch {
+        continue;
+      }
+      if (dirEntry)
         visit(full, next);
       else
         out.push(next);
