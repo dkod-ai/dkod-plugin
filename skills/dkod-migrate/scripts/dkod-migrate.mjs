@@ -2716,6 +2716,14 @@ function ignoresDir(text, dir) {
     return [dir, `${dir}/`, `/${dir}`, `/${dir}/`, `**/${dir}`, `**/${dir}/`].includes(line);
   });
 }
+function importMissing(dir, io) {
+  const rec = json3(io.readFile(join4(dir, ".dkod/snapshot.json")));
+  if (!isRec5(rec))
+    return [".dkod/snapshot.json: missing. Run `dkod-migrate.mjs snapshot` first."];
+  if (rec.mode !== "snapshot" || rec.imported === true)
+    return [];
+  return ["the original's data is not in Dev yet: run `dkod-db.mjs import --app <key> --from snapshot --dir <folder>` after db:migrate."];
+}
 async function checkBuild(folder, reportFile, io) {
   const dir = folder === "" ? io.cwd : folder;
   const original = originalOf(io.readFile(join4(dir, ".dkod/migration.json")));
@@ -2729,8 +2737,10 @@ async function checkBuild(folder, reportFile, io) {
   let newPassed = 0;
   let visual = 0;
   problems.push(...checkSnapshot(dir, io));
-  const frozen = json3(io.readFile(freezePath(dir)));
-  if (!isRec5(frozen) || typeof frozen.sha256 !== "string" || !isRec5(frozen.baseline) || !Array.isArray(frozen.baseline.tests)) {
+  const frozenText = io.readFile(freezePath(dir));
+  const light = frozenText === null;
+  const frozen = json3(frozenText);
+  if (light) {} else if (!isRec5(frozen) || typeof frozen.sha256 !== "string" || !isRec5(frozen.baseline) || !Array.isArray(frozen.baseline.tests)) {
     problems.push(".dkod/parity/freeze.json: missing. Freeze the suite (step 3) before the build is checked.");
   } else {
     const record = frozen;
@@ -2765,7 +2775,7 @@ async function checkBuild(folder, reportFile, io) {
   const sources = io.walk(dir, SKIP);
   const map = json3(io.readFile(join4(dir, ".dkod/map/app-map.json")));
   const tables = isRec5(map) && Array.isArray(map.tables) ? map.tables.filter(isRec5).flatMap((t) => typeof t.name === "string" ? [t.name] : []) : [];
-  if (tables.length > 0) {
+  if (!light && tables.length > 0) {
     const text = sources.filter((f) => SOURCE3.test(f) && !/^(?:tests|migrations)\//.test(f)).map((f) => io.readFile(join4(dir, f)) ?? "").join(`
 `);
     for (const name of tables) {
@@ -2774,9 +2784,9 @@ async function checkBuild(folder, reportFile, io) {
         problems.push(`table ${name}: named in no source file of the dk- app. Write its schema.`);
     }
   }
-  if (!sources.some((f) => /^migrations\/0001_baseline[^/]*$/.test(f)))
+  if (!light && !sources.some((f) => /^migrations\/0001_baseline[^/]*$/.test(f)))
     problems.push("migrations/: no 0001_baseline migration. Generate it from the schema.");
-  if (tables.length > 0) {
+  if (!light && tables.length > 0) {
     const pkg = json3(io.readFile(join4(dir, "package.json")));
     const scripts = isRec5(pkg) && isRec5(pkg.scripts) ? pkg.scripts : {};
     const seedCmd = scripts["db:seed"];
@@ -2802,7 +2812,7 @@ async function checkBuild(folder, reportFile, io) {
       problems.push(`${f}: a file database in the dk- folder. The data lives in the Dev data service.`);
   problems.push(...localStoreProblems(sources, (f) => io.readFile(join4(dir, f)) ?? ""));
   const assets = json3(io.readFile(join4(dir, ".dkod/map/assets/assets.json")));
-  if (Array.isArray(assets)) {
+  if (!light && Array.isArray(assets)) {
     for (const a of assets.filter(isRec5)) {
       if (typeof a.path !== "string")
         continue;
@@ -2820,10 +2830,12 @@ async function checkBuild(folder, reportFile, io) {
   const declared = new Set(Array.isArray(assets) ? assets.filter(isRec5).flatMap((a) => typeof a.path === "string" ? [a.path] : []) : []);
   const originalCode = new Map;
   const blank = (path) => (io.readFile(path) ?? "").trim() === "";
-  for (const rel of io.walk(original, SKIP))
-    if (CODE.test(rel) && !declared.has(rel) && !blank(join4(original, rel)))
-      originalCode.set(io.sha256([join4(original, rel)]), rel);
-  if (originalCode.size > 0) {
+  if (!light) {
+    for (const rel of io.walk(original, SKIP))
+      if (CODE.test(rel) && !declared.has(rel) && !blank(join4(original, rel)))
+        originalCode.set(io.sha256([join4(original, rel)]), rel);
+  }
+  if (!light && originalCode.size > 0) {
     for (const f of sources) {
       if (!CODE.test(f) || f.startsWith("tests/parity/") || f.startsWith(".dkod/") || blank(join4(dir, f)))
         continue;
@@ -2849,7 +2861,7 @@ async function checkBuild(folder, reportFile, io) {
   for (const rel of io.walk(designDir, []))
     if (IMAGE.test(rel))
       designs.set(io.sha256([join4(designDir, rel)]), rel);
-  if (designs.size > 0) {
+  if (!light && designs.size > 0) {
     for (const f of sources) {
       if (f.startsWith("tests/parity/") || !IMAGE.test(f))
         continue;
@@ -2870,13 +2882,16 @@ async function checkBuild(folder, reportFile, io) {
       const marker = NEXT_MARKERS.find((m) => (io.readFile(join4(dir, f)) ?? "").includes(m));
       if (marker !== undefined)
         problems.push(`${f}: served HTML with the original's ${marker}. Never serve the original's rendered pages; rebuild every page on the stack.`);
-      else if (rendered.has(io.sha256([join4(dir, f)])))
+      else if (!light && rendered.has(io.sha256([join4(dir, f)])))
         problems.push(`${f}: a copy of a page the original rendered. Never serve the original's HTML; rebuild every page on the stack.`);
     }
   }
-  problems.push(...await devDrift(dir, io));
-  problems.push(...await referenceDrift(dir, io));
-  problems.push(...await migrationRows(dir, io));
+  if (!light) {
+    problems.push(...await devDrift(dir, io));
+    problems.push(...await referenceDrift(dir, io));
+    problems.push(...await migrationRows(dir, io));
+  } else
+    problems.push(...importMissing(dir, io));
   if (io.readFile(join4(dir, ".env.local")) !== null && !ignoresEnvLocal(io.readFile(join4(dir, ".gitignore")) ?? "")) {
     problems.push(".env.local: not covered by .gitignore. Add it before anything is committed.");
   }
@@ -2899,7 +2914,7 @@ async function checkBuild(folder, reportFile, io) {
   } else
     problems.push(`policy check: ${policy.message}`);
   const ok = problems.length === 0;
-  io.print(JSON.stringify({ ok, problems, ...warnings.length > 0 ? { warnings } : {}, new_failed, counts: { tests, new_passed: newPassed, new_failed: new_failed.length, visual_diff: visual } }));
+  io.print(JSON.stringify({ ok, ...light ? { mode: "light" } : {}, problems, ...warnings.length > 0 ? { warnings } : {}, new_failed, counts: { tests, new_passed: newPassed, new_failed: new_failed.length, visual_diff: visual } }));
   return ok ? 0 : 1;
 }
 
@@ -3139,7 +3154,7 @@ var join7 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}
 var norm = (p) => p.replace(/\/\.\//g, "/").replace(/\/+/g, "/");
 var snapshotPath = (dir) => join7(dir, ".dkod/snapshot.json");
 var recordPath = (dir) => join7(dir, ".dkod/migration.json");
-var SKIP2 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor"];
+var SKIP2 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".worktrees"];
 var DATA2 = /\.(?:sqlite|sqlite3|db|db3)$/i;
 var FLAT = /\.(?:csv|json)$/i;
 var NOT_DATA = /(?:^|\/)(?:package(?:-lock)?|composer(?:\.lock)?|tsconfig[^/]*|jsconfig[^/]*|app|vercel|now|firebase|deno|bun|manifest|renovate|[^/]*\.config|\.eslintrc[^/]*|\.prettierrc[^/]*|\.babelrc)\.json$|(?:^|\/)\.dkod\/|(?:^|\/)composer\.lock$/i;
@@ -3213,6 +3228,11 @@ function originalOf(text) {
   } catch {
     return null;
   }
+}
+function envFiles(walked) {
+  const hits = walked.filter((f) => /(?:^|\/)\.env(?:\.local)?$/.test(f) && f.split("/").length <= 4 && !f.split("/").slice(0, -1).some((d) => d.startsWith(".")));
+  const rank = (f) => f.split("/").length * 2 + (f.endsWith(".local") ? 0 : 1);
+  return hits.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
 }
 function envPairs(text) {
   const out = [];
@@ -3334,13 +3354,12 @@ async function copyDatabase(value, scratch, id, io) {
   const source = databaseOf(url);
   const name = scratchName(source, id);
   const { host, port, user, env } = connection(url);
-  const tools = ["pg_dump", "psql", "createdb", "dropdb"];
+  const tools = ["pg_dump", "psql"];
   if (url.protocol.startsWith("postgres")) {
     for (const tool of tools)
       if (!io.hasTool(tool))
         return null;
     const dump = `${scratch}/${name}.sql`;
-    const connect = ["-w", "-h", host, "-p", port, ...user ? ["-U", user] : []];
     const ok = async (cmd, args) => {
       const res = await io.run(cmd, args, env, io.cwd);
       if (res.status !== 0 && isNoPassword(res.stderr))
@@ -3349,26 +3368,7 @@ async function copyDatabase(value, scratch, id, io) {
     };
     if (!await ok("pg_dump", ["-w", "--dbname", withDatabase(value, source), "--file", dump]))
       return null;
-    const made = [];
-    const step = async (cmd, args, making) => {
-      const res = await io.run(cmd, args, env, io.cwd);
-      if (res.status === 0) {
-        if (making !== undefined)
-          made.push(making);
-        return;
-      }
-      if (isNoPassword(res.stderr))
-        throw new Error(NO_PASSWORD);
-      for (const m of made)
-        await dropDatabase({ name: m, url: withDatabase(value, m) }, io);
-      throw new CopyFailed(copyFailedMessage(cmd, res.stderr, { host, port, user, database: source }));
-    };
-    await step("createdb", [...connect, name], name);
-    await step("psql", [...connect, "-d", name, "-f", dump]);
-    const baseName = `${name}_base`;
-    await step("createdb", [...connect, baseName], baseName);
-    await step("psql", [...connect, "-d", baseName, "-f", dump]);
-    return { name, url: withDatabase(value, name), base: { name: baseName, url: withDatabase(value, baseName) } };
+    return { name: source, url: withDatabase(value, source), base: { name: source, url: withDatabase(value, source) }, read_only: true, dump };
   }
   for (const tool of ["mysqldump", "mysql"])
     if (!io.hasTool(tool))
@@ -3401,15 +3401,15 @@ function printable(record) {
 
 class CopyFailed extends Error {
 }
-function copyFailedMessage(cmd, stderr, at) {
-  const first = stderr.split(`
-`).map((l) => l.trim()).find((l) => l !== "") ?? "no error text";
-  const where = `${at.database} on ${at.host}:${at.port}`;
-  const noRight = cmd === "createdb" && /permission denied|must be (?:superuser|owner)|not allowed/i.test(first);
-  const why = noRight ? `the user ${at.user || "(default)"} may not create databases there, and the snapshot makes its two scratch copies on the same server` : `${cmd} failed: ${first.replace(/postgres(?:ql)?:\/\/\S+/gi, "<url>")}`;
-  return `Could not copy the database ${where}: ${why}. Nothing was copied. Run snapshot again with --db-url <the original's local Postgres, where its user can create databases>, or ask the builder for one. Never point it at a DKOD Dev database (a dkod-db helper port).`;
-}
 async function dropDatabase(db, io) {
+  let named = "";
+  try {
+    named = databaseOf(new URL(db.url));
+  } catch {
+    return;
+  }
+  if (!SCRATCH_NAME.test(db.name) || !SCRATCH_NAME.test(named))
+    return;
   const url = localDatabase(db.url);
   if (url === null)
     return;
@@ -3479,7 +3479,6 @@ async function snapshot(folder, io, args = []) {
     io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
     return 2;
   }
-  await removeSnapshot(dir, io);
   const scratch = io.mkdtemp(join7(io.tmpdir(), "dkod-migrate-"));
   const id = (scratch.split(/[\\/]/).pop() ?? "run").replace(/^dkod-migrate-/, "").replace(/[^A-Za-z0-9]/g, "_");
   const files = [];
@@ -3489,10 +3488,10 @@ async function snapshot(folder, io, args = []) {
   if (flags.originalUrl !== "")
     for (const [k, v] of await processPairs(flags.originalUrl, io))
       named.push([k, v, "process"]);
-  for (const file of [".env.local", ".env"])
+  const walked = io.walk(original, SKIP2);
+  for (const file of envFiles(walked))
     for (const [k, v] of envPairs(io.readFile(join7(original, file))))
       named.push([k, v, file]);
-  const walked = io.walk(original, SKIP2);
   const flatFound = flatData(original, walked, named.map(([k, v]) => [k, v]), io.readFile(join7(dir, ".dkod/map/app-map.json")), io);
   for (const rel of walked) {
     const flat = flatFound.get(rel);
@@ -3512,8 +3511,9 @@ async function snapshot(folder, io, args = []) {
   const databases = [];
   let noPassword = false;
   let refused = null;
+  const seenKeys = new Set;
   const pair = async (key, value, how) => {
-    if (key in env)
+    if (key in env || seenKeys.has(key))
       return;
     const copied = copiedFile(original, files, value);
     if (copied !== null) {
@@ -3557,9 +3557,12 @@ async function snapshot(folder, io, args = []) {
         Object.assign(db, { tables: got });
     }
     const from0 = connection(source);
-    db.source = { host: from0.host, port: from0.port, database: databaseOf(source), how };
+    db.source = { host: from0.host, port: from0.port, database: databaseOf(source), how, ...how !== "db-url" && how !== "process" ? { file: how, key } : { key } };
     databases.push(db);
-    env[key] = db.url;
+    if (db.read_only !== true)
+      env[key] = db.url;
+    else
+      seenKeys.add(key);
   };
   for (const [key, value, how] of named)
     await pair(key, value, how);
@@ -3598,6 +3601,7 @@ async function snapshot(folder, io, args = []) {
     ...empty ? {} : { checks: CHECKS },
     ...empty ? { message: NEW_APP_ONLY } : {}
   };
+  await removeSnapshot(dir, io);
   record.nonce = randomBytes(16).toString("hex");
   record.seal = sealOf(record, record.nonce);
   if (!empty)

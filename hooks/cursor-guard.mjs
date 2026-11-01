@@ -69,6 +69,9 @@ const NO_GIT = [
   "If this command did something else too, run that part again without git.",
 ].join(" ");
 
+const KEEP_GOING =
+  "DKOD: this app's migration is not finished. If your last message asked the builder a question, stop and wait for the answer. Otherwise go on now with the next step of the dkod-migrate skill, and do not stop until the app is deployed or you need the builder's answer.";
+
 const CHECK_FIRST = [
   "DKOD: files changed in this chat after the org's policy checks last ran. Before you finish, run them on the app's folder",
   `as the dkod skill's "Policy checks" says (${SKILL}): write the answer of dkoder_policy to a temp file and run`,
@@ -997,7 +1000,13 @@ if (event === "preToolUse") {
   out({});
 }
 
-if (event === "afterFileEdit") { noteChat(chat, "editedAt"); out({}); }
+// DKOD's own records (.dkod/) and scratch files (the policy pack, reports) are not the app's code: a
+// policy check writes one, and counting it asked for the checks again and again (365Scores gBall).
+const scratchPath = (p) => /(?:^|\/)\.dkod\//.test(p) || /^(?:\/private)?\/var\/folders\//.test(p) || (process.env.TMPDIR && p.startsWith(process.env.TMPDIR));
+if (event === "afterFileEdit") {
+  if (!scratchPath(String(input.file_path ?? ""))) noteChat(chat, "editedAt");
+  out({});
+}
 
 if (event === "afterShellExecution") {
   if (/dkod-policy\.mjs["']?\s+check\b/.test(String(input.command ?? ""))) noteChat(chat, "checkedAt");
@@ -1010,6 +1019,13 @@ if (event === "stop") {
   if (rec && status === "completed" && (rec.editedAt ?? 0) > (rec.checkedAt ?? 0) && (rec.askedAt ?? 0) < rec.editedAt) {
     noteChat(chat, "askedAt");
     out({ followup_message: CHECK_FIRST });
+  }
+  // 2026-11-01 (365Scores gBall): the agent ended its turn each time a background job finished, and the
+  // builder had to ask "why did you stop". An open migration (its record is removed only by `clean`,
+  // after shipped) gets one nudge per stop to go on, unless it waits for the builder's answer.
+  const root = Array.isArray(input.workspace_roots) ? input.workspace_roots[0] : input.cwd;
+  if (rec && status === "completed" && Number(input.loop_count ?? 0) === 0 && migrationAt(root) !== null) {
+    out({ followup_message: KEEP_GOING });
   }
   out({});
 }

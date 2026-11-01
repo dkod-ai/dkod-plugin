@@ -1898,6 +1898,24 @@ END $$;
   io.print(JSON.stringify({ ok: true, app, tables: report, already_present: [], imported: true, skipped_tables: skipped, dropped_columns: droppedColumns }));
   return 0;
 }
+var LIGHT_SKIP_TABLES = /^(?:_prisma_migrations|__drizzle_migrations|schema_migrations|knex_migrations(?:_lock)?|kysely_migration(?:_lock)?|alembic_version|flyway_schema_history|django_migrations)$/;
+function originalOfRecord(text) {
+  try {
+    const o = JSON.parse(text ?? "null")?.original;
+    return typeof o === "string" && o !== "" ? o.replace(/\/+$/, "") : null;
+  } catch {
+    return null;
+  }
+}
+function envValue(text, key) {
+  for (const line of (text ?? "").split(`
+`)) {
+    const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    if (m !== null && m[1] === key)
+      return m[2].trim().replace(/^(["'])(.*)\1$/, "$2");
+  }
+  return null;
+}
 async function runImport(flags, io, cwd) {
   const say = (line) => io.print(`dkod-db: ${line}`);
   const app = flags.get("app") ?? "";
@@ -1921,6 +1939,8 @@ async function runImport(flags, io, cwd) {
   let snapshotMode = false;
   let sqliteBases = null;
   let flatBases = [];
+  let lightSource = false;
+  let lightPassword = "";
   if (!/^postgres(ql)?:\/\//i.test(from)) {
     if (/^[a-z][a-z0-9+.-]*:\/\//i.test(from) || from !== "snapshot" && !/\.json$/i.test(from)) {
       say(IMPORT_LOCAL_ONLY);
@@ -1959,6 +1979,21 @@ async function runImport(flags, io, cwd) {
       return 2;
     } else
       sourceRaw = base;
+    if (pg?.read_only === true) {
+      lightSource = true;
+      const file = typeof pg.source?.file === "string" ? pg.source.file : "";
+      const key = typeof pg.source?.key === "string" ? pg.source.key : "DATABASE_URL";
+      const original = originalOfRecord(io.readFile(join2(dir, ".dkod/migration.json")));
+      if (original !== null && file !== "" && !file.split("/").includes("..")) {
+        const named = envValue(io.readFile(join2(original, file)), key);
+        try {
+          const u = named === null ? null : new URL(named);
+          const b = new URL(String(base));
+          if (u !== null && u.hostname === b.hostname && (u.port || "5432") === (b.port || "5432") && u.pathname === b.pathname && u.password !== "")
+            lightPassword = decodeURIComponent(u.password);
+        } catch {}
+      }
+    }
     snapshotMode = true;
   }
   let source;
@@ -1979,7 +2014,7 @@ async function runImport(flags, io, cwd) {
     say(`The source password has a malformed percent escape. ${IMPORT_LOCAL_ONLY}`);
     return 2;
   }
-  const password = sourcePassword || io.env.PGPASSWORD || "";
+  const password = sourcePassword || lightPassword || io.env.PGPASSWORD || "";
   source.password = "";
   const sourceUrl = source.toString();
   const devRaw = readDatabaseUrl(io.readFile(join2(dir, ".env.local")));
@@ -2007,7 +2042,7 @@ async function runImport(flags, io, cwd) {
   dev.password = "";
   const devUrl = dev.toString();
   const freezeText = io.readFile(join2(dir, ".dkod/parity/freeze.json"));
-  if (freezeText === null) {
+  if (freezeText === null && !lightSource) {
     say("There is no .dkod/parity/freeze.json. Freeze the parity suite (step 3 of the dkod-migrate skill) before the import.");
     return 2;
   }
@@ -2042,12 +2077,19 @@ async function runImport(flags, io, cwd) {
       return await importSqlite(ctx);
     return await importFlat(flatCtx, plan);
   }
-  const frozenData = readFreezeData(freezeText);
+  const frozenData = freezeText === null ? { tables: {}, suite_writes: [] } : readFreezeData(freezeText);
   if (frozenData === null) {
     say("freeze.json records no data identity (no Postgres scratch database was frozen on). Run `dkod-migrate.mjs snapshot`, rerun the suite and freeze again.");
     return 1;
   }
-  const mapped = readMapTables(io.readFile(join2(dir, ".dkod/map/app-map.json")));
+  let mapped = readMapTables(io.readFile(join2(dir, ".dkod/map/app-map.json")));
+  if (mapped.length === 0 && lightSource) {
+    const all = await psql(sourceUrl, srcEnv, ["-c", "SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name"]);
+    if (all.status !== 0)
+      return failed("Could not read the original's tables.", all.stderr);
+    mapped = all.stdout.split(`
+`).map((l) => l.trim()).filter((l) => l !== "" && !LIGHT_SKIP_TABLES.test(l));
+  }
   if (mapped.length === 0) {
     say("The migration map has no tables to import (.dkod/map/app-map.json).");
     return 2;
