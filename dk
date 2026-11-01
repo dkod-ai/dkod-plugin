@@ -12,7 +12,7 @@ set -eu
 umask 022
 
 # The dk this file was published with. The download takes the version in dk-version on the channel's branch.
-DK_VERSION=1.6.2
+DK_VERSION=1.7.0
 REPO="${DKOD_PLUGIN_REPO:-dkod-ai/dkod-plugin}"
 BIN_DIR="${DKOD_BIN_DIR:-${HOME:?HOME is not set}/.local/bin}"
 
