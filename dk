@@ -12,7 +12,7 @@ set -eu
 umask 022
 
 # The dk this file was published with. The download takes the version in dk-version on the channel's branch.
-DK_VERSION=1.7.0
+DK_VERSION=1.8.0
 REPO="${DKOD_PLUGIN_REPO:-dkod-ai/dkod-plugin}"
 BIN_DIR="${DKOD_BIN_DIR:-${HOME:?HOME is not set}/.local/bin}"
 
@@ -56,6 +56,61 @@ get() {
   fi
 }
 
+# A size for people: 840 KB, 1.2 MB.
+human() {
+  if [ "$1" -lt 1048576 ]; then printf '%d KB' $((($1 + 1023) / 1024)); else t=$(($1 * 10 / 1048576)); printf '%d.%d MB' $((t / 10)) $((t % 10)); fi
+}
+
+# One progress line, the same as dk draws: label, a bar of 24, the percent and the sizes.
+draw() { # label done total(or empty) tick
+  on=; dim=; off=
+  if [ -z "${NO_COLOR:-}" ]; then on=$(printf '\033[36m'); dim=$(printf '\033[90m'); off=$(printf '\033[0m'); fi
+  bar=; i=0
+  if [ -n "$3" ]; then
+    d=$2; [ "$d" -le "$3" ] || d=$3
+    f=$((d * 24 / $3))
+    while [ $i -lt 24 ]; do if [ $i -lt $f ]; then bar="${bar}${on}━${off}"; else bar="${bar}${dim}━${off}"; fi; i=$((i + 1)); done
+    size=$(printf '%3d%%  %s / %s' $((d * 100 / $3)) "$(human "$d")" "$(human "$3")")
+  else
+    pos=$(($4 % 30))
+    while [ $i -lt 24 ]; do if [ $i -le $pos ] && [ $((i + 6)) -gt $pos ]; then bar="${bar}${on}━${off}"; else bar="${bar}${dim}━${off}"; fi; i=$((i + 1)); done
+    size=$(human "$2")
+  fi
+  printf '\r\033[2K  %-12s %s  %s' "$1" "$bar" "$size" >&2
+}
+
+# The Content-Length of the last response in a curl header dump (a redirect writes one block per hop).
+content_length() {
+  tr -d '\r' 2>/dev/null <"$1" | awk 'toupper(substr($1, 1, 5)) == "HTTP/" { n = "" } tolower($1) == "content-length:" && $2 > 0 { n = $2 } END { print n }'
+}
+
+# Downloads $1 into the file $2. On a terminal it draws a progress bar named $3; the size comes from the
+# response's own headers, so there is no extra request. The bar is cleared when the download ends.
+download() {
+  if [ -n "${DKOD_DEBUG:-}" ] || [ ! -t 2 ] || [ "${TERM:-dumb}" = dumb ]; then get "$1" >"$2"; return; fi
+  hdr="$2.headers"
+  curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 15 --max-time 120 --retry 2 \
+    --dump-header "$hdr" -o "$2" "$1" 2>/dev/null &
+  pid=$!
+  total=; tick=0
+  while kill -0 "$pid" 2>/dev/null; do
+    [ -n "$total" ] || total=$(content_length "$hdr")
+    draw "$3" "$(wc -c 2>/dev/null <"$2" | tr -d ' ')" "$total" $tick
+    tick=$((tick + 1))
+    sleep 0.08 2>/dev/null || sleep 1
+  done
+  if wait "$pid"; then
+    rc=0; got=$(wc -c 2>/dev/null <"$2" | tr -d ' ')
+    [ -n "$total" ] || total=$(content_length "$hdr")
+    draw "$3" "$got" "${total:-$got}" $tick
+  else
+    rc=$?
+  fi
+  printf '\r\033[2K' >&2
+  rm -f "$hdr"
+  return $rc
+}
+
 # Before the first stable release with a dk-version, stable takes main's.
 version=$(get "https://raw.githubusercontent.com/$REPO/$ref/dk-version" || get "https://raw.githubusercontent.com/$REPO/main/dk-version") \
   || fail "Could not reach github.com/$REPO. Check your connection and try again."
@@ -66,8 +121,9 @@ debug "dk $version ($channel)"
 
 mkdir -p "$BIN_DIR"
 tmp=$(mktemp "$BIN_DIR/.dk.XXXXXX")
-trap 'rm -f "$tmp"' 0
-get "$base/$asset" >"$tmp" || fail "Could not download dk $version for your device. Check your connection and try again."
+trap 'rm -f "$tmp" "$tmp.headers"; [ -z "${pid:-}" ] || kill "$pid" 2>/dev/null; true' 0
+trap 'exit 130' INT TERM
+download "$base/$asset" "$tmp" "dk $version" || fail "Could not download dk $version for your device. Check your connection and try again."
 sums=$(get "$base/SHA256SUMS") || fail "Could not download the checksums of dk $version. Check your connection and try again."
 want=$(printf '%s\n' "$sums" | awk -v a="$asset" '$2 == a || $2 == "*" a { print $1; exit }')
 if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$tmp"); else got=$(shasum -a 256 "$tmp"); fi
