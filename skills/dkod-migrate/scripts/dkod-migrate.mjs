@@ -260,7 +260,8 @@ async function devDrift(dir, io) {
   if (imported === null || devUrl === "") {
     return ["Dev data: snapshot.json has imported:true but not what was imported (imported_tables, dev_url). Run `node dkod-db.mjs import` again."];
   }
-  const allowed = new Set(readFreezeData(io.readFile(join(dir, ".dkod/parity/freeze.json")))?.suite_writes ?? []);
+  const frozen = readFreezeData(io.readFile(join(dir, ".dkod/parity/freeze.json")));
+  const allowed = new Set(frozen?.suite_writes ?? []);
   const refs = [];
   const before = {};
   for (const [name, t] of Object.entries(imported)) {
@@ -2313,6 +2314,21 @@ async function freeze(folder, reportFile, io) {
       frozenTables[n] = before[n];
     frozenData = { database: typeof pg.name === "string" ? pg.name : "", tables: frozenTables, suite_writes: changedTables(frozenTables, now.tallies) };
   }
+  const flatBases = isRec4(snap) && snap.mode === "snapshot" ? list2(snap.bases).filter((b) => (b.kind === "csv" || b.kind === "json") && typeof b.file === "string" && typeof b.rel === "string" && typeof b.sha256 === "string") : [];
+  if (pg === undefined && flatBases.length > 0) {
+    const mapped = readMapTables(io.readFile(join3(dir, ".dkod/map/app-map.json")));
+    const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, "").replace(/s$/, "");
+    const writes = new Set;
+    for (const b of flatBases) {
+      if (io.sha256([b.file]) === b.sha256)
+        continue;
+      const stem = norm((b.rel.split("/").pop() ?? "").replace(/\.(?:csv|json)$/i, ""));
+      const hit = mapped.filter((n) => norm(n) === stem);
+      for (const n of hit.length > 0 ? hit : mapped)
+        writes.add(n);
+    }
+    frozenData = { database: "", tables: {}, suite_writes: [...writes] };
+  }
   const files = suiteFiles(dir, io);
   const sha256 = io.sha256(files.map((f) => join3(dir, f)));
   const record = { sha256, files, baseline: { tests: run.map((t) => t.title), passed: passed.size }, frozenAt: new Date().toISOString(), platform: process.platform, data: frozenData };
@@ -2944,6 +2960,7 @@ function relOfValue(original, value) {
   const rel = norm(raw.startsWith("/") ? raw : join7(original, raw)).slice(norm(original).length).replace(/^\//, "");
   return rel === "" ? null : rel;
 }
+var ENV_READ = /(?:os\.environ(?:\.get)?\s*[\[(]\s*|os\.getenv\s*\(\s*|process\.env\s*\[\s*)["']([A-Za-z_][A-Za-z0-9_]*)["']|process\.env\.([A-Za-z_][A-Za-z0-9_]*)/;
 function flatData(original, rels, named, mapText, io) {
   const found = new Map;
   const flat = rels.filter((r) => FLAT.test(r) && !NOT_DATA.test(r));
@@ -2971,8 +2988,24 @@ function flatData(original, rels, named, mapText, io) {
         continue;
       for (const f of rest) {
         const name = f.split("/").pop();
-        if (!found.has(f) && (text.includes(`"${f}"`) || text.includes(`'${f}'`) || text.includes(`"${name}"`) || text.includes(`'${name}'`)))
-          found.set(f, { how: "code", file });
+        if (!found.has(f) && (text.includes(`"${f}"`) || text.includes(`'${f}'`) || text.includes(`"${name}"`) || text.includes(`'${name}'`))) {
+          const line = text.split(`
+`).find((l) => (l.includes(f) || l.includes(name)) && ENV_READ.test(l));
+          const at = line === undefined ? 0 : Math.max(line.indexOf(f), line.indexOf(name));
+          let key;
+          let best = Infinity;
+          for (const m of line === undefined ? [] : line.matchAll(new RegExp(ENV_READ.source, "g"))) {
+            const k = m[1] ?? m[2];
+            if (k === undefined || /^(?:NODE_ENV|FLASK_ENV|PORT)$/.test(k))
+              continue;
+            const d = Math.abs(m.index - at);
+            if (d < best) {
+              best = d;
+              key = k;
+            }
+          }
+          found.set(f, { how: "code", file, ...key !== undefined ? { key } : {} });
+        }
       }
     }
   }
@@ -3131,6 +3164,9 @@ async function snapshot(folder, io, args = []) {
     bases.push({ file: to, base, rel, sha256: io.sha256([base]), ...flat !== undefined ? { kind: /\.csv$/i.test(rel) ? "csv" : "json", found: flat } : {} });
   }
   const env = { DKOD_MIGRATE_DATA: scratch };
+  for (const b of bases)
+    if (b.found?.how === "code" && b.found.key !== undefined && !(b.found.key in env))
+      env[b.found.key] = b.file;
   const databases = [];
   let noPassword = false;
   let refused = null;
