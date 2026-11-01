@@ -3139,7 +3139,7 @@ async function snapshot(folder, io, args = []) {
   }
   await removeSnapshot(dir, io);
   const scratch = io.mkdtemp(join7(io.tmpdir(), "dkod-migrate-"));
-  const id = (scratch.split(/[\\/]/).pop() ?? "run").replace(/[^A-Za-z0-9]/g, "_");
+  const id = (scratch.split(/[\\/]/).pop() ?? "run").replace(/^dkod-migrate-/, "").replace(/[^A-Za-z0-9]/g, "_");
   const files = [];
   const bases = [];
   const flags = snapshotArgs(args);

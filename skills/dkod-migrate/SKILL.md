@@ -86,6 +86,8 @@ Only after the builder chose "Ready to deploy" and `dkoder.migrate.confirm` answ
 
 The refusal names the state the migration is at and the step it waits for. Nothing moves: do that step, then report it.
 
+Write a JSON or text file that holds quotes, backticks or regexes with the Write tool, never with an inline script or `echo` in the shell. A refusal that says "report this Guard block first" is cleared by calling `dkoder_guard_report` with the object it gives, then retrying, without asking the user.
+
 When the attempt was a mistake, or the app turns out not to need migrating, call `dkoder.migrate.abandon`. The attempt is cancelled, and Deploy and the code upload are open again.
 
 ## Cancel a migration

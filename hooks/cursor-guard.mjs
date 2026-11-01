@@ -799,7 +799,7 @@ function trustedDashboard(raw) {
   return null;
 }
 
-/** { dashboardUrl, token } from the env or dkoder.json in the plugin folder, else null. */
+/** { dashboardUrl, token } from the env or dkoder.json in the plugin folder, else null. A Cursor-only Mac has neither (install.ts writes dkoder.json only into the Claude plugin), so route 2 is the designed path. */
 function credentials() {
   const url = trustedDashboard(process.env.DKOD_URL);
   if (url && process.env.DKODER_TOKEN) return { dashboardUrl: url, token: process.env.DKODER_TOKEN };
@@ -829,6 +829,10 @@ const writePending = (all) => {
   } catch { /* no state: the block is simply not repeated */ }
 };
 
+/** Cursor shows the agent only user_message, so the report step lives there; rule, tool and action only. */
+const reportStep = (rule, tool, action) =>
+  `DKOD: report this Guard block first: call dkoder_guard_report with ${JSON.stringify({ rule, tool, action })}.`;
+
 const pendingDeny = (p) =>
   `DKOD: a Guard block in this chat is not reported yet, so Dkoder refused this. Call the DKOD tool dkoder_guard_report (server plugin-dkod-dkod) with ${JSON.stringify({ rule: p.rule, tool: p.tool, action: p.action })}, then do this step again.`;
 
@@ -854,6 +858,7 @@ async function blockStack(detail, tool, action, message = stackDeny(detail), rul
     const all = readPending();
     all[chat] = entry;
     writePending(all);
+    userMessage = `${userMessage} ${reportStep(rule, name, action)}`;
     more = ` Then report this block: call the DKOD tool dkoder_guard_report (server plugin-dkod-dkod) with ${JSON.stringify({ rule, tool: name, action })}. Until you do, Dkoder refuses further writes.`;
   }
   out({ permission: "deny", user_message: userMessage, agent_message: message + more });
@@ -885,7 +890,7 @@ if (event === "preToolUse") {
   // DKO-1255: an unreported stack block stops further writes; then the stack check.
   const pending = chat ? readPending()[chat] : undefined;
   const changing = WRITES.test(tool) || (SHELL.test(tool) && !readOnly(String(args?.command ?? "")));
-  if (pending && changing) out({ permission: "deny", user_message: "DKOD: report the Guard block first. The agent is told how.", agent_message: pendingDeny(pending) });
+  if (pending && changing) out({ permission: "deny", user_message: reportStep(pending.rule, pending.tool, pending.action), agent_message: pendingDeny(pending) });
   if (WRITES.test(tool)) {
     const hit = stackWrite(args, dir, tool);
     if (hit) await blockStack(hit, tool, "write");
@@ -1013,7 +1018,7 @@ if (event === "beforeShellExecution" || (event === "" && "command" in input)) {
   if (tmp !== null) out({ permission: "deny", user_message: "DKOD: write scratch files in the mktemp -d folder.", agent_message: TMP_DENY(tmp) });
   // DKO-1255: an unreported stack block stops further changing commands; then the stack check.
   const pending = chat ? readPending()[chat] : undefined;
-  if (pending && !readOnly(command)) out({ permission: "deny", user_message: "DKOD: report the Guard block first. The agent is told how.", agent_message: pendingDeny(pending) });
+  if (pending && !readOnly(command)) out({ permission: "deny", user_message: reportStep(pending.rule, pending.tool, pending.action), agent_message: pendingDeny(pending) });
   const manager = otherManager(command);
   if (manager) await blockStack(manager, "Shell", "blocked-command", managerDeny(manager), "blocked-command", MANAGER_USER_MESSAGE);
   if (!readOnly(command)) {
