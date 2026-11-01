@@ -13,13 +13,13 @@
 curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | sh
 ```
 
-On Windows, in PowerShell (needs [Git for Windows](https://git-scm.com/download/win)):
+On Windows, in PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.ps1 | iex
 ```
 
-It installs `dk`, asks which agents get the plugin (Claude Code, Cursor, Codex, Copilot CLI), then says what to restart and how to sign in.
+It installs `dk` (one small program, checked against its release checksum), asks which agents get the plugin (Claude Code, Cursor, Codex, Copilot CLI), then says what to restart and how to sign in.
 
 <p align="center">
   <a href="LICENSE"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/badge-license-dark.svg"><img src="assets/readme/badge-license-light.svg" alt="License: MIT"></picture></a>
@@ -53,6 +53,8 @@ It installs `dk`, asks which agents get the plugin (Claude Code, Cursor, Codex, 
 | `dk config` | Agent settings: `cursor-allow` (no approval prompts in Cursor), `cursor-cli` (dkod in `cursor-agent`). `off` undoes |
 | `dk doctor` | Check the setup and name each issue |
 | `dk uninstall` | Remove what you pick. `--all` removes everything |
+
+Slow or stuck? Run any `dk` command with `DKOD_DEBUG=1` to see each step and how long it took.
 
 In a script: `curl -fsSL https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.sh | DKOD_AGENT=claude,codex DKOD_CHANNEL=stable sh` (`claude`, `cursor`, `codex`, `copilot` or `all`).
 
