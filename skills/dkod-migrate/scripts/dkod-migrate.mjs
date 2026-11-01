@@ -1,7 +1,7 @@
 // Built by packages/dkoder-plugin/scripts/build-migrate.ts from dkod-app. Do not edit: run `bun run --cwd packages/dkoder-plugin build:migrate`.
 import { spawn } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join as join9 } from "node:path";
 
@@ -2848,7 +2848,7 @@ var USAGE = [
   "  node dkod-migrate.mjs install-restart <the dk- app's folder>",
   "  node dkod-migrate.mjs side-by-side <the dk- app's folder> <original report.json> <dk report.json> [--run-dir <mktemp folder>]",
   "  node dkod-migrate.mjs stop-servers <the dk- app's folder> --run-dir <mktemp folder> [--ports a,b]",
-  "  node dkod-migrate.mjs clean <the dk- app's folder>"
+  "  node dkod-migrate.mjs clean <the dk- app's folder> [--run-dir <mktemp folder>]"
 ].join(`
 `);
 var SOURCE_MAX_AGE_MIN = 10;
@@ -3293,11 +3293,48 @@ async function snapshot(folder, io, args = []) {
   io.print(JSON.stringify(record));
   return 0;
 }
-async function clean(folder, io) {
+function runDirRefusal(runDir, dkDir, io) {
+  const norm = (p) => {
+    const s = p.replace(/\\/g, "/").replace(/\/+$/, "");
+    return /^[A-Za-z]:/.test(s) ? s[0].toLowerCase() + s.slice(1) : s;
+  };
+  const realRaw = io.realpath(runDir);
+  if (realRaw === null)
+    return null;
+  const real = norm(realRaw);
+  const tmp = io.realpath(io.tmpdir());
+  const root = tmp === null ? null : norm(tmp);
+  const rest = root !== null && real.startsWith(`${root}/`) ? real.slice(root.length + 1) : "";
+  if (rest === "" || rest.includes("/"))
+    return `${runDir} is not a folder directly under ${tmp ?? "$TMPDIR"}, so it was not removed and nothing else was cleaned. Pass the folder \`mktemp -d\` printed.`;
+  const original = originalOf(io.readFile(recordPath(dkDir)));
+  for (const other of [dkDir, ...original === null ? [] : [original]]) {
+    const o = norm(io.realpath(other) ?? other);
+    if (o === real || o.startsWith(`${real}/`) || real.startsWith(`${o}/`))
+      return `${runDir} is, holds or sits inside ${other}, so nothing was removed. Pass the folder \`mktemp -d\` printed, not an app folder.`;
+  }
+  if (io.walk(real, SKIP2).some((f) => f === ".dkod/migration.json" || f.endsWith("/.dkod/migration.json")))
+    return `${runDir} holds another migration's .dkod/migration.json, so nothing was removed. Pass the folder \`mktemp -d\` printed for this run.`;
+  return null;
+}
+async function clean(folder, io, args = []) {
   const dir = folder === "" ? io.cwd : folder;
+  const runDir = flagValue(args, "--run-dir");
+  let runReal = null;
+  if (runDir !== undefined) {
+    const refusal = runDirRefusal(runDir, dir, io);
+    if (refusal !== null) {
+      io.print(`dkod-migrate: ${refusal}`);
+      return 1;
+    }
+    runReal = io.realpath(runDir);
+  }
   const record = await removeSnapshot(dir, io);
   io.rm(recordPath(dir), { force: true });
-  io.print(JSON.stringify({ ok: true, mode: "clean", removed: record?.scratch ?? null, databases: (record?.databases ?? []).flatMap((d) => d.base ? [d.name, d.base.name] : [d.name]) }));
+  if (runReal !== null)
+    io.rm(runReal, { recursive: true, force: true });
+  const removed = [record?.scratch, runReal].filter((p) => typeof p === "string" && p !== "");
+  io.print(JSON.stringify({ ok: true, mode: "clean", removed, databases: (record?.databases ?? []).flatMap((d) => d.base ? [d.name, d.base.name] : [d.name]) }));
   return 0;
 }
 async function runMigrateCli(argv, io) {
@@ -3326,7 +3363,7 @@ async function runMigrateCli(argv, io) {
   if (command === "snapshot" && folder !== undefined)
     return await snapshot(folder, io, argv.slice(2));
   if (command === "clean" && folder !== undefined)
-    return await clean(folder, io);
+    return await clean(folder, io, argv.slice(2));
   if (command === "check-map" && folder !== undefined)
     return await checkMap(folder, io, argv.slice(2));
   io.print(USAGE);
@@ -4670,6 +4707,13 @@ var io = {
   rm: (path, opts) => rmSync(path, { recursive: opts.recursive ?? false, force: opts.force ?? false }),
   mkdtemp: (prefix) => mkdtempSync(prefix),
   tmpdir,
+  realpath: (path) => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return null;
+    }
+  },
   hasTool: (program) => [
     ...(process.env.PATH ?? "").split(process.platform === "win32" ? ";" : ":"),
     ...serverToolDirs((dir) => {
