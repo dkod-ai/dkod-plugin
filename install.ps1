@@ -1,9 +1,10 @@
 # Install dk, the DKOD plugin manager, on Windows, then the DKOD plugin. In PowerShell:
 #   irm https://raw.githubusercontent.com/dkod-ai/dkod-plugin/main/install.ps1 | iex
 #
-# dk is a POSIX shell script. On Windows it runs in Git Bash, from Git for Windows (Claude Code on Windows
-# needs it too). This script finds Git Bash, puts dk and a dk.cmd launcher in %USERPROFILE%\.local\bin, adds
-# that folder to your user PATH, and runs `dk install`. The same settings work as on macOS and Linux:
+# dk is one small program (dk.exe, written in Rust): it needs no Git Bash. This script downloads it from the
+# dk release on github.com/dkod-ai/dkod-plugin, checks it against the release's SHA256SUMS, puts it in
+# %USERPROFILE%\.local\bin, adds that folder to your user PATH, and runs `dk install`. The same settings
+# work as on macOS and Linux:
 #   $env:DKOD_AGENT = "claude,cursor,codex,copilot" or "all"   $env:DKOD_CHANNEL = "stable" or "nightly"
 # It needs no administrator rights. Everything runs in one script block, so a failure never closes your window.
 & {
@@ -16,52 +17,37 @@
 
   $repo = if ($env:DKOD_PLUGIN_REPO) { $env:DKOD_PLUGIN_REPO } else { 'dkod-ai/dkod-plugin' }
   $binDir = if ($env:DKOD_BIN_DIR) { $env:DKOD_BIN_DIR } else { Join-Path $HOME '.local\bin' }
+  $asset = 'dk-x86_64-pc-windows-msvc.exe'
 
-  # Git Bash: never WSL's bash.exe in System32, which runs a Linux and sees another home folder.
-  function Find-GitBash {
-    if ($env:DKOD_BASH -and (Test-Path $env:DKOD_BASH)) { return $env:DKOD_BASH }
-    $roots = @()
-    $git = Get-Command git.exe -ErrorAction SilentlyContinue
-    if ($git) {
-      $dir = Split-Path $git.Source
-      for ($i = 0; $i -lt 4 -and $dir; $i++) { $roots += $dir; $dir = Split-Path $dir }
-    }
-    $roots += @("$env:ProgramFiles\Git", "${env:ProgramFiles(x86)}\Git", "$env:LOCALAPPDATA\Programs\Git")
-    foreach ($root in $roots) {
-      $bash = Join-Path $root 'bin\bash.exe'
-      if ($root -and (Test-Path $bash)) { return (Resolve-Path $bash).Path }
-    }
-    return $null
-  }
-
-  $bash = Find-GitBash
-  if (-not $bash) {
-    Say-Fail 'dk needs Git Bash, from Git for Windows. Install it, open a new PowerShell and run this line again:'
-    Write-Host '  winget install --id Git.Git -e'
-    return
-  }
-
-  # dk comes from the branch of the chosen channel. Before the first release with dk in it, stable has
-  # no dk, so main's is used. DKOD_DK_SOURCE names a local file instead (the CI test uses it).
   New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-  $dk = Join-Path $binDir 'dk'
-  $tmp = Join-Path $binDir ".dk.$([guid]::NewGuid().ToString('N'))"
+  $dk = Join-Path $binDir 'dk.exe'
+  $tmp = Join-Path $binDir ".dk.$([guid]::NewGuid().ToString('N')).exe"
   try {
     if ($env:DKOD_DK_SOURCE) {
+      # A local dk.exe instead of the download (the CI test uses it).
       Copy-Item -LiteralPath $env:DKOD_DK_SOURCE -Destination $tmp
     } else {
+      # The version comes from dk-version on the channel's branch. Before the first stable release with a
+      # dk-version, stable takes main's.
       $ref = if ($env:DKOD_CHANNEL -eq 'nightly') { 'main' } else { 'stable' }
       try {
-        Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/$repo/$ref/dk" -OutFile $tmp
+        $version = (Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/$repo/$ref/dk-version").Content
       } catch {
-        Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/$repo/main/dk" -OutFile $tmp
+        $version = (Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/$repo/main/dk-version").Content
       }
+      if ($version -is [byte[]]) { $version = [Text.Encoding]::UTF8.GetString($version) }
+      $version = "$version".Trim()
+      if ($version -notmatch '^\d+\.\d+\.\d+$') { Say-Fail "Could not read the dk version from github.com/$repo. Try again later."; return }
+      $base = "https://github.com/$repo/releases/download/dk-v$version"
+      Invoke-WebRequest -UseBasicParsing -Uri "$base/$asset" -OutFile $tmp
+      $sums = (Invoke-WebRequest -UseBasicParsing -Uri "$base/SHA256SUMS").Content
+      if ($sums -is [byte[]]) { $sums = [Text.Encoding]::UTF8.GetString($sums) }
+      $want = ($sums -split "`n" | ForEach-Object { $f = $_.Trim() -split '\s+'; if ($f.Count -ge 2 -and $f[1].TrimStart('*') -eq $asset) { $f[0] } } | Select-Object -First 1)
+      $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $tmp).Hash
+      if (-not $want -or $want.ToLower() -ne $got.ToLower()) { Say-Fail 'The download of dk did not match its checksum. Nothing was changed.'; return }
     }
-    $head = Get-Content -LiteralPath $tmp -TotalCount 1
-    if ($head -ne '#!/bin/sh' -or -not (Select-String -LiteralPath $tmp -Pattern '^DK_VERSION=' -Quiet)) {
-      Say-Fail 'The download is not dk. Nothing was changed.'
-      return
-    }
+    # A running dk.exe cannot be overwritten, but it can be renamed; dk deletes the old one next time.
+    if (Test-Path -LiteralPath $dk) { Move-Item -LiteralPath $dk -Destination (Join-Path $binDir "dk.exe.old.$([guid]::NewGuid().ToString('N'))") -Force }
     Move-Item -LiteralPath $tmp -Destination $dk -Force
   } catch {
     Say-Fail "Could not download dk from github.com/$repo. Check your connection and try again. ($($_.Exception.Message))"
@@ -70,15 +56,11 @@
     if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force }
   }
 
-  # dk.cmd lets cmd and PowerShell run `dk ...`: it hands dk to Git Bash and returns dk's exit code. Once
-  # `dk uninstall` removed dk, dk.cmd deletes itself: `(goto)` ends the batch first, so cmd never looks
-  # for the deleted file ("The batch file cannot be found").
-  Set-Content -LiteralPath (Join-Path $binDir 'dk.cmd') -Encoding ASCII -Value @(
-    '@echo off',
-    "`"$bash`" `"%~dp0dk`" %*",
-    'if exist "%~dp0dk" exit /b %errorlevel%',
-    '(goto) 2>nul & del "%~f0"'
-  )
+  # The dk from before 1.6.0 ran in Git Bash through dk.cmd: dk.exe takes its place.
+  foreach ($old in @('dk', 'dk.cmd')) {
+    $p = Join-Path $binDir $old
+    if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+  }
 
   # The user PATH, for every new terminal, and this session's, so dk works at once.
   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -89,6 +71,5 @@
   }
   if (@($env:Path -split ';') -notcontains $binDir) { $env:Path = "$binDir;$env:Path" }
 
-  # dk reads its answers from the console when Git Bash has no /dev/tty.
-  & $bash $dk install
+  & $dk install
 }
