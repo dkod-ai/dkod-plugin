@@ -485,6 +485,14 @@ function tmpWrite(dir, command) {
   return null;
 }
 
+/** DKO-1486: a command that changes the Playwright browser (its folder, a TLS or DNS or proxy flag) so a screenshot matches. */
+const BROWSER_FLAGS = /--ignore-certificate-errors|--host-resolver-rules|--proxy-server\b/;
+const PLAYWRIGHT_DIR = /ms-playwright[\\/]/;
+const PLAYWRIGHT_WRITE = /\b(?:mv|cp|rm|rmdir|ln|touch|chmod|tee|install|rsync|sed|dd|mkdir|truncate)\b|>|\bwriteFile|\brename|\bunlink/;
+const touchesBrowser = (command) => BROWSER_FLAGS.test(command) || (PLAYWRIGHT_DIR.test(command) && PLAYWRIGHT_WRITE.test(command));
+const BROWSER_DENY = "Never change, wrap or replace the Playwright browser, or pass it --ignore-certificate-errors, --host-resolver-rules or a proxy: mask the frame instead.";
+const denyBrowser = () => out({ permission: "deny", user_message: "DKOD: do not change the Playwright browser.", agent_message: BROWSER_DENY });
+
 const TMP_DENY = (path) =>
   `Do not write to the fixed path ${path}: other users of this computer may own it. Run mktemp -d once, keep that folder, and write every scratch file (curl or wget output, saved answers, notes, logs) there.`;
 
@@ -913,6 +921,12 @@ if (event === "preToolUse") {
       }
     }
   }
+  if (WRITES.test(tool)) {
+    for (const key of ["file_path", "notebook_path", "path", "filePath", "filename", "target_file"]) {
+      const value = args?.[key];
+      if (typeof value === "string" && PLAYWRIGHT_DIR.test(at(dir, value) + "/")) denyBrowser();
+    }
+  }
   if (suite !== null && WRITES.test(tool)) {
     for (const key of ["file_path", "notebook_path", "path", "filePath", "filename", "target_file"]) {
       const value = args?.[key];
@@ -935,6 +949,7 @@ if (event === "preToolUse") {
   if (SHELL.test(tool)) {
     const command = String(args?.command ?? "");
     denyUploadUrl(command);
+    if (touchesBrowser(command)) denyBrowser();
     const tmp = isDkodChat(chat) ? tmpWrite(dir, command) : null;
     if (tmp !== null) out({ permission: "deny", user_message: "DKOD: write scratch files in the mktemp -d folder.", agent_message: TMP_DENY(tmp) });
     if (suite !== null && !readOnly(command) && touchesSuite(suite, dir, command)) {
@@ -1009,6 +1024,7 @@ if (event === "beforeMCPExecution" || (event === "" && "tool_name" in input)) {
 if (event === "beforeShellExecution" || (event === "" && "command" in input)) {
   const command = String(input.command ?? "");
   denyUploadUrl(command);
+  if (touchesBrowser(command)) denyBrowser();
   // DKO-1175: while a migration is open, a command that changes the original app, or its data, is denied.
   const dir = workDir(input);
   const found = migrationAt(dir);

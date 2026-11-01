@@ -2234,6 +2234,7 @@ async function freeze(folder, reportFile, io) {
   if (overlays.length > 0) {
     return fail(io, { problems: overlays.map((s) => `.dkod/map/design/pages/${s}.json: the capture shows a framework dev overlay. Capture the original's production build and start (Next.js: next build, then next start), never a dev server, then run freeze again.`), dev_overlay_pages: overlays });
   }
+  const framed = new Set(frameStates(join3(dir, ".dkod/map"), io));
   const specs = io.walk(join3(dir, "tests/parity"), []).filter((f) => TEST_FILE.test(f));
   if (specs.length === 0)
     return fail(io, { problems: ["tests/parity: no test file found. Write the parity suite there first."] });
@@ -2267,6 +2268,15 @@ async function freeze(folder, reportFile, io) {
       if (tags.some((t) => t.kind === "data") && !hasRestart(body)) {
         problems.push(`${title}: an @data test must write, read back, restart the app, then read again; this body has no restart between the write and the second read. Add the restart step (a restartApp() helper) and run the suite on the original again`);
         tags = tags.filter((t) => t.kind !== "data");
+      }
+      for (const t of tags) {
+        if (t.kind !== "design")
+          continue;
+        const [path, state] = t.key.split(" ");
+        const code = body.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+        if (framed.has(`${pageSlug(path)}/${state}`) && !/\bmask\s*:[^;]*?locator\s*\(/.test(code)) {
+          problems.push(`${title}: the state json lists cross-origin frames, so add \`mask: [page.locator("iframe")]\` to this test's toHaveScreenshot, the same on the original and the dk- app`);
+        }
       }
       if (!run.some((t) => t.title === title)) {
         notRun.push(`${title} (not in the report)`);
@@ -4400,6 +4410,19 @@ function devOverlayStates(mapDir, io) {
       continue;
     const parsed = readJson(io.readFile(join8(join8(mapDir, "design"), rel)));
     if (parsed.ok && recordsDevOverlay(parsed.value))
+      out.push(`${m[1]}/${m[2]}`);
+  }
+  return out.sort();
+}
+function frameStates(mapDir, io) {
+  const out = [];
+  for (const rel of io.walk(join8(mapDir, "design"), [])) {
+    const m = /^pages[/]([^/]+)[/]([^/]+)[.]json$/.exec(rel);
+    if (m === null)
+      continue;
+    const parsed = readJson(io.readFile(join8(join8(mapDir, "design"), rel)));
+    const frames = parsed.ok && typeof parsed.value === "object" && parsed.value !== null ? parsed.value.frames : undefined;
+    if (Array.isArray(frames) && frames.length > 0 && frames.every((f) => typeof f === "string"))
       out.push(`${m[1]}/${m[2]}`);
   }
   return out.sort();
