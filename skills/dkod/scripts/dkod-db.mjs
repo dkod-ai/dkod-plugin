@@ -1537,6 +1537,25 @@ function fkOrder(tables, edges) {
   }
   return { order };
 }
+function copyPlan(tables, edges) {
+  const first = fkOrder(tables, edges);
+  if ("order" in first)
+    return { order: first.order, held: [] };
+  const held = new Set(first.cycle);
+  const second = fkOrder(tables, edges.filter((e) => !(held.has(e.child) && held.has(e.parent))));
+  return { order: "order" in second ? second.order : tables, held: first.cycle };
+}
+var holdForeignKeys = (held) => {
+  if (held.length === 0)
+    return "";
+  const names = `ARRAY[${held.map(quoteLit).join(",")}]::text[]`;
+  return `CREATE TEMP TABLE dkod_fk_hold ON COMMIT DROP AS SELECT cl.relname::text AS tbl, k.conname::text AS name, pg_get_constraintdef(k.oid) AS def FROM pg_constraint k JOIN pg_class cl ON cl.oid=k.conrelid JOIN pg_namespace n ON n.oid=cl.relnamespace JOIN pg_class pl ON pl.oid=k.confrelid JOIN pg_namespace pn ON pn.oid=pl.relnamespace WHERE k.contype='f' AND n.nspname='public' AND pn.nspname='public' AND cl.relname = ANY(${names}) AND pl.relname = ANY(${names}) AND k.conrelid <> k.confrelid;
+` + `DO $$ DECLARE r record; BEGIN FOR r IN SELECT tbl, name FROM dkod_fk_hold LOOP EXECUTE format('ALTER TABLE public.%I DROP CONSTRAINT %I', r.tbl, r.name); END LOOP; END $$;
+`;
+};
+var restoreForeignKeys = (held) => held.length === 0 ? "" : `DO $$ DECLARE r record; BEGIN FOR r IN SELECT tbl, name, def FROM dkod_fk_hold ORDER BY tbl, name LOOP EXECUTE format('ALTER TABLE public.%I ADD CONSTRAINT %I %s', r.tbl, r.name, r.def); END LOOP; END $$;
+`;
+var cycleNote = (held) => `These tables reference each other in a cycle: ${held.join(", ")}. Their foreign keys are taken off for the copy and put back in the same transaction; Postgres checks every row when they go back.`;
 function safeErrors(stderr) {
   const out = [];
   for (const l of stderr.split(`
@@ -1645,11 +1664,9 @@ async function importSqlite(c) {
     say(`warning: these mapped tables are not in the original, so they were not imported: ${skippedTables.join(", ")}.`);
   for (const [n, cols] of Object.entries(droppedColumns))
     say(`warning: table ${n} has columns the Dev database lacks, so they were not imported: ${cols.join(", ")}.`);
-  const ordered = fkOrder(tables.map((t) => t.name), edges);
-  if ("cycle" in ordered) {
-    say(`These tables reference each other in a cycle, so no copy order exists: ${ordered.cycle.join(", ")}.`);
-    return 2;
-  }
+  const ordered = copyPlan(tables.map((t) => t.name), edges);
+  if (ordered.held.length > 0)
+    say(cycleNote(ordered.held));
   const byName = new Map(tables.map((t) => [t.name, t]));
   const inOrder = ordered.order.map((n) => byName.get(n));
   const devHash = await c.psql(c.devUrl, c.devEnv, ["-f", "-"], `${PG_SETTINGS}
@@ -1668,7 +1685,7 @@ ${inOrder.map(hashSql).join(`
   }
   say(`warning: ${DEV_WARNING}`);
   let script = `${PG_SETTINGS}
-${emptyGuard(inOrder)}`;
+${emptyGuard(inOrder)}${holdForeignKeys(ordered.held)}`;
   const counts = [];
   for (const [i, t] of inOrder.entries()) {
     const { base } = sourceCols.get(t.name);
@@ -1688,6 +1705,7 @@ ${copyText(rows.value)}\\.
     script += `INSERT INTO ${dest} (${cols}) OVERRIDING SYSTEM VALUE SELECT ${t.cols.map((col) => castExpr(col, have.get(col).type, have.get(col).udt)).join(", ")} FROM ${temp};
 `;
   }
+  script += restoreForeignKeys(ordered.held);
   script += sequenceResets(inOrder);
   script += `DO $$ BEGIN
 ${inOrder.map((t, i) => `IF (SELECT count(*) FROM public.${quoteIdent(t.name)}) <> ${counts[i]} THEN RAISE EXCEPTION 'dkod-import: table ${t.name.replace(/'/g, "''").replace(/%/g, "%%")} does not match the original'; END IF;`).join(`
@@ -2098,11 +2116,7 @@ async function runImport(flags, io, cwd) {
     return failed("Could not read the original's foreign keys.", edgesRes.stderr);
   const edges = edgesRes.stdout.split(`
 `).map((l) => l.split("\t")).filter((p) => p.length === 2).map(([child, parent]) => ({ child, parent }));
-  const ordered = fkOrder(tables.map((t) => t.name), edges);
-  if ("cycle" in ordered) {
-    say(`These tables reference each other in a cycle, so no copy order exists: ${ordered.cycle.join(", ")}.`);
-    return 2;
-  }
+  const ordered = copyPlan(tables.map((t) => t.name), edges);
   const byName = new Map(tables.map((t) => [t.name, t]));
   const inOrder = ordered.order.map((n) => byName.get(n));
   const srcHash = await psql(sourceUrl, srcEnv, ["-f", "-"], `${PG_SETTINGS}
@@ -2143,9 +2157,13 @@ ${inOrder.map(hashSql).join(`
   say(`warning: ${DEV_WARNING}`);
   if (alreadyPresent.length > 0)
     say(`these tables already hold the original's rows, so they were not copied: ${alreadyPresent.join(", ")}.`);
+  const held = ordered.held.filter((n) => toCopy.some((t) => t.name === n));
+  if (held.length > 0)
+    say(cycleNote(held));
   let script = `${PG_SETTINGS}
 `;
   script += emptyGuard(toCopy);
+  script += holdForeignKeys(held);
   for (const t of toCopy) {
     const cols = t.cols.map(quoteIdent).join(", ");
     const data = await psql(sourceUrl, srcEnv, ["-c", PG_SETTINGS, "-c", `COPY (SELECT ${cols} FROM public.${quoteIdent(t.name)}) TO STDOUT`]);
@@ -2157,6 +2175,7 @@ ${data.stdout}${data.stdout === "" || data.stdout.endsWith(`
 `}\\.
 `;
   }
+  script += restoreForeignKeys(held);
   script += sequenceResets(inOrder);
   script += `${inOrder.map(hashSql).join(`
 `)}
