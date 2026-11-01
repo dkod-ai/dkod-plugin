@@ -3,7 +3,7 @@ import { createHash as createHash4, randomUUID } from "node:crypto";
 import { spawn as spawn2 } from "node:child_process";
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join as join2 } from "node:path";
+import { dirname, join as join2, resolve } from "node:path";
 
 import { createHash as createHash3, randomBytes as randomBytes2 } from "node:crypto";
 import net2 from "node:net";
@@ -619,7 +619,7 @@ var RENEW_BEFORE_MS = 5 * 60000;
 var RENEW_MIN_MS = 30000;
 var RETRY_STEPS_MS = [30000, 60000, 120000, 300000];
 var FLAGS = {
-  up: ["app", "port", "dir", "gateway", "config", "wait"],
+  up: ["app", "port", "dir", "gateway", "config", "wait", "code", "dashboard"],
   down: ["dir"],
   migrate: ["dir", "port"],
   explain: [],
@@ -666,7 +666,7 @@ var MAKE_STEP = "Call dkoder.devdb.status with the app's key: when it says missi
 var missingDb = (app) => `The ${app} Dev database does not exist yet. ${MAKE_STEP} ${NO_DOCKER}`;
 var notSynced = (app) => `DKOD has made the ${app} Dev database, but the Dev database gateway has not loaded it yet. It usually takes a few minutes: run this again. ${NO_DOCKER}`;
 var notReachable = (app) => `The ${app} Dev database did not answer in time. Check the network and the gateway address, then run this again. ${NO_DOCKER}`;
-var NO_DEVICE = "This computer has no Dkoder device token. Install Dkoder here first, then run this again.";
+var NO_DEVICE = "This computer has no Dkoder device token yet. Call the DKOD tool dkoder.devdb.connect, then run this same command again at once with --code <code> --dashboard <dashboard_url> from its answer. The code works once, for 60 seconds.";
 function trustedDashboard(raw) {
   if (typeof raw !== "string")
     return null;
@@ -678,12 +678,12 @@ function trustedDashboard(raw) {
   } catch {}
   return null;
 }
-function resolveCredentials(env, configPath, readFile) {
+function resolveCredentials(env, configPath, readFile, pluginRoot, devicePath) {
   if (env.DKOD_URL && env.DKODER_TOKEN) {
     const dashboardUrl = trustedDashboard(env.DKOD_URL);
     return dashboardUrl ? { dashboardUrl, token: env.DKODER_TOKEN } : null;
   }
-  const candidates = [configPath, env.CLAUDE_PLUGIN_ROOT && `${env.CLAUDE_PLUGIN_ROOT}/dkoder.json`, env.CURSOR_PLUGIN_ROOT && `${env.CURSOR_PLUGIN_ROOT}/dkoder.json`];
+  const candidates = [configPath, env.CLAUDE_PLUGIN_ROOT && `${env.CLAUDE_PLUGIN_ROOT}/dkoder.json`, env.CURSOR_PLUGIN_ROOT && `${env.CURSOR_PLUGIN_ROOT}/dkoder.json`, pluginRoot && `${pluginRoot}/dkoder.json`];
   for (const path of candidates) {
     if (!path)
       continue;
@@ -699,7 +699,94 @@ function resolveCredentials(env, configPath, readFile) {
     if (path === configPath)
       return null;
   }
-  return null;
+  return devicePath ? readDeviceFile(devicePath, readFile) : null;
+}
+function readDeviceFile(path, readFile) {
+  const text = readFile(path);
+  if (text === null)
+    return null;
+  try {
+    const d = JSON.parse(text);
+    const dashboardUrl = trustedDashboard(d.dashboardUrl);
+    if (!dashboardUrl || typeof d.token !== "string" || !d.token || typeof d.refresh !== "string" || !d.refresh || typeof d.expiresAt !== "number")
+      return null;
+    return { dashboardUrl, token: d.token, refresh: d.refresh, expiresAt: d.expiresAt };
+  } catch {
+    return null;
+  }
+}
+function saveDevice(io, creds) {
+  const path = io.devicePath?.();
+  if (!path)
+    return;
+  const text = JSON.stringify({ dashboardUrl: creds.dashboardUrl, token: creds.token, refresh: creds.refresh, expiresAt: creds.expiresAt });
+  (io.writePrivate ?? io.writeFile)(path, text);
+}
+function dashboardFor(flag, io) {
+  if (flag !== undefined)
+    return trustedDashboard(flag);
+  if (io.env.DKOD_URL)
+    return trustedDashboard(io.env.DKOD_URL);
+  const mcp = io.pluginRoot ? io.readFile(`${io.pluginRoot}/.mcp.json`) : null;
+  if (mcp !== null) {
+    try {
+      const url = JSON.parse(mcp).mcpServers?.dkod?.url;
+      const origin = trustedDashboard(url);
+      if (origin)
+        return origin;
+    } catch {}
+  }
+  return "https://dashboard.dkod.app";
+}
+var pairOf = (dashboardUrl, body) => {
+  const expiresAt = typeof body.expires_at === "string" ? Date.parse(body.expires_at) : NaN;
+  if (typeof body.token !== "string" || !body.token || typeof body.refresh !== "string" || !body.refresh || Number.isNaN(expiresAt))
+    return null;
+  return { dashboardUrl, token: body.token, refresh: body.refresh, expiresAt };
+};
+var CODE_GONE = "The connect code was refused: it works once, for 60 seconds. Call dkoder.devdb.connect again and run this at once with the new code.";
+async function connectWithCode(code, dashboardUrl, io) {
+  if (!/^dkodc_[a-z0-9]{16,64}_[A-Za-z0-9_-]{20,}$/.test(code))
+    return "--code takes the code dkoder.devdb.connect gave (it starts with dkodc_).";
+  let res;
+  try {
+    res = await io.fetch(`${dashboardUrl}/api/v1/dkoder/connect/exchange`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code }) });
+  } catch {
+    return "Could not reach the dashboard. Check the network, then call dkoder.devdb.connect again.";
+  }
+  if (res.status === 401)
+    return CODE_GONE;
+  let body = {};
+  try {
+    body = JSON.parse(await res.text());
+  } catch {}
+  const creds = res.status === 201 || res.status === 200 ? pairOf(dashboardUrl, body) : null;
+  if (!creds)
+    return "DKOD could not connect this computer right now. Call dkoder.devdb.connect again in a minute.";
+  saveDevice(io, creds);
+  return creds;
+}
+var RENEW_DEVICE_BEFORE_MS = 5 * 60000;
+async function freshCredentials(creds, io) {
+  if (!creds.refresh || creds.expiresAt === undefined || creds.expiresAt - RENEW_DEVICE_BEFORE_MS > io.now())
+    return creds;
+  let res;
+  try {
+    res = await io.fetch(`${creds.dashboardUrl}/api/v1/dkoder/connect/refresh`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ refresh: creds.refresh }) });
+  } catch {
+    throw new TokenError("unavailable", "Could not reach the dashboard. Check the network and try again.");
+  }
+  if (res.status === 401)
+    throw new TokenError("refused", `DKOD no longer accepts this computer's helper token. ${NO_DEVICE}`);
+  let body = {};
+  try {
+    body = JSON.parse(await res.text());
+  } catch {}
+  const next = res.status === 201 || res.status === 200 ? pairOf(creds.dashboardUrl, body) : null;
+  if (!next)
+    throw new TokenError("unavailable", "DKOD could not renew this computer's helper token right now. Try again in a minute.");
+  saveDevice(io, next);
+  return next;
 }
 
 class TokenError extends Error {
@@ -727,7 +814,7 @@ async function fetchDbToken(creds, app, io) {
     body = JSON.parse(raw);
   } catch {}
   if (res.status === 401)
-    throw new TokenError("refused", "The dashboard refused this computer's device token. Reinstall Dkoder or ask your admin for a new one.");
+    throw new TokenError("refused", "The dashboard refused this computer's device token. Call dkoder.devdb.connect, then run this again with --code <code> --dashboard <dashboard_url> from its answer.");
   if (res.status === 403)
     throw new TokenError("forbidden", typeof body.message === "string" && body.message ? body.message : "You are not a member of this app. Ask its owner to add you.");
   if (res.status === 429)
@@ -864,12 +951,29 @@ async function startUp(flags, io, cwd) {
   if (port === null)
     return fail(2, "--port must be a number from 0 to 65535.");
   const dir = flags.get("dir") ?? cwd;
-  const creds = resolveCredentials(io.env, flags.get("config"), io.readFile);
-  if (!creds)
-    return fail(2, NO_DEVICE);
+  let creds;
+  const code = flags.get("code");
+  if (code !== undefined) {
+    const dashboardUrl = dashboardFor(flags.get("dashboard"), io);
+    if (!dashboardUrl)
+      return fail(2, "--dashboard must be the https address of the DKOD dashboard.");
+    const got = await connectWithCode(code, dashboardUrl, io);
+    if (typeof got === "string")
+      return fail(2, got);
+    creds = got;
+  } else {
+    const found = resolveCredentials(io.env, flags.get("config"), io.readFile, io.pluginRoot, io.devicePath?.());
+    if (!found)
+      return fail(2, NO_DEVICE);
+    creds = found;
+  }
+  const dbToken = async () => {
+    creds = await freshCredentials(creds, io);
+    return await fetchDbToken(creds, app, io);
+  };
   let issued;
   try {
-    issued = await fetchDbToken(creds, app, io);
+    issued = await dbToken();
   } catch (error) {
     return fail(error instanceof TokenError && error.kind === "unavailable" ? 1 : 2, error instanceof Error ? error.message : "Could not get a token.");
   }
@@ -890,7 +994,7 @@ async function startUp(flags, io, cwd) {
   let expiresAt = issued.expiresAt;
   const refresh = async () => {
     try {
-      const next = await fetchDbToken(creds, app, io);
+      const next = await dbToken();
       token = next.token;
       expiresAt = next.expiresAt;
       return "ok";
@@ -1057,7 +1161,7 @@ async function startUp(flags, io, cwd) {
   let failures = 0;
   const renew = async () => {
     try {
-      const next = await fetchDbToken(creds, app, io);
+      const next = await dbToken();
       token = next.token;
       expiresAt = next.expiresAt;
       failures = 0;
@@ -1987,8 +2091,24 @@ async function runDbCli(argv, io) {
   }
   switch (args.command) {
     case "up": {
-      if (args.flags.has("detach"))
+      if (args.flags.has("detach")) {
+        const code = args.flags.get("code");
+        if (code !== undefined) {
+          const dashboardUrl = dashboardFor(args.flags.get("dashboard"), io);
+          if (!dashboardUrl) {
+            io.print("dkod-db: --dashboard must be the https address of the DKOD dashboard.");
+            return 2;
+          }
+          const got = await connectWithCode(code, dashboardUrl, io);
+          if (typeof got === "string") {
+            io.print(`dkod-db: ${got}`);
+            return 2;
+          }
+          args.flags.delete("code");
+          args.flags.delete("dashboard");
+        }
         return await runUpDetached(args.flags, io);
+      }
       const started = await startUp(args.flags, io, io.cwd);
       if ("exit" in started)
         return started.exit;
@@ -2056,6 +2176,12 @@ process.exitCode = await runDbCli(process.argv.slice(2), {
     }
   },
   writeFile: (path, text) => writeFileSync(path, text, "utf8"),
+  devicePath: () => join2(stateDir(), "device.json"),
+  writePrivate: (path, text) => {
+    writeFileSync(path, text, { encoding: "utf8", mode: 384 });
+    chmodSync(path, 384);
+  },
+  pluginRoot: resolve(dirname(process.argv[1] ?? "."), "..", "..", ".."),
   exists: (path) => existsSync(path),
   fetch: async (url, init) => await fetch(url, init),
   print: (line) => process.stdout.write(`${line}
