@@ -1,7 +1,7 @@
 {
   "name": "dkod",
   "displayName": "DKOD",
-  "version": "0.17.129",
+  "version": "0.17.130",
   "description": "Build and deploy apps through your company's DKOD: policy, templates, Deploy questions and Deliver.",
   "author": {
     "name": "DKOD"
@@ -66,7 +66,7 @@
       "stop": [
         {
           "command": "node \"${CURSOR_PLUGIN_ROOT:-.}/hooks/cursor-guard.mjs\"",
-          "loop_limit": 1
+          "loop_limit": 3
         }
       ]
     }

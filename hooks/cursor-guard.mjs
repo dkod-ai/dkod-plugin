@@ -14,13 +14,21 @@
 //   In a DKOD chat: git and gh commands that set up or publish a repository are denied.
 //   afterFileEdit / afterShellExecution / stop: when files changed after the org's policy checks last
 //     ran (dkod-policy.mjs check), the agent is asked once, at the end, to run them.
+//   2026-11-02 (365Scores gBall), how the agent behaves in a DKOD chat:
+//     A skipped question is not an answer. Cursor gives a hook no event for its question tool, and its
+//     answer to a skipped question says "continue with the information you already have". The chat's
+//     transcript has the question before the next call runs, so the first change after each new
+//     question (a write, a changing command, a DKOD tool) is denied once: ask again in plain text and
+//     end the turn if it was skipped, run the call again if the builder answered.
+//     An open migration keeps going: a stop whose last message asks the builder nothing is sent on,
+//     up to KEEP_LIMIT times in a row.
 //
 // It only denies or asks. Cursor ignores a hook's "allow" for approvals, so it never answers one;
 // the Cursor allowlist in the dkod skill does that part. Anything it does not know gets no opinion ({}).
 // A file named `off` in its state folder turns the session gate off; everything else stays.
 //
 // Never logs a command: the upload command carries a one-use upload link.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -72,6 +80,20 @@ const NO_GIT = [
 const KEEP_GOING =
   "DKOD: this app's migration is not finished. If your last message asked the builder a question, stop and wait for the answer. Otherwise go on now with the next step of the dkod-migrate skill, and do not stop until the app is deployed or you need the builder's answer.";
 
+/** Stops in a row the stop hook sends an open migration on; the manifest's loop_limit is the same number. */
+const KEEP_LIMIT = 3;
+
+const ASK_FIRST = [
+  "DKOD: you asked the builder a question just before this call, so Dkoder held it back once.",
+  "If the question tool said the questions were skipped, the builder gave no answer: a skipped question is not an answer,",
+  "and \"continue with the information you already have\" does not apply to a DKOD step. Do not pick an answer for the builder.",
+  "Ask the same question again in plain text in your reply, then end your turn and wait for the builder.",
+  "If the builder did answer, run this call again now.",
+].join(" ");
+
+const ASK_AGAIN =
+  "DKOD: the builder skipped your question, and a skipped question is not an answer. Ask it again now in plain text, as the last line of your reply, then end your turn and wait. Do not go on with a choice the builder did not make.";
+
 const CHECK_FIRST = [
   "DKOD: files changed in this chat after the org's policy checks last ran. Before you finish, run them on the app's folder",
   `as the dkod skill's "Policy checks" says (${SKILL}): write the answer of dkoder_policy to a temp file and run`,
@@ -117,6 +139,66 @@ function noteChat(conversationId, field) {
 
 const isDkodChat = (conversationId) => Boolean(conversationId && readState()[conversationId]);
 const gateOff = () => existsSync(join(STATE_DIR, "off"));
+
+/**
+ * What the chat's transcript says: how many questions the agent asked (Cursor's AskQuestion tool),
+ * whether it asked one since the builder's last message, and the text of its last message.
+ * Reads only the transcript's last 4 MB. No transcript: nothing asked, no text.
+ */
+function transcriptFacts(path) {
+  const facts = { asks: 0, askedThisTurn: false, lastText: "" };
+  if (typeof path !== "string" || path === "") return facts;
+  let raw = "";
+  try {
+    const fd = openSync(path, "r");
+    try {
+      const size = fstatSync(fd).size;
+      const length = Math.min(size, 4 * 1024 * 1024);
+      const buf = Buffer.alloc(length);
+      readSync(fd, buf, 0, length, size - length);
+      raw = buf.toString("utf8");
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return facts;
+  }
+  for (const line of raw.split("\n")) {
+    let row;
+    try { row = JSON.parse(line); } catch { continue; }
+    const content = Array.isArray(row?.message?.content) ? row.message.content : [];
+    if (row?.role === "user") {
+      facts.askedThisTurn = false;
+      continue;
+    }
+    if (row?.role !== "assistant") continue;
+    const text = content.filter((c) => c?.type === "text" && typeof c.text === "string").map((c) => c.text).join("\n").trim();
+    if (text !== "") facts.lastText = text;
+    if (content.some((c) => c?.type === "tool_use" && /^ask_?question$/i.test(String(c.name ?? "")))) {
+      facts.asks += 1;
+      facts.askedThisTurn = true;
+    }
+  }
+  return facts;
+}
+
+/** The message ends by asking the builder something: a question mark in its last lines. */
+const asksBuilder = (text) => text.slice(-400).includes("?");
+
+/**
+ * In a DKOD chat, the first change after each new question is denied once (see the header).
+ * The count of questions answered this way is kept in the chat's record.
+ */
+function holdAfterQuestion(chat, transcriptPath) {
+  const all = readState();
+  const rec = chat ? all[chat] : undefined;
+  if (!rec) return;
+  const { asks } = transcriptFacts(transcriptPath);
+  if (asks <= (rec.asksSeen ?? 0)) return;
+  rec.asksSeen = asks;
+  writeState(all);
+  out({ permission: "deny", user_message: "DKOD: a skipped question is not an answer. The agent checks it before it goes on.", agent_message: ASK_FIRST });
+}
 
 /** The command split into top-level parts at unquoted ; & | and newlines; null if it uses $( ` < > . */
 function parts(command) {
@@ -921,6 +1003,11 @@ if (event === "preToolUse") {
   if (!isDkodChat(chat) && !gateOff() && WRITES.test(tool)) {
     out({ permission: "deny", user_message: "DKOD: start a DKOD session first. The agent is told how.", agent_message: FIRST_DENY });
   }
+  {
+    let toolArgs = input.tool_input;
+    if (typeof toolArgs === "string") { try { toolArgs = JSON.parse(toolArgs); } catch { toolArgs = null; } }
+    if (WRITES.test(tool) || (SHELL.test(tool) && !readOnly(String(toolArgs?.command ?? "")))) holdAfterQuestion(chat, input.transcript_path);
+  }
   // DKO-1175: while a migration is open, the original app's folder is read only, and so is its record.
   let args = input.tool_input;
   if (typeof args === "string") { try { args = JSON.parse(args); } catch { args = null; } }
@@ -1024,8 +1111,12 @@ if (event === "stop") {
   // builder had to ask "why did you stop". An open migration (its record is removed only by `clean`,
   // after shipped) gets one nudge per stop to go on, unless it waits for the builder's answer.
   const root = Array.isArray(input.workspace_roots) ? input.workspace_roots[0] : input.cwd;
-  if (rec && status === "completed" && Number(input.loop_count ?? 0) === 0 && migrationAt(root) !== null) {
-    out({ followup_message: KEEP_GOING });
+  const loops = Number(input.loop_count ?? 0);
+  if (rec && status === "completed") {
+    const facts = transcriptFacts(input.transcript_path);
+    // 2026-11-02: the agent asked, the builder skipped, and the agent went on or stopped without asking again.
+    if (loops === 0 && facts.askedThisTurn && /\bskip/i.test(facts.lastText) && !asksBuilder(facts.lastText)) out({ followup_message: ASK_AGAIN });
+    if (loops < KEEP_LIMIT && migrationAt(root) !== null && !asksBuilder(facts.lastText)) out({ followup_message: KEEP_GOING });
   }
   out({});
 }
@@ -1056,6 +1147,7 @@ if (event === "beforeMCPExecution" || (event === "" && "tool_name" in input)) {
       writePending(all);
     }
   }
+  if (tool !== REPORT_TOOL && tool !== "dkoder.session.start") holdAfterQuestion(chat, input.transcript_path);
   if (tool === "dkoder.remove") {
     out({ permission: "ask", user_message: "DKOD: this removes the app from production. Allow only if you asked for that." });
   }
@@ -1102,6 +1194,7 @@ if (event === "beforeShellExecution" || (event === "" && "command" in input)) {
     }
   }
   if (isDkodChat(chat)) {
+    if (!readOnly(command)) holdAfterQuestion(chat, input.transcript_path);
     if (gitSetup(command)) out({ permission: "deny", user_message: "DKOD blocked git setup for this app: DKOD makes the repository itself.", agent_message: NO_GIT });
     out({});
   }
