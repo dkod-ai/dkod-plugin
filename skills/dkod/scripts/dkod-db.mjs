@@ -1555,6 +1555,16 @@ var holdForeignKeys = (held) => {
 };
 var restoreForeignKeys = (held) => held.length === 0 ? "" : `DO $$ DECLARE r record; BEGIN FOR r IN SELECT tbl, name, def FROM dkod_fk_hold ORDER BY tbl, name LOOP EXECUTE format('ALTER TABLE public.%I ADD CONSTRAINT %I %s', r.tbl, r.name, r.def); END LOOP; END $$;
 `;
+var holdTriggers = (tables) => {
+  if (tables.length === 0)
+    return "";
+  const names = `ARRAY[${tables.map(quoteLit).join(",")}]::text[]`;
+  return `CREATE TEMP TABLE dkod_trigger_hold ON COMMIT DROP AS SELECT cl.relname::text AS tbl, t.tgname::text AS name, t.tgenabled::text AS mode FROM pg_trigger t JOIN pg_class cl ON cl.oid=t.tgrelid JOIN pg_namespace n ON n.oid=cl.relnamespace WHERE NOT t.tgisinternal AND t.tgenabled <> 'D' AND n.nspname='public' AND cl.relname = ANY(${names});
+` + `DO $$ DECLARE r record; BEGIN FOR r IN SELECT tbl, name FROM dkod_trigger_hold LOOP EXECUTE format('ALTER TABLE public.%I DISABLE TRIGGER %I', r.tbl, r.name); END LOOP; END $$;
+`;
+};
+var restoreTriggers = (tables) => tables.length === 0 ? "" : `DO $$ DECLARE r record; BEGIN FOR r IN SELECT tbl, name, mode FROM dkod_trigger_hold ORDER BY tbl, name LOOP EXECUTE format('ALTER TABLE public.%I ENABLE %s TRIGGER %I', r.tbl, CASE r.mode WHEN 'A' THEN 'ALWAYS' WHEN 'R' THEN 'REPLICA' ELSE '' END, r.name); END LOOP; END $$;
+`;
 var cycleNote = (held) => `These tables reference each other in a cycle: ${held.join(", ")}. Their foreign keys are taken off for the copy and put back in the same transaction; Postgres checks every row when they go back.`;
 function safeErrors(stderr) {
   const out = [];
@@ -1685,7 +1695,7 @@ ${inOrder.map(hashSql).join(`
   }
   say(`warning: ${DEV_WARNING}`);
   let script = `${PG_SETTINGS}
-${emptyGuard(inOrder)}${holdForeignKeys(ordered.held)}`;
+${emptyGuard(inOrder)}${holdForeignKeys(ordered.held)}${holdTriggers(inOrder.map((t) => t.name))}`;
   const counts = [];
   for (const [i, t] of inOrder.entries()) {
     const { base } = sourceCols.get(t.name);
@@ -1706,6 +1716,7 @@ ${copyText(rows.value)}\\.
 `;
   }
   script += restoreForeignKeys(ordered.held);
+  script += restoreTriggers(inOrder.map((t) => t.name));
   script += sequenceResets(inOrder);
   script += `DO $$ BEGIN
 ${inOrder.map((t, i) => `IF (SELECT count(*) FROM public.${quoteIdent(t.name)}) <> ${counts[i]} THEN RAISE EXCEPTION 'dkod-import: table ${t.name.replace(/'/g, "''").replace(/%/g, "%%")} does not match the original'; END IF;`).join(`
@@ -1838,7 +1849,7 @@ ${tables.map(hashSql).join(`
   }
   say(`warning: ${DEV_WARNING}`);
   let script = `${PG_SETTINGS}
-${emptyGuard(tables)}`;
+${emptyGuard(tables)}${holdTriggers(tables.map((t) => t.name))}`;
   const counts = [];
   for (const [i, p] of picked.entries()) {
     const t = tables[i];
@@ -1859,6 +1870,7 @@ ${copyText(p.rows.map((r) => idx.map((j) => r[j] ?? null)))}\\.
     }).join(", ")} FROM ${temp};
 `;
   }
+  script += restoreTriggers(tables.map((t) => t.name));
   script += sequenceResets(tables);
   script += `DO $$ BEGIN
 ${tables.map((t, i) => `IF (SELECT count(*) FROM public.${quoteIdent(t.name)}) <> ${counts[i]} THEN RAISE EXCEPTION 'dkod-import: table ${t.name.replace(/'/g, "''").replace(/%/g, "%%")} does not match the original'; END IF;`).join(`
@@ -2206,6 +2218,7 @@ ${inOrder.map(hashSql).join(`
 `;
   script += emptyGuard(toCopy);
   script += holdForeignKeys(held);
+  script += holdTriggers(toCopy.map((t) => t.name));
   for (const t of toCopy) {
     const cols = t.cols.map(quoteIdent).join(", ");
     const data = await psql(sourceUrl, srcEnv, ["-c", PG_SETTINGS, "-c", `COPY (SELECT ${cols} FROM public.${quoteIdent(t.name)}) TO STDOUT`]);
@@ -2218,6 +2231,7 @@ ${data.stdout}${data.stdout === "" || data.stdout.endsWith(`
 `;
   }
   script += restoreForeignKeys(held);
+  script += restoreTriggers(toCopy.map((t) => t.name));
   script += sequenceResets(inOrder);
   script += `${inOrder.map(hashSql).join(`
 `)}
