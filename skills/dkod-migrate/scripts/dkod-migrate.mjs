@@ -2756,7 +2756,9 @@ function ignoresDir(text, dir) {
     return [dir, `${dir}/`, `/${dir}`, `/${dir}/`, `**/${dir}`, `**/${dir}/`].includes(line);
   });
 }
-function importMissing(dir, io) {
+function importMissing(dir, io, dataInDev = false) {
+  if (dataInDev)
+    return [];
   const rec = json3(io.readFile(join4(dir, ".dkod/snapshot.json")));
   if (!isRec5(rec))
     return [".dkod/snapshot.json: missing. Run `dkod-migrate.mjs snapshot` first."];
@@ -2764,7 +2766,7 @@ function importMissing(dir, io) {
     return [];
   return ["the original's data is not in Dev yet: run `dkod-db.mjs import --app <key> --from snapshot --dir <folder>` after db:migrate."];
 }
-async function checkBuild(folder, reportFile, io) {
+async function checkBuild(folder, reportFile, io, opts = {}) {
   const dir = folder === "" ? io.cwd : folder;
   const original = originalOf(io.readFile(join4(dir, ".dkod/migration.json")));
   if (original === null) {
@@ -2941,7 +2943,7 @@ async function checkBuild(folder, reportFile, io) {
     problems.push(...await referenceDrift(dir, io));
     problems.push(...await migrationRows(dir, io));
   } else
-    problems.push(...importMissing(dir, io));
+    problems.push(...importMissing(dir, io, opts.dataInDev === true));
   if (io.readFile(join4(dir, ".env.local")) !== null && !ignoresEnvLocal(io.readFile(join4(dir, ".gitignore")) ?? "")) {
     problems.push(".env.local: not covered by .gitignore. Add it before anything is committed.");
   }
@@ -3733,8 +3735,10 @@ async function runMigrateCli(argv, io) {
     return await freeze(folder, reportFile, io);
   if (command === "unfreeze" && folder !== undefined)
     return await unfreeze(folder, io);
-  if (command === "check-build" && folder !== undefined)
-    return await checkBuild(folder, reportFile, io);
+  if (command === "check-build" && folder !== undefined) {
+    const rest = argv.slice(2);
+    return await checkBuild(folder, rest.find((a) => !a.startsWith("--")), io, { dataInDev: rest.includes("--data-in-dev") });
+  }
   if (command === "snapshot" && folder !== undefined)
     return await snapshot(folder, io, argv.slice(2));
   if (command === "clean" && folder !== undefined)
