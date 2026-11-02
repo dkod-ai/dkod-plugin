@@ -1,11 +1,11 @@
 // Built by packages/dkoder-plugin/scripts/build-migrate.ts from dkod-app. Do not edit: run `bun run --cwd packages/dkoder-plugin build:migrate`.
 import { spawn } from "node:child_process";
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join as join9 } from "node:path";
 
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 
 var APP_MAP = {
   kind: "app.map",
@@ -1658,6 +1658,23 @@ function renderTemplateFiles(source, ctx) {
   return { files, gaps, errors };
 }
 
+var LOCKFILES = [
+  { file: "bun.lock", manager: "bun" },
+  { file: "bun.lockb", manager: "bun" },
+  { file: "pnpm-lock.yaml", manager: "pnpm" },
+  { file: "yarn.lock", manager: "yarn" },
+  { file: "package-lock.json", manager: "npm" }
+];
+var LOCKFILE_NAMES = LOCKFILES.map((l) => l.file);
+function isTemplateInfraPath(path, keep = []) {
+  if (path === "Dockerfile" || path === ".dockerignore" || path === "nginx.conf")
+    return true;
+  if (path.startsWith("charts/") || path.startsWith(".github/workflows/"))
+    return true;
+  return keep.some((k) => k.endsWith("/") ? path.startsWith(k) : path === k);
+}
+
+import { createHash as createHash2 } from "node:crypto";
 var join2 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var NOT_WRITTEN = new Set(["values.yaml", "README.md"]);
 var ROOTS = ["app", "answers", "policy", "dkod"];
@@ -1760,8 +1777,31 @@ async function render2(args, io) {
     io.writeFile(path, file.content);
     written.push(file.path);
   }
+  const infra = {};
+  for (const file of todo)
+    if (isTemplateInfraPath(file.path))
+      infra[file.path] = renderedHash(file.content);
+  io.writeFile(join2(dir, RENDERED_FILE), `${JSON.stringify({ files: infra }, null, 2)}
+`);
   io.print(JSON.stringify({ ok: true, written, skipped, gaps: [], errors: [] }));
   return 0;
+}
+var RENDERED_FILE = ".dkod/rendered.json";
+var renderedHash = (text) => createHash2("sha256").update(text).digest("hex");
+function changedInfra(rendered, read) {
+  if (rendered === null || typeof rendered !== "object" || !("files" in rendered))
+    return [];
+  const files = rendered.files;
+  if (files === null || typeof files !== "object")
+    return [];
+  const out = [];
+  for (const [path, hash] of Object.entries(files)) {
+    const text = read(path);
+    if (typeof hash === "string" && text !== null && renderedHash(text) !== hash) {
+      out.push(`${path}: changed after render. DKOD writes this file again from the org's template at deploy, so the change never ships. Put the change back (render again with --force) and fit the app's code instead: for example, listen on 0.0.0.0 when PORT is set, not only when HOST is.`);
+    }
+  }
+  return out;
 }
 
 var MAX_FINDINGS = 200;
@@ -2851,6 +2891,16 @@ async function checkBuild(folder, reportFile, io) {
     const line = templateTokenLine(io.readFile(join4(dir, f)) ?? "");
     if (line !== null)
       problems.push(`${f}: still has template text ({{...}} at line ${String(line)}). Render the template with dkod-migrate.mjs render; never copy its source.`);
+  }
+  {
+    const raw = io.readFile(join4(dir, RENDERED_FILE));
+    let rec = null;
+    try {
+      rec = raw === null ? null : JSON.parse(raw);
+    } catch {
+      rec = null;
+    }
+    problems.push(...changedInfra(rec, (p) => io.readFile(join4(dir, p))));
   }
   const appName = base2((dir === "." ? io.cwd : dir).replace(/[\\/]+$/, ""));
   if (appName.startsWith("dk-") && sources.includes("package.json") && !sources.includes("bun.lock")) {
@@ -4455,7 +4505,7 @@ function discoverFunctions(original, io) {
   return [...names].sort();
 }
 function queryId(q) {
-  return `q:${createHash2("sha256").update(normalizeQuery(q)).digest("hex").slice(0, 12)}`;
+  return `q:${createHash3("sha256").update(normalizeQuery(q)).digest("hex").slice(0, 12)}`;
 }
 function normalizeQuery(sql) {
   return sql.replace(/\s+/g, " ").trim().replace(/\s*;$/, "");
@@ -5048,7 +5098,7 @@ var io = {
     writeFileSync(path, text, "utf8");
   },
   sha256: (paths) => {
-    const hash = createHash3("sha256");
+    const hash = createHash4("sha256");
     for (const path of paths)
       hash.update(readFileSync(path));
     return hash.digest("hex");
