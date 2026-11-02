@@ -10,6 +10,7 @@ The goal is simple: the app runs on DKOD, with its data. Copy the app's code int
 ## Rules
 
 - Keep going. Do the steps below one after the other in the same turn. Do not stop to report a step, and do not end your turn when a command or a background job finishes: read its output and go on. Stop only to ask the builder a question this file names, or when a step fails with a sentence you must show the builder.
+- Only the builder answers this file's questions. When the question tool comes back with no answer (skipped, rejected, or "continue with the information you already have"), ask the same question in plain text with its options and end your turn. Never pick an option yourself.
 - Run every DKOD script in the foreground, as one command on its own (no `&&`, no `;`, no `&`), so it returns its answer to you. `<scripts>` is the dkod skill's `scripts` folder (next to its SKILL.md). `<migrate>` is this skill's `scripts/dkod-migrate.mjs`.
 - The original app is read only. Never write, install, build or generate anything in its folder, and never start it.
 - Never change the builder's data stores or their users: no `ALTER ROLE`, `GRANT`, `CREATE DATABASE`, `createdb`, `dropdb`, no new local data store, no containers. The snapshot only reads the original's store. If it cannot read it, show the builder the sentence it printed and wait.
