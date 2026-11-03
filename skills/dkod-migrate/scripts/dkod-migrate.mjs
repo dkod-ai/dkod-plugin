@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { createHash as createHash4 } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join as join10 } from "node:path";
+import { dirname, join as join11 } from "node:path";
 
 import { createHash as createHash3 } from "node:crypto";
 
@@ -3181,6 +3181,216 @@ async function sideBySide(folder, originalReport, dkReport, io, args = []) {
   return ok ? 0 : 1;
 }
 
+var DKOD_FILES_SOURCE = `// Shipped by DKOD (dkod-migrate.mjs install-files). The app's files: images, JSON, text, any asset it reads, writes
+// or serves. Never a folder on disk: in prod they are in the app's own private bucket, in dev in its dev bucket.
+//
+//   prod  DKOD_FILES_BUCKET and AWS_REGION (the chart sets them). Credentials come from EKS Pod Identity; nothing
+//         secret is in the app. Only this app's pods reach the bucket.
+//   dev   DKOD_FILES_URL (dkod-db.mjs up writes it into .env.local): a local port that reaches the dev bucket.
+//
+// Keys are paths in the bucket, without a leading slash: "media/players/7.png". Serve a file to the browser from the
+// app's own host (same origin, so the sign-in cookie goes with it) with serveFile(request, key); never hand out a
+// bucket URL. It runs on Bun (Bun.S3Client); it needs no package.
+
+export type FileInfo = { size: number; etag: string; type: string; lastModified: string };
+
+const TYPES: Record<string, string> = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", avif: "image/avif", ico: "image/x-icon",
+  json: "application/json", txt: "text/plain; charset=utf-8", md: "text/markdown; charset=utf-8", csv: "text/csv; charset=utf-8", html: "text/html; charset=utf-8",
+  css: "text/css; charset=utf-8", js: "text/javascript; charset=utf-8", xml: "application/xml", pdf: "application/pdf", mp4: "video/mp4", webm: "video/webm",
+  mp3: "audio/mpeg", wav: "audio/wav", woff: "font/woff", woff2: "font/woff2", zip: "application/zip",
+};
+/** The content type of a key, from its extension. */
+export function contentTypeOf(key: string): string {
+  const dot = key.lastIndexOf(".");
+  return (dot > key.lastIndexOf("/") ? TYPES[key.slice(dot + 1).toLowerCase()] : undefined) ?? "application/octet-stream";
+}
+
+/** A key the bucket and the URL both take: no leading slash, no empty, "." or ".." part, no control character. */
+export function validKey(key: string): boolean {
+  if (key === "" || key.startsWith("/") || key.length > 1024 || /[\\u0000-\\u001f\\u007f\\\\]/.test(key)) return false;
+  return key.split("/").every((part) => part !== "" && part !== "." && part !== "..");
+}
+
+/** A URL path under a prefix as a key, or null for a path that leaves it ("/media/a.png" with "/media/" is "a.png"). */
+export function keyFromPath(path: string, urlPrefix: string): string | null {
+  if (!path.startsWith(urlPrefix)) return null;
+  let rest: string;
+  try { rest = decodeURIComponent(path.slice(urlPrefix.length)); } catch { return null; }
+  return validKey(rest) ? rest : null;
+}
+
+interface Store {
+  head(key: string): Promise<FileInfo | null>;
+  get(key: string, range?: { start: number; end: number }): Promise<Response | null>;
+  put(key: string, body: Uint8Array | ArrayBuffer | string, type: string): Promise<void>;
+  remove(key: string): Promise<void>;
+  list(prefix: string): Promise<string[]>;
+}
+
+type Creds = { accessKeyId: string; secretAccessKey: string; sessionToken: string; expiresAt: number };
+let cached: Creds | null = null;
+/** The pod's credentials from the EKS Pod Identity agent, kept until five minutes before they end. */
+async function podIdentity(): Promise<Creds> {
+  if (cached && cached.expiresAt - 5 * 60_000 > Date.now()) return cached;
+  const uri = process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI, tokenFile = process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE;
+  if (!uri || !tokenFile) throw new Error("dkod-files: this pod has no Pod Identity credentials (the app's files bucket is not set up)");
+  const token = (await Bun.file(tokenFile).text()).trim();
+  const res = await fetch(uri, { headers: { authorization: token } });
+  if (!res.ok) throw new Error("dkod-files: the Pod Identity agent answered " + res.status);
+  const b = (await res.json()) as { AccessKeyId?: string; SecretAccessKey?: string; Token?: string; Expiration?: string };
+  if (!b.AccessKeyId || !b.SecretAccessKey || !b.Token || !b.Expiration) throw new Error("dkod-files: the Pod Identity answer is not whole");
+  cached = { accessKeyId: b.AccessKeyId, secretAccessKey: b.SecretAccessKey, sessionToken: b.Token, expiresAt: Date.parse(b.Expiration) };
+  return cached;
+}
+
+const missing = (err: unknown) => ["NoSuchKey", "NotFound", "ENOENT"].includes(String((err as { code?: string })?.code));
+
+function bucketStore(bucket: string, region: string): Store {
+  const client = async () => {
+    const c = await podIdentity();
+    return new Bun.S3Client({ accessKeyId: c.accessKeyId, secretAccessKey: c.secretAccessKey, sessionToken: c.sessionToken, region, bucket });
+  };
+  return {
+    async head(key) {
+      try {
+        const s = await (await client()).file(key).stat();
+        return { size: s.size, etag: s.etag, type: s.type || contentTypeOf(key), lastModified: s.lastModified.toUTCString() };
+      } catch (err) { if (missing(err)) return null; throw err; }
+    },
+    async get(key, range) {
+      const file = (await client()).file(key);
+      try { return new Response((range ? file.slice(range.start, range.end + 1) : file).stream()); } catch (err) { if (missing(err)) return null; throw err; }
+    },
+    async put(key, body, type) { await (await client()).file(key).write(body, { type }); },
+    async remove(key) { await (await client()).file(key).delete(); },
+    async list(prefix) {
+      const c = await client();
+      const out: string[] = [];
+      let after: string | undefined;
+      for (;;) {
+        const r = await c.list({ prefix, maxKeys: 1000, ...(after === undefined ? {} : { startAfter: after }) });
+        for (const o of r.contents ?? []) out.push(o.key);
+        if (r.isTruncated !== true || !r.contents?.length) return out;
+        after = r.contents[r.contents.length - 1]!.key;
+      }
+    },
+  };
+}
+
+function devStore(base: string): Store {
+  const at = (key: string) => base.replace(/\\/+$/, "") + "/" + key.split("/").map(encodeURIComponent).join("/");
+  return {
+    async head(key) {
+      const r = await fetch(at(key), { method: "HEAD" });
+      if (r.status === 404) return null;
+      if (!r.ok) throw new Error("dkod-files: the dev files port answered " + r.status);
+      return { size: Number(r.headers.get("content-length") ?? 0), etag: r.headers.get("etag") ?? "", type: r.headers.get("content-type") ?? contentTypeOf(key), lastModified: r.headers.get("last-modified") ?? "" };
+    },
+    async get(key, range) {
+      const r = await fetch(at(key), range ? { headers: { range: "bytes=" + range.start + "-" + range.end } } : {});
+      if (r.status === 404) return null;
+      if (!r.ok) throw new Error("dkod-files: the dev files port answered " + r.status);
+      return r;
+    },
+    async put(key, body, type) {
+      const r = await fetch(at(key), { method: "PUT", headers: { "content-type": type }, body });
+      if (!r.ok) throw new Error("dkod-files: the dev files port answered " + r.status);
+    },
+    async remove(key) {
+      const r = await fetch(at(key), { method: "DELETE" });
+      if (!r.ok && r.status !== 404) throw new Error("dkod-files: the dev files port answered " + r.status);
+    },
+    async list(prefix) {
+      const out: string[] = [];
+      let after = "";
+      for (;;) {
+        const r = await fetch(base.replace(/\\/+$/, "") + "/?list&prefix=" + encodeURIComponent(prefix) + (after ? "&after=" + encodeURIComponent(after) : ""));
+        if (!r.ok) throw new Error("dkod-files: the dev files port answered " + r.status);
+        const b = (await r.json()) as { keys: { key: string }[]; truncated: boolean };
+        for (const k of b.keys) out.push(k.key);
+        if (!b.truncated || b.keys.length === 0) return out;
+        after = b.keys[b.keys.length - 1]!.key;
+      }
+    },
+  };
+}
+
+let store: Store | null = null;
+function files(): Store {
+  if (store) return store;
+  const bucket = process.env.DKOD_FILES_BUCKET, dev = process.env.DKOD_FILES_URL;
+  if (bucket) store = bucketStore(bucket, process.env.AWS_REGION || "us-east-1");
+  else if (dev) store = devStore(dev);
+  else throw new Error("dkod-files: no DKOD_FILES_BUCKET (prod) and no DKOD_FILES_URL (dev). In dev, run dkod-db.mjs up and load .env.local.");
+  return store;
+}
+
+const check = (key: string) => { if (!validKey(key)) throw new Error("dkod-files: not a file key: " + JSON.stringify(key)); };
+
+/** The file's facts, or null when it is not there. */
+export async function statFile(key: string): Promise<FileInfo | null> { check(key); return files().head(key); }
+/** True when the file is there. */
+export async function fileExists(key: string): Promise<boolean> { return (await statFile(key)) !== null; }
+/** The file's bytes, or null when it is not there. */
+export async function readFile(key: string): Promise<Uint8Array | null> {
+  check(key);
+  const r = await files().get(key);
+  return r === null ? null : new Uint8Array(await r.arrayBuffer());
+}
+/** The file as text (UTF-8), or null. */
+export async function readText(key: string): Promise<string | null> {
+  const b = await readFile(key);
+  return b === null ? null : new TextDecoder().decode(b);
+}
+/** The file as JSON, or null when it is not there. */
+export async function readJson<T = unknown>(key: string): Promise<T | null> {
+  const t = await readText(key);
+  return t === null ? null : (JSON.parse(t) as T);
+}
+/** Writes the file (replacing it). The type comes from the key's extension unless given. */
+export async function writeFile(key: string, body: Uint8Array | ArrayBuffer | string, type?: string): Promise<void> {
+  check(key);
+  await files().put(key, body, type ?? contentTypeOf(key));
+}
+/** Writes a value as JSON. */
+export async function writeJson(key: string, value: unknown): Promise<void> { await writeFile(key, JSON.stringify(value, null, 2), "application/json"); }
+/** Deletes the file. The bucket keeps old versions for 30 days. */
+export async function deleteFile(key: string): Promise<void> { check(key); await files().remove(key); }
+/** Every key under the prefix ("media/"), sorted as the bucket lists them. */
+export async function listFiles(prefix = ""): Promise<string[]> { return files().list(prefix); }
+
+/**
+ * Serves one file to the browser: the right type, ETag and If-None-Match (304), private caching (the app is behind
+ * sign-in: no shared cache may keep it), one byte range (video), 404 when it is not there. GET and HEAD only.
+ */
+export async function serveFile(req: Request, key: string): Promise<Response> {
+  if (req.method !== "GET" && req.method !== "HEAD") return new Response(null, { status: 405, headers: { allow: "GET, HEAD" } });
+  if (!validKey(key)) return new Response("Not found", { status: 404 });
+  const info = await files().head(key);
+  if (info === null) return new Response("Not found", { status: 404 });
+  const headers: Record<string, string> = { "content-type": contentTypeOf(key) === "application/octet-stream" ? info.type : contentTypeOf(key), "cache-control": "private, max-age=3600", "accept-ranges": "bytes", "x-content-type-options": "nosniff" };
+  if (info.etag) headers.etag = info.etag.startsWith('"') || info.etag.startsWith("W/") ? info.etag : '"' + info.etag + '"';
+  if (info.lastModified) headers["last-modified"] = info.lastModified;
+  const inm = req.headers.get("if-none-match");
+  if (inm && headers.etag && inm.split(",").map((s) => s.trim()).includes(headers.etag)) return new Response(null, { status: 304, headers });
+  const m = /^bytes=(\\d+)-(\\d*)$/.exec((req.headers.get("range") ?? "").trim());
+  if (m) {
+    const start = Number(m[1]), end = m[2] === "" ? info.size - 1 : Math.min(Number(m[2]), info.size - 1);
+    if (start > end || start >= info.size) return new Response(null, { status: 416, headers: { "content-range": "bytes */" + info.size } });
+    headers["content-range"] = "bytes " + start + "-" + end + "/" + info.size;
+    headers["content-length"] = String(end - start + 1);
+    if (req.method === "HEAD") return new Response(null, { status: 206, headers });
+    const part = await files().get(key, { start, end });
+    return part === null ? new Response("Not found", { status: 404 }) : new Response(part.body, { status: 206, headers });
+  }
+  headers["content-length"] = String(info.size);
+  if (req.method === "HEAD") return new Response(null, { status: 200, headers });
+  const body = await files().get(key);
+  return body === null ? new Response("Not found", { status: 404 }) : new Response(body.body, { status: 200, headers });
+}
+`;
+
 var base3 = (p) => p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? "";
 var parent = (p) => {
   const s = p.replace(/[\\/]+$/, "");
@@ -3246,6 +3456,249 @@ function switchFolders(dkFolder, originalFolder, io) {
   return 0;
 }
 
+import { join as join8, resolve, relative, sep, isAbsolute } from "node:path";
+var ENV_FILES = [".env", ".env.local", ".env.development", ".env.development.local", ".env.production", ".env.production.local"];
+var ENV_KEY = /(^|_)(DIR|PATH|ROOT|FOLDER|DIRECTORY)$/;
+var PATHLIKE = /^(\/|~\/|\.\.?\/)/;
+var SKIP2 = ["node_modules", ".git", ".dkod", ".worktrees", ".next", ".nuxt", ".svelte-kit", ".turbo", ".cache", "dist", "build", "coverage", "__pycache__", ".venv", "venv", ".pytest_cache"];
+var NOT_FILES = /(^|\/)(node_modules|\.git|\.dkod|\.worktrees|\.next|\.nuxt|\.svelte-kit|\.turbo|\.cache|\.parcel-cache|dist|build|out|coverage|__pycache__|\.venv|venv|env|\.pytest_cache|\.mypy_cache|\.idea|\.vscode|\.cursor|\.claude|tmp|temp|logs?|\.DS_Store|graft|\.vercel|\.netlify|\.terraform|target)(\/|$)/i;
+var CODE2 = /\.(m?[jt]sx?|cjs|py|go|rb|php)$/;
+function envPaths(original, io) {
+  const out = [];
+  const seen = new Set;
+  for (const name of ENV_FILES) {
+    const text = io.readFile(join8(original, name));
+    if (text === null)
+      continue;
+    for (const line of text.split(`
+`)) {
+      const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+      if (!m)
+        continue;
+      const key = m[1];
+      const value = m[2].trim().replace(/\s+#.*$/, "").replace(/^(['"])(.*)\1$/, "$2").trim();
+      if (value === "" || seen.has(key))
+        continue;
+      if (!ENV_KEY.test(key.toUpperCase()) && !PATHLIKE.test(value))
+        continue;
+      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value))
+        continue;
+      seen.add(key);
+      out.push({ key, value });
+    }
+  }
+  return out;
+}
+var JUNK_FILE = /(^|\/)(\.DS_Store|Thumbs\.db|desktop\.ini|\._[^/]*)$/;
+function stats(dir, io) {
+  const paths = io.walk(dir, SKIP2).filter((p) => !JUNK_FILE.test(p));
+  const counts = new Map;
+  let bytes = 0;
+  for (const p of paths) {
+    bytes += io.size?.(join8(dir, p)) ?? 0;
+    const dot = p.lastIndexOf(".");
+    const ext = dot > p.lastIndexOf("/") ? p.slice(dot + 1).toLowerCase() : "(none)";
+    counts.set(ext, (counts.get(ext) ?? 0) + 1);
+  }
+  const types = Object.fromEntries([...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 8));
+  return { files: paths.length, bytes, types };
+}
+function urlPrefixes(original, io) {
+  const out = new Set;
+  for (const p of io.walk(original, SKIP2)) {
+    if (!CODE2.test(p) || /(^|\/)(tests?|__tests__)\//.test(p) || /\.(test|spec)\.[a-z]+$/.test(p))
+      continue;
+    const text = io.readFile(join8(original, p));
+    if (text === null)
+      continue;
+    for (const m of text.matchAll(/["'`]\/([A-Za-z0-9_-]+)\/(?:\*|["'`]|\$\{|:)/g))
+      out.add(m[1]);
+  }
+  return out;
+}
+function movedFolder(named, root, io) {
+  const parts = named.split(/[\\/]/).filter(Boolean);
+  const bases = [root, resolve(root, ".."), resolve(root, "../..")];
+  for (let i = 0;i <= parts.length - 2; i++) {
+    const tail = parts.slice(i).join("/");
+    for (const base of bases) {
+      const real = io.realpath(join8(base, tail));
+      if (real !== null && io.walk(real, SKIP2).length > 0)
+        return real;
+    }
+  }
+  return null;
+}
+var within = (inner, outer) => inner === outer || inner.startsWith(outer.endsWith(sep) ? outer : outer + sep);
+var toPosix = (p) => p.split(sep).join("/");
+var baseName2 = (p) => p.split(/[\\/]/).filter(Boolean).pop() ?? "files";
+async function findFileGroups(original, io, notFound, given = {}) {
+  const root = io.realpath(original) ?? original;
+  const found = [];
+  const home = (io.env?.("HOME") ?? "").replace(/\/+$/, "");
+  const named = envPaths(root, io).filter((e) => given[e.key] === undefined);
+  for (const [key, value] of Object.entries(given))
+    named.push({ key, value });
+  for (const { key, value } of named) {
+    const raw = value.startsWith("~/") && home !== "" ? join8(home, value.slice(2)) : value;
+    const target = isAbsolute(raw) ? raw : resolve(root, raw);
+    let real = io.realpath(target);
+    let movedFrom = null;
+    if (real === null) {
+      real = movedFolder(target, root, io);
+      if (real === null) {
+        if (raw.split(/[\\/]/).filter(Boolean).length >= 2)
+          notFound?.push({ env: key, path: target });
+        continue;
+      }
+      movedFrom = target;
+    }
+    if (real === "/" || within(root, real) || NOT_FILES.test(toPosix(real)))
+      continue;
+    if (io.walk(real, SKIP2).length === 0)
+      continue;
+    if (found.some((g) => g.source === real))
+      continue;
+    found.push({ env: key, reason: "env", source: real, movedFrom });
+  }
+  if (io.readFile(join8(root, ".git/HEAD")) !== null || io.realpath(join8(root, ".git")) !== null) {
+    const res = await io.run("git", ["-C", root, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "--no-empty-directory"], {}, root);
+    if (res.status === 0) {
+      for (const line of res.stdout.split(`
+`)) {
+        const rel = line.trim().replace(/\/+$/, "");
+        if (rel === "" || !line.trim().endsWith("/") || NOT_FILES.test(rel) || rel.split("/").some((part) => part.startsWith(".")))
+          continue;
+        const real = io.realpath(join8(root, rel));
+        if (real === null || found.some((g) => within(real, g.source)))
+          continue;
+        if (io.walk(real, SKIP2).length === 0)
+          continue;
+        found.push({ env: null, reason: "ignored", source: real });
+      }
+    }
+  }
+  const served = urlPrefixes(root, io);
+  found.sort((a, b) => a.source.length - b.source.length || a.source.localeCompare(b.source));
+  const groups = [];
+  const usedPrefixes = new Set;
+  for (const f of found) {
+    const outer = groups.find((g) => g.inside === null && within(f.source, g.source) && g.source !== f.source);
+    const name = baseName2(f.source);
+    const url = [...served].find((s) => s.toLowerCase() === name.toLowerCase()) ?? null;
+    let key;
+    if (outer)
+      key = `${outer.key_prefix}${toPosix(relative(outer.source, f.source))}/`;
+    else {
+      key = `${name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-")}/`;
+      for (let i = 2;usedPrefixes.has(key); i++)
+        key = `${name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-")}-${i}/`;
+      usedPrefixes.add(key);
+    }
+    groups.push({ env: f.env, reason: f.reason, source: f.source, moved_from: f.movedFrom ?? null, key_prefix: key, url_prefix: url === null ? null : `/${url}/`, inside: outer ? outer.env ?? outer.key_prefix : null, ...stats(f.source, io) });
+  }
+  return groups;
+}
+async function dbLinks(url, prefixes, io, cwd) {
+  const env = { ...PG_TIMEOUT, PGSSLMODE: "disable" };
+  const psql = ["-w", "-X", "-q", "-At", "-F", "\t", "-v", "ON_ERROR_STOP=1", "--dbname", url];
+  const tables = await io.run("psql", [...psql, "-c", "SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY 1"], env, cwd);
+  if (tables.status !== 0)
+    return { error: isNoPassword(tables.stderr) ? "the Dev database refused this login" : "the Dev database could not be read" };
+  const names = tables.stdout.split(`
+`).map((l) => l.trim()).filter(Boolean);
+  const pattern = `/(${prefixes.map((p) => p.replace(/[^A-Za-z0-9_-]/g, "")).join("|")})/([^"'\\s?#)<>\\\\]+)`;
+  const links = new Map;
+  for (const name of names) {
+    const sql = `SELECT DISTINCT m[1] || E'\\t' || m[2] FROM ${quoteIdent(name)} t, regexp_matches(row_to_json(t)::text, '${pattern.replace(/'/g, "''")}', 'g') m`;
+    const res = await io.run("psql", [...psql, "-c", sql], env, cwd);
+    if (res.status !== 0)
+      continue;
+    for (const line of res.stdout.split(`
+`)) {
+      const [prefix, path] = line.split("\t");
+      if (!prefix || !path)
+        continue;
+      let clean = path;
+      try {
+        clean = decodeURIComponent(path);
+      } catch {}
+      if (!links.has(prefix))
+        links.set(prefix, new Set);
+      links.get(prefix).add(clean.replace(/\\\//g, "/"));
+    }
+  }
+  return { links };
+}
+async function filesCommand(folder, io, args = []) {
+  const dir = folder === "" ? io.cwd : folder;
+  const record = io.readFile(join8(dir, ".dkod/migration.json"));
+  let original = null;
+  try {
+    const parsed = JSON.parse(record ?? "null");
+    original = typeof parsed?.original === "string" && parsed.original !== "" ? parsed.original : null;
+  } catch {
+    original = null;
+  }
+  if (original === null) {
+    io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
+    return 2;
+  }
+  const given = {};
+  for (let i = 0;i < args.length; i++) {
+    if (args[i] !== "--dir")
+      continue;
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.+)$/.exec(args[i + 1] ?? "");
+    if (!m) {
+      io.print("dkod-migrate: --dir takes NAME=<folder>, the env name and where its folder is now.");
+      return 2;
+    }
+    given[m[1]] = m[2];
+    i++;
+  }
+  const notFound = [];
+  const groups = await findFileGroups(original, io, notFound, given);
+  const upload = groups.filter((g) => g.inside === null).map((g) => ({ from: g.source, prefix: g.key_prefix }));
+  const report = { ok: true, original, groups, upload, db_refs: { checked: false, links: 0, missing: [], missing_count: 0 }, not_found: notFound };
+  const served = groups.filter((g) => g.url_prefix !== null);
+  const dbUrl = (io.readFile(join8(dir, ".env.local")) ?? "").split(`
+`).map((l) => /^\s*(?:export\s+)?DATABASE_URL\s*=\s*["']?([^"'\s]+)/.exec(l)?.[1]).find(Boolean);
+  if (served.length === 0)
+    report.db_refs.note = "no group has a URL the code serves, so the data's links were not read";
+  else if (!dbUrl)
+    report.db_refs.note = "no DATABASE_URL in .env.local: run `dkod-db.mjs up` first to check the data's links";
+  else if (!io.hasTool("psql"))
+    report.db_refs.note = "psql is not on PATH, so the data's links were not read";
+  else {
+    const read = await dbLinks(dbUrl, served.map((g) => g.url_prefix.replace(/\//g, "")), io, dir);
+    if ("error" in read)
+      report.db_refs.note = `${read.error}, so the data's links were not read`;
+    else {
+      report.db_refs.checked = true;
+      const missing = [];
+      for (const g of served) {
+        const linked = read.links.get(g.url_prefix.replace(/\//g, "")) ?? new Set;
+        report.db_refs.links += linked.size;
+        const have = new Set(io.walk(g.source, SKIP2));
+        for (const p of linked)
+          if (!have.has(p))
+            missing.push(`${g.url_prefix}${p}`);
+      }
+      missing.sort();
+      report.db_refs.missing_count = missing.length;
+      report.db_refs.missing = missing.slice(0, 50);
+      if (missing.length > 0)
+        report.ok = false;
+    }
+  }
+  if (notFound.length > 0)
+    report.ok = false;
+  io.writeFile(join8(dir, ".dkod/files.json"), `${JSON.stringify(report, null, 2)}
+`);
+  io.print(JSON.stringify(report));
+  return report.ok ? 0 : 1;
+}
+
 var ENV_FILE2 = ".dkod-snapshot.env";
 var USAGE = [
   "Usage:",
@@ -3260,7 +3713,9 @@ var USAGE = [
   "  node dkod-migrate.mjs side-by-side <the dk- app's folder> <original report.json> <dk report.json> [--run-dir <mktemp folder>]",
   "  node dkod-migrate.mjs stop-servers <the dk- app's folder> --run-dir <mktemp folder> [--ports a,b]",
   "  node dkod-migrate.mjs clean <the dk- app's folder> [--run-dir <mktemp folder>]",
-  "  node dkod-migrate.mjs switch <the dk- app's folder> <the original folder>"
+  "  node dkod-migrate.mjs switch <the dk- app's folder> <the original folder>",
+  "  node dkod-migrate.mjs files <the dk- app's folder> [--dir NAME=<folder>]...",
+  "  node dkod-migrate.mjs install-files <the dk- app's folder>"
 ].join(`
 `);
 var SOURCE_MAX_AGE_MIN = 10;
@@ -3268,15 +3723,15 @@ var SCRATCH_NAME = /_dkod_migrate(_[A-Za-z0-9_]+)?(_base)?$/;
 var CHECKS = ["name", "age (pg_database file time / pg_stat_database.stats_reset, when readable)"];
 var USE_OWN_STORE = "Snapshot the original's own store: its .env/.env.local URL, its running process (--original-url), or the --db-url the builder gives. Never make a database for the original or run its seed, fixtures, db push or reset to get data.";
 var NEW_APP_ONLY = "The original app has no data files and no local database this computer can copy. The migration is new-app-only: its tests run only on the dk- app. Ask the builder how the original reads its data. If it reads its database from its environment, run snapshot again with --db-url <url> or, with the original running, --original-url http://localhost:<port>. Never write .dkod/snapshot.json by hand.";
-var join8 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+var join9 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var norm = (p) => p.replace(/\/\.\//g, "/").replace(/\/+/g, "/");
-var snapshotPath = (dir) => join8(dir, ".dkod/snapshot.json");
-var recordPath = (dir) => join8(dir, ".dkod/migration.json");
-var SKIP2 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".worktrees"];
+var snapshotPath = (dir) => join9(dir, ".dkod/snapshot.json");
+var recordPath = (dir) => join9(dir, ".dkod/migration.json");
+var SKIP3 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".worktrees"];
 var DATA2 = /\.(?:sqlite|sqlite3|db|db3)$/i;
 var FLAT = /\.(?:csv|json)$/i;
 var NOT_DATA = /(?:^|\/)(?:package(?:-lock)?|composer(?:\.lock)?|tsconfig[^/]*|jsconfig[^/]*|app|vercel|now|firebase|deno|bun|manifest|renovate|[^/]*\.config|\.eslintrc[^/]*|\.prettierrc[^/]*|\.babelrc)\.json$|(?:^|\/)\.dkod\/|(?:^|\/)composer\.lock$/i;
-var CODE2 = /\.(?:py|js|mjs|cjs|jsx|ts|tsx|rb|php|go|java|cs|rs|sh)$/i;
+var CODE3 = /\.(?:py|js|mjs|cjs|jsx|ts|tsx|rb|php|go|java|cs|rs|sh)$/i;
 var CODE_CAP = 256 * 1024;
 var LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 var DB_SCHEMES = new Set(["postgres:", "postgresql:", "mysql:", "mariadb:"]);
@@ -3293,7 +3748,7 @@ function checkSnapshot(dir, io) {
   }
   if (typeof r !== "object" || r === null || typeof r.seal !== "string" || typeof r.nonce !== "string" || sealOf(r, r.nonce) !== r.seal)
     return bad;
-  if (r.mode === "snapshot" && typeof r.scratch === "string" && r.scratch !== "" && io.readFile(join8(r.scratch, SEAL_FILE))?.trim() !== r.seal)
+  if (r.mode === "snapshot" && typeof r.scratch === "string" && r.scratch !== "" && io.readFile(join9(r.scratch, SEAL_FILE))?.trim() !== r.seal)
     return bad;
   return [];
 }
@@ -3392,7 +3847,7 @@ function copiedFile(original, files, value) {
   const raw = isUrl ? value.slice(5) : value;
   if (raw === "" || !isUrl && /^[a-z][a-z0-9+.-]*:/i.test(raw))
     return null;
-  const rel = norm(raw.startsWith("/") ? raw : join8(original, raw)).slice(norm(original).length).replace(/^\//, "");
+  const rel = norm(raw.startsWith("/") ? raw : join9(original, raw)).slice(norm(original).length).replace(/^\//, "");
   if (rel === "")
     return null;
   const copy = files.find((f) => norm(f).endsWith(`/${rel}`));
@@ -3403,7 +3858,7 @@ function relOfValue(original, value) {
   const raw = isUrl ? value.slice(5) : value;
   if (raw === "" || !isUrl && /^[a-z][a-z0-9+.-]*:/i.test(raw))
     return null;
-  const rel = norm(raw.startsWith("/") ? raw : join8(original, raw)).slice(norm(original).length).replace(/^\//, "");
+  const rel = norm(raw.startsWith("/") ? raw : join9(original, raw)).slice(norm(original).length).replace(/^\//, "");
   return rel === "" ? null : rel;
 }
 var ENV_READ = /(?:os\.environ(?:\.get)?\s*[\[(]\s*|os\.getenv\s*\(\s*|process\.env\s*\[\s*)["']([A-Za-z_][A-Za-z0-9_]*)["']|process\.env\.([A-Za-z_][A-Za-z0-9_]*)/;
@@ -3418,7 +3873,7 @@ function flatData(original, rels, named, mapText, io) {
     if (hit === undefined || found.has(hit))
       continue;
     if (/\.json$/i.test(hit)) {
-      const text = io.readFile(join8(original, hit));
+      const text = io.readFile(join9(original, hit));
       if (text === null || !parseJsonRows(text).ok)
         continue;
     }
@@ -3427,9 +3882,9 @@ function flatData(original, rels, named, mapText, io) {
   const rest = flat.filter((f) => !found.has(f));
   if (rest.length > 0) {
     for (const file of rels) {
-      if (!CODE2.test(file))
+      if (!CODE3.test(file))
         continue;
-      const text = io.readFile(join8(original, file));
+      const text = io.readFile(join9(original, file));
       if (text === null || text.length > CODE_CAP)
         continue;
       for (const f of rest) {
@@ -3597,7 +4052,7 @@ async function snapshot(folder, io, args = []) {
     io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
     return 2;
   }
-  const scratch = io.mkdtemp(join8(io.tmpdir(), "dkod-migrate-"));
+  const scratch = io.mkdtemp(join9(io.tmpdir(), "dkod-migrate-"));
   const id = (scratch.split(/[\\/]/).pop() ?? "run").replace(/^dkod-migrate-/, "").replace(/[^A-Za-z0-9]/g, "_");
   const files = [];
   const bases = [];
@@ -3606,20 +4061,20 @@ async function snapshot(folder, io, args = []) {
   if (flags.originalUrl !== "")
     for (const [k, v] of await processPairs(flags.originalUrl, io))
       named.push([k, v, "process"]);
-  const walked = io.walk(original, SKIP2);
+  const walked = io.walk(original, SKIP3);
   for (const file of envFiles(walked))
-    for (const [k, v] of envPairs(io.readFile(join8(original, file))))
+    for (const [k, v] of envPairs(io.readFile(join9(original, file))))
       named.push([k, v, file]);
-  const flatFound = flatData(original, walked, named.map(([k, v]) => [k, v]), io.readFile(join8(dir, ".dkod/map/app-map.json")), io);
+  const flatFound = flatData(original, walked, named.map(([k, v]) => [k, v]), io.readFile(join9(dir, ".dkod/map/app-map.json")), io);
   for (const rel of walked) {
     const flat = flatFound.get(rel);
     if (!DATA2.test(rel) && flat === undefined)
       continue;
-    const to = join8(scratch, rel);
-    io.copyFile(join8(original, rel), to);
+    const to = join9(scratch, rel);
+    io.copyFile(join9(original, rel), to);
     files.push(to);
-    const base = join8(scratch, `.dkod-base/${rel}`);
-    io.copyFile(join8(original, rel), base);
+    const base = join9(scratch, `.dkod-base/${rel}`);
+    io.copyFile(join9(original, rel), base);
     bases.push({ file: to, base, rel, sha256: io.sha256([base]), ...flat !== undefined ? { kind: /\.csv$/i.test(rel) ? "csv" : "json", found: flat } : {} });
   }
   const env = { DKOD_MIGRATE_DATA: scratch };
@@ -3723,9 +4178,9 @@ async function snapshot(folder, io, args = []) {
   record.nonce = randomBytes(16).toString("hex");
   record.seal = sealOf(record, record.nonce);
   if (!empty)
-    io.writeFile(join8(scratch, SEAL_FILE), record.seal);
+    io.writeFile(join9(scratch, SEAL_FILE), record.seal);
   if (!empty)
-    io.writeFile(join8(scratch, ENV_FILE2), Object.entries(env).map(([k, v]) => `${k}=${v.includes("'") ? `"${v}"` : `'${v}'`}
+    io.writeFile(join9(scratch, ENV_FILE2), Object.entries(env).map(([k, v]) => `${k}=${v.includes("'") ? `"${v}"` : `'${v}'`}
 `).join(""));
   io.writeFile(snapshotPath(dir), `${JSON.stringify(record, null, 2)}
 `);
@@ -3754,7 +4209,7 @@ function runDirRefusal(runDir, dkDir, io) {
     if (o === real || o.startsWith(`${real}/`) || real.startsWith(`${o}/`))
       return `${runDir} is, holds or sits inside ${other}, so nothing was removed. Pass the folder \`mktemp -d\` printed, not an app folder.`;
   }
-  if (io.walk(real, SKIP2).some((f) => f === ".dkod/migration.json" || f.endsWith("/.dkod/migration.json")))
+  if (io.walk(real, SKIP3).some((f) => f === ".dkod/migration.json" || f.endsWith("/.dkod/migration.json")))
     return `${runDir} holds another migration's .dkod/migration.json, so nothing was removed. Pass the folder \`mktemp -d\` printed for this run.`;
   return null;
 }
@@ -3790,8 +4245,14 @@ async function runMigrateCli(argv, io) {
   if (command === "stop-servers" && folder !== undefined)
     return await stopServersCommand(argv.slice(2), io);
   if (command === "install-restart" && folder !== undefined) {
-    const to = join8(folder === "" ? io.cwd : folder, "tests/parity/restart.ts");
+    const to = join9(folder === "" ? io.cwd : folder, "tests/parity/restart.ts");
     io.writeFile(to, PARITY_RESTART_SOURCE);
+    io.print(JSON.stringify({ ok: true, file: to }));
+    return 0;
+  }
+  if (command === "install-files" && folder !== undefined) {
+    const to = join9(folder === "" ? io.cwd : folder, "src/dkod-files.ts");
+    io.writeFile(to, DKOD_FILES_SOURCE);
     io.print(JSON.stringify({ ok: true, file: to }));
     return 0;
   }
@@ -3813,6 +4274,8 @@ async function runMigrateCli(argv, io) {
     return switchFolders(folder, reportFile, io);
   if (command === "check-map" && folder !== undefined)
     return await checkMap(folder, io, argv.slice(2));
+  if (command === "files" && folder !== undefined)
+    return await filesCommand(folder, io, argv.slice(2));
   io.print(USAGE);
   return 2;
 }
@@ -3971,8 +4434,8 @@ async function discoverRuntime(baseUrl, mapped, codeRoutes, io) {
   return out;
 }
 
-var join9 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
-var SKIP3 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".dkod", "__pycache__"];
+var join10 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+var SKIP4 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".dkod", "__pycache__"];
 var ASSET_KINDS = ["css", "font", "icon", "image"];
 var TEXT_MAX2 = 200;
 var FULL_MAP = {
@@ -4211,7 +4674,7 @@ function normalizeRoute(path) {
   p = `/${p.replace(/^\/+/, "")}`.replace(/\/+/g, "/");
   return p.length > 1 ? p.replace(/\/$/, "") : p;
 }
-var CODE3 = /\.(?:[cm]?[jt]sx?|svelte)$/;
+var CODE4 = /\.(?:[cm]?[jt]sx?|svelte)$/;
 var PY = /\.py$/;
 var VUE = /\.vue$/i;
 var scriptsOf = (text) => [...text.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).join(`
@@ -4260,7 +4723,7 @@ function packageDirs(files, needle, io, original) {
   for (const f of files) {
     if (f !== "package.json" && !f.endsWith("/package.json"))
       continue;
-    if (needle.test(io.readFile(join9(original, f)) ?? ""))
+    if (needle.test(io.readFile(join10(original, f)) ?? ""))
       out.push(f.slice(0, f.length - "package.json".length));
   }
   return out;
@@ -4291,7 +4754,7 @@ function fileRoutes(files, io, original) {
   const out = [];
   const add = (path, file, method = "GET") => out.push({ path: normalizeRoute(path), method, file, relative: false });
   const addHandler = (path, file) => {
-    for (const method of handlerMethods(io.readFile(join9(original, file)) ?? ""))
+    for (const method of handlerMethods(io.readFile(join10(original, file)) ?? ""))
       add(path, file, method);
   };
   const next = packageDirs(files, /"next"\s*:/, io, original);
@@ -4336,16 +4799,16 @@ function sourceRoutes(files, io, original) {
     if (IS_TEST.test(f))
       continue;
     if (/(?:^|\/)netlify\.toml$/.test(f)) {
-      const toml = io.readFile(join9(original, f));
+      const toml = io.readFile(join10(original, f));
       for (const m of (toml ?? "").matchAll(/^\s*from\s*=\s*(["'])(\/[^"']*)\1/gm)) {
         if (!SPA_CATCH_ALL.test(m[2]) && !/\s/.test(m[2]))
           out.push({ path: normalizeRoute(m[2]), method: "ANY", file: f, relative: false });
       }
       continue;
     }
-    if (!CODE3.test(f) && !PY.test(f))
+    if (!CODE4.test(f) && !PY.test(f))
       continue;
-    const text = io.readFile(join9(original, f));
+    const text = io.readFile(join10(original, f));
     if (text === null)
       continue;
     const add = (path, method = "GET") => {
@@ -4408,7 +4871,7 @@ function sourceRoutes(files, io, original) {
   return out;
 }
 function discoverRoutes(original, io) {
-  const files = io.walk(original, SKIP3);
+  const files = io.walk(original, SKIP4);
   const all = [...fileRoutes(files, io, original), ...sourceRoutes(files, io, original)];
   const seen = new Set;
   return all.filter((r) => {
@@ -4426,17 +4889,17 @@ function discoverTables(original, io) {
       set.add(c);
     out.set(name, set);
   };
-  for (const f of io.walk(original, SKIP3)) {
+  for (const f of io.walk(original, SKIP4)) {
     if (IS_TEST.test(f))
       continue;
     if (/(?:^|\/)data\/.+\.csv$/i.test(f)) {
-      const header = (io.readFile(join9(original, f)) ?? "").split(/\r?\n/, 1)[0] ?? "";
+      const header = (io.readFile(join10(original, f)) ?? "").split(/\r?\n/, 1)[0] ?? "";
       put((f.split("/").pop() ?? f).replace(/\.csv$/i, ""), header.split(",").map((c) => bare(c.trim())).filter((c) => c !== ""));
       continue;
     }
-    if (!/\.sql$/i.test(f) && !CODE3.test(f) && !PY.test(f))
+    if (!/\.sql$/i.test(f) && !CODE4.test(f) && !PY.test(f))
       continue;
-    const raw = io.readFile(join9(original, f));
+    const raw = io.readFile(join10(original, f));
     if (raw === null)
       continue;
     const text = raw.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
@@ -4481,21 +4944,21 @@ var ENV_FILE3 = /^(?:.*\.)?env(?:\..+)?$|\.example$/;
 var ENV_SCHEMA = /^env\.[cm]?[jt]s$/;
 function discoverSettings(original, io) {
   const names = new Set;
-  for (const f of io.walk(original, SKIP3)) {
+  for (const f of io.walk(original, SKIP4)) {
     const base = f.split("/").pop();
     if (IS_TEST.test(f) && ENV_FILE3.test(base))
       continue;
-    if (ENV_FILE3.test(base) && !CODE3.test(base) && !PY.test(base) && !VUE.test(base)) {
-      for (const line of (io.readFile(join9(original, f)) ?? "").split(/\r?\n/)) {
+    if (ENV_FILE3.test(base) && !CODE4.test(base) && !PY.test(base) && !VUE.test(base)) {
+      for (const line of (io.readFile(join10(original, f)) ?? "").split(/\r?\n/)) {
         const key = /^\s*(?:export\s+)?([A-Za-z_]\w*)\s*=/.exec(line)?.[1];
         if (key !== undefined)
           names.add(key);
       }
       continue;
     }
-    if (IS_TEST.test(f) || !CODE3.test(f) && !PY.test(f) && !VUE.test(f))
+    if (IS_TEST.test(f) || !CODE4.test(f) && !PY.test(f) && !VUE.test(f))
       continue;
-    const raw = io.readFile(join9(original, f));
+    const raw = io.readFile(join10(original, f));
     if (raw === null)
       continue;
     const text = codeOf(f, raw);
@@ -4532,17 +4995,17 @@ function colorsInCss(raw) {
 }
 function discoverColors(original, io) {
   const colors = new Set;
-  for (const f of io.walk(original, SKIP3)) {
+  for (const f of io.walk(original, SKIP4)) {
     if (/\.[cm]?[jt]sx?$/.test(f)) {
       if (IS_TEST.test(f))
         continue;
-      for (const c of colorsInCode(io.readFile(join9(original, f)) ?? ""))
+      for (const c of colorsInCode(io.readFile(join10(original, f)) ?? ""))
         colors.add(c);
       continue;
     }
     if (!/\.(?:css|scss|sass|less)$/i.test(f))
       continue;
-    for (const c of colorsInCss(io.readFile(join9(original, f)) ?? ""))
+    for (const c of colorsInCss(io.readFile(join10(original, f)) ?? ""))
       colors.add(c);
   }
   return [...colors].sort();
@@ -4551,10 +5014,10 @@ var KEYWORDS = new Set(["if", "for", "while", "switch", "catch", "constructor", 
 var MARKUP = /\.(?:html?|vue)$/i;
 function discoverFunctions(original, io) {
   const names = new Set;
-  for (const f of io.walk(original, SKIP3)) {
-    if (IS_TEST.test(f) || !CODE3.test(f) && !PY.test(f) && !VUE.test(f))
+  for (const f of io.walk(original, SKIP4)) {
+    if (IS_TEST.test(f) || !CODE4.test(f) && !PY.test(f) && !VUE.test(f))
       continue;
-    const raw = io.readFile(join9(original, f));
+    const raw = io.readFile(join10(original, f));
     if (raw === null)
       continue;
     const text = codeOf(f, raw);
@@ -4586,10 +5049,10 @@ var SQL_START = /^\s*(?:(?:select|insert|update|delete)\s[\s\S]*\b(?:from|into|s
 var LITERAL = /"""([\s\S]*?)"""|'''([\s\S]*?)'''|`([^`]*)`|"((?:[^"\\\n]|\\.)*)"|'((?:[^'\\\n]|\\.)*)'/g;
 function discoverQueries(original, io) {
   const out = new Set;
-  for (const f of io.walk(original, SKIP3)) {
-    if (IS_TEST.test(f) || !CODE3.test(f) && !PY.test(f) && !VUE.test(f) && !/\.(?:html?|sql)$/i.test(f))
+  for (const f of io.walk(original, SKIP4)) {
+    if (IS_TEST.test(f) || !CODE4.test(f) && !PY.test(f) && !VUE.test(f) && !/\.(?:html?|sql)$/i.test(f))
       continue;
-    const text = io.readFile(join9(original, f));
+    const text = io.readFile(join10(original, f));
     if (text === null)
       continue;
     for (const m of text.matchAll(LITERAL)) {
@@ -4628,10 +5091,10 @@ function fontsIn(text, isStyle, stacks) {
 function scanFonts(original, io) {
   const fonts = new Map;
   const stacks = new Set;
-  for (const f of io.walk(original, SKIP3)) {
-    if (IS_TEST.test(f) || !STYLE.test(f) && !CODE3.test(f) && !MARKUP.test(f))
+  for (const f of io.walk(original, SKIP4)) {
+    if (IS_TEST.test(f) || !STYLE.test(f) && !CODE4.test(f) && !MARKUP.test(f))
       continue;
-    const text = io.readFile(join9(original, f));
+    const text = io.readFile(join10(original, f));
     if (text === null)
       continue;
     for (const name of fontsIn(text, STYLE.test(f), stacks))
@@ -4680,10 +5143,10 @@ function idsIn(text, buttons, tooltips) {
 function discoverButtons(original, io) {
   const buttons = new Set;
   const tooltips = new Set;
-  for (const f of io.walk(original, SKIP3)) {
-    if (IS_TEST.test(f) || !CODE3.test(f) && !MARKUP.test(f))
+  for (const f of io.walk(original, SKIP4)) {
+    if (IS_TEST.test(f) || !CODE4.test(f) && !MARKUP.test(f))
       continue;
-    const text = io.readFile(join9(original, f));
+    const text = io.readFile(join10(original, f));
     if (text === null)
       continue;
     idsIn(text, buttons, tooltips);
@@ -4707,13 +5170,13 @@ var SDKS = [
 var sdkName = (pkg) => SDKS.find(([re]) => re.test(pkg))?.[1] ?? null;
 function discoverServices(original, io) {
   const out = new Set;
-  for (const f of io.walk(original, SKIP3)) {
+  for (const f of io.walk(original, SKIP4)) {
     const isPkg = f === "package.json" || f.endsWith("/package.json");
     const py = PY.test(f);
-    const plain = HOST_FILE.test(f) || ENV_FILE3.test(f.split("/").pop()) && !CODE3.test(f) && !py;
-    if (IS_TEST.test(f) || !isPkg && !plain && !CODE3.test(f) && !py)
+    const plain = HOST_FILE.test(f) || ENV_FILE3.test(f.split("/").pop()) && !CODE4.test(f) && !py;
+    if (IS_TEST.test(f) || !isPkg && !plain && !CODE4.test(f) && !py)
       continue;
-    const raw = io.readFile(join9(original, f));
+    const raw = io.readFile(join10(original, f));
     if (raw === null)
       continue;
     if (isPkg) {
@@ -4778,9 +5241,9 @@ function installedServers(map, original, io) {
     [/^(?:mysql2?|mysqlclient|pymysql)$/, "mysql"],
     [/^(?:mongodb|mongoose|pymongo)$/, "mongodb"]
   ];
-  for (const f of io.walk(original, SKIP3)) {
+  for (const f of io.walk(original, SKIP4)) {
     const base = f.split("/").pop();
-    const text = /^package\.json$|^requirements[\w.-]*\.txt$|^pyproject\.toml$/.test(base) ? io.readFile(join9(original, f)) : null;
+    const text = /^package\.json$|^requirements[\w.-]*\.txt$|^pyproject\.toml$/.test(base) ? io.readFile(join10(original, f)) : null;
     if (text === null)
       continue;
     let deps;
@@ -4839,11 +5302,11 @@ function recordsDevOverlay(value, top = true) {
 }
 function devOverlayStates(mapDir, io) {
   const out = [];
-  for (const rel of io.walk(join9(mapDir, "design"), [])) {
+  for (const rel of io.walk(join10(mapDir, "design"), [])) {
     const m = /^pages[/]([^/]+)[/]([^/]+)[.]json$/.exec(rel);
     if (m === null)
       continue;
-    const parsed = readJson(io.readFile(join9(join9(mapDir, "design"), rel)));
+    const parsed = readJson(io.readFile(join10(join10(mapDir, "design"), rel)));
     if (parsed.ok && recordsDevOverlay(parsed.value))
       out.push(`${m[1]}/${m[2]}`);
   }
@@ -4851,11 +5314,11 @@ function devOverlayStates(mapDir, io) {
 }
 function frameStates(mapDir, io) {
   const out = [];
-  for (const rel of io.walk(join9(mapDir, "design"), [])) {
+  for (const rel of io.walk(join10(mapDir, "design"), [])) {
     const m = /^pages[/]([^/]+)[/]([^/]+)[.]json$/.exec(rel);
     if (m === null)
       continue;
-    const parsed = readJson(io.readFile(join9(join9(mapDir, "design"), rel)));
+    const parsed = readJson(io.readFile(join10(join10(mapDir, "design"), rel)));
     const frames = parsed.ok && typeof parsed.value === "object" && parsed.value !== null ? parsed.value.frames : undefined;
     if (Array.isArray(frames) && frames.length > 0 && frames.every((f) => typeof f === "string"))
       out.push(`${m[1]}/${m[2]}`);
@@ -4870,18 +5333,18 @@ async function checkMap(folder, io, args = []) {
   const flag = args.findIndex((a) => a === "--original-url" || a.startsWith("--original-url="));
   const originalUrl = flag < 0 ? "" : args[flag].startsWith("--original-url=") ? args[flag].slice(15) : args[flag + 1] ?? "";
   const dir = folder === "" ? io.cwd : folder;
-  const original = originalOf(io.readFile(join9(dir, ".dkod/migration.json")));
+  const original = originalOf(io.readFile(join10(dir, ".dkod/migration.json")));
   if (original === null) {
     io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
     return 2;
   }
-  const mapDir = join9(dir, ".dkod/map");
+  const mapDir = join10(dir, ".dkod/map");
   const problems = [];
   const missing = [];
   const noShot = [];
   const counts = { routes: 0, pages: 0, stores: 0, tables: 0, services: 0, settings: 0, queries: 0, functions: 0, design: 0, found_routes: 0, screenshots: 0, assets: 0 };
-  const parsed = readJson(io.readFile(join9(mapDir, "app-map.json")));
-  const designFiles = new Set(io.walk(join9(mapDir, "design"), []));
+  const parsed = readJson(io.readFile(join10(mapDir, "app-map.json")));
+  const designFiles = new Set(io.walk(join10(mapDir, "design"), []));
   let map = null;
   if (!parsed.ok)
     problems.push(`app-map.json: ${parsed.why}`);
@@ -5029,10 +5492,10 @@ async function checkMap(folder, io, args = []) {
   for (const s of devOverlayPages)
     problems.push(`design/pages/${s}.json: the capture shows a framework dev overlay (dev_overlay). Run the original's production build and start (Next.js: next build, then next start), never a dev server, and capture ${s} again`);
   const framed = new Set(frameStates(mapDir, io));
-  for (const f of io.walk(join9(dir, "tests/parity"), ["node_modules"])) {
+  for (const f of io.walk(join10(dir, "tests/parity"), ["node_modules"])) {
     if (!/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(f))
       continue;
-    problems.push(...designProblems(testBlocks(io.readFile(join9(dir, `tests/parity/${f}`)) ?? ""), designFramed(framed)));
+    problems.push(...designProblems(testBlocks(io.readFile(join10(dir, `tests/parity/${f}`)) ?? ""), designFramed(framed)));
   }
   const byImage = new Map;
   for (const page of pages) {
@@ -5041,18 +5504,18 @@ async function checkMap(folder, io, args = []) {
     const rel = `pages/${pageSlug(page.path)}/default.png`;
     if (!designFiles.has(rel))
       continue;
-    const sha = io.sha256([join9(join9(mapDir, "design"), rel)]);
+    const sha = io.sha256([join10(join10(mapDir, "design"), rel)]);
     byImage.set(sha, [...byImage.get(sha) ?? [], page.path]);
   }
   const shotPages = [...byImage.values()].reduce((n, g) => n + g.length, 0);
   const placeholders = [...byImage.values()].filter((g) => g.length >= 3 || g.length === shotPages && shotPages >= 2).flat();
-  const assets = readJson(io.readFile(join9(mapDir, "assets/assets.json")));
+  const assets = readJson(io.readFile(join10(mapDir, "assets/assets.json")));
   if (!assets.ok)
     problems.push(`assets/assets.json: ${assets.why}`);
   else if (!Array.isArray(assets.value))
     problems.push("assets/assets.json: must be a list of {kind, path}");
   else {
-    const originalFiles = new Set(io.walk(original, SKIP3));
+    const originalFiles = new Set(io.walk(original, SKIP4));
     counts.assets = assets.value.length;
     assets.value.forEach((a, i) => {
       if (!isRec7(a))
@@ -5139,7 +5602,7 @@ function walk(dir, skip) {
     for (const name of names) {
       if (skip.includes(name))
         continue;
-      const full = join10(at, name);
+      const full = join11(at, name);
       const next = rel === "" ? name : `${rel}/${name}`;
       let dirEntry;
       try {
@@ -5181,6 +5644,14 @@ var io = {
     copyFileSync(from, to);
   },
   rename: (from, to) => renameSync(from, to),
+  size: (path) => {
+    try {
+      return statSync(path).size;
+    } catch {
+      return null;
+    }
+  },
+  env: (name) => process.env[name],
   rm: (path, opts) => rmSync(path, { recursive: opts.recursive ?? false, force: opts.force ?? false }),
   mkdtemp: (prefix) => mkdtempSync(prefix),
   tmpdir,
@@ -5200,7 +5671,7 @@ var io = {
         return [];
       }
     })
-  ].some((dir) => dir !== "" && existsSync(join10(dir, program))),
+  ].some((dir) => dir !== "" && existsSync(join11(dir, program))),
   print: (line) => process.stdout.write(`${line}
 `),
   run: (cmd, args, env, cwd) => new Promise((resolve) => {
