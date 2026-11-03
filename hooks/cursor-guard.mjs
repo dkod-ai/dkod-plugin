@@ -94,6 +94,9 @@ const ASK_FIRST = [
 const ASK_AGAIN =
   "DKOD: the builder skipped your question, and a skipped question is not an answer. Ask it again now in plain text, as the last line of your reply, then end your turn and wait. Do not go on with a choice the builder did not make.";
 
+const SWITCH_SKIPPED =
+  "DKOD: the builder chose not now on the switch pop-up. Do not switch, and do not ask again in this chat. Say in one line that the next chat asks again, then end your turn.";
+
 const CHECK_FIRST = [
   "DKOD: files changed in this chat after the org's policy checks last ran. Before you finish, run them on the app's folder",
   `as the dkod skill's "Policy checks" says (${SKILL}): write the answer of dkoder_policy to a temp file and run`,
@@ -1150,6 +1153,18 @@ if (event === "beforeMCPExecution" || (event === "" && "tool_name" in input)) {
   if (tool !== REPORT_TOOL && tool !== "dkoder.session.start") holdAfterQuestion(chat, input.transcript_path);
   if (tool === "dkoder.remove") {
     out({ permission: "ask", user_message: "DKOD: this removes the app from production. Allow only if you asked for that." });
+  }
+  // 2026-11-03 (Haim): the switch question is a real Cursor pop-up, not only a line in the chat.
+  // Allow is the builder's Confirm; Skip is "Not now", and the next chat asks again.
+  if (tool === "dkoder.migrate.switch") {
+    let args = input.tool_input;
+    if (typeof args === "string") { try { args = JSON.parse(args); } catch { args = null; } }
+    const raw = typeof args?.appKey === "string" ? args.appKey : "";
+    const key = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(raw) ? raw.replace(/^dk-/, "") : "";
+    const said = key === ""
+      ? "DKOD: switch to the new app? The original folder is kept as <name>-archive, the dk- folder takes the original name, and the app in prod loses dk- in its name and URL, with its data. Allow to switch. Skip for not now."
+      : `DKOD: switch to the new app? Your original folder is kept as ${key}-archive, dk-${key} becomes ${key}, and the app in prod becomes ${key} (its URL loses dk-), with its data. Allow to switch. Skip for not now.`;
+    out({ permission: "ask", user_message: said, agent_message: SWITCH_SKIPPED });
   }
   if (tool === "dkoder.session.start") {
     // tool_input comes as an object or as JSON text.

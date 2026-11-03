@@ -88,6 +88,7 @@ On "Not yet": ask what is wrong, fix it, and ask again.
 After the first prod deploy, the builder moves to the new app. The original folder is kept as `<key>-archive`, the dk- folder takes the name `<key>`, and the app in prod loses the dk- prefix in its name and its URL. The prod data comes along. Nothing is deleted.
 
 1. Ask the builder: "dk-<key> is live. Switch to it now? Your original folder is kept as <key>-archive, dk-<key> becomes <key>, and the app in prod becomes <key> (its URL loses dk-), with its data." with the options "Confirm" and "Not now" (the question tool; without one, ask in plain text and wait). Never answer it yourself. On "Not now", stop: the next chat asks again.
+   In Cursor, do not ask this in the chat. Call `dkoder.migrate.switch` at once, as in point 2: Cursor shows the builder the same question as a pop-up. Allow is the Confirm. When the builder skips the pop-up, that is "Not now": stop, and do not ask again in this chat.
 2. On "Confirm": call `dkoder.migrate.switch` with the `sessionId`, the original's app key and `confirm: true`. Do its `steps` in order. They are:
    1. Run `node <migrate> switch <the dk- folder> <the original folder>`. It renames the two folders and changes no file in them. On exit 1, show the builder the sentence it printed and wait.
    2. Run `node <scripts>/dkod-db.mjs up --app <key> --dir <the <key> folder> --detach`. The folder reads the same Dev database, and the same Dev files when the app has them, as before.
