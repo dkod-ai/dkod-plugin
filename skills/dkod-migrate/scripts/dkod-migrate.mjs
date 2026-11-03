@@ -1,9 +1,9 @@
 // Built by packages/dkoder-plugin/scripts/build-migrate.ts from dkod-app. Do not edit: run `bun run --cwd packages/dkoder-plugin build:migrate`.
 import { spawn } from "node:child_process";
 import { createHash as createHash4 } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join as join9 } from "node:path";
+import { dirname, join as join10 } from "node:path";
 
 import { createHash as createHash3 } from "node:crypto";
 
@@ -3181,6 +3181,71 @@ async function sideBySide(folder, originalReport, dkReport, io, args = []) {
   return ok ? 0 : 1;
 }
 
+var base3 = (p) => p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? "";
+var parent = (p) => {
+  const s = p.replace(/[\\/]+$/, "");
+  const i = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\"));
+  return i <= 0 ? "/" : s.slice(0, i);
+};
+var join7 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+var ARCHIVE_SUFFIX = "-archive";
+function switchRefusal(dk, original, io) {
+  const name = base3(original);
+  const dkName = base3(dk);
+  if (name === "" || dkName === name || !dkName.endsWith(name) || dkName.length === name.length) {
+    return `${dk} is not the dk- folder of ${original}: its name must be the prefix (dk-) and then ${name}.`;
+  }
+  if (parent(dk) !== parent(original))
+    return `${dk} and ${original} are not in the same folder, so nothing was renamed.`;
+  if (io.readFile(join7(dk, ".dkod/migration.json")) !== null) {
+    return `The migration is still open in ${dk} (.dkod/migration.json is there). Report the step shipped and run dkod-migrate.mjs clean ${dk} first.`;
+  }
+  if (io.realpath(join7(parent(original), `${name}${ARCHIVE_SUFFIX}`)) !== null) {
+    return `${join7(parent(original), `${name}${ARCHIVE_SUFFIX}`)} is already there, so nothing was renamed. Ask the builder what to do with it; never delete it.`;
+  }
+  return null;
+}
+function switchFolders(dkFolder, originalFolder, io) {
+  if (!dkFolder || !originalFolder) {
+    io.print("dkod-migrate: switch needs the dk- app's folder and the original folder.");
+    return 2;
+  }
+  if (io.rename === undefined) {
+    io.print("dkod-migrate: this computer cannot rename folders here.");
+    return 1;
+  }
+  const dk = io.realpath(dkFolder);
+  const original = io.realpath(originalFolder);
+  const archive = join7(parent(originalFolder), `${base3(originalFolder)}${ARCHIVE_SUFFIX}`);
+  if (dk === null && original !== null && io.realpath(archive) !== null) {
+    io.print(JSON.stringify({ ok: true, mode: "switch", already: true, folder: original, archive: io.realpath(archive) }));
+    return 0;
+  }
+  if (dk === null) {
+    io.print(`dkod-migrate: ${dkFolder} is not there, so nothing was renamed.`);
+    return 1;
+  }
+  if (original === null) {
+    io.print(`dkod-migrate: ${originalFolder} is not there, so nothing was renamed.`);
+    return 1;
+  }
+  const refusal = switchRefusal(dk, original, io);
+  if (refusal !== null) {
+    io.print(`dkod-migrate: ${refusal}`);
+    return 1;
+  }
+  const archived = join7(parent(original), `${base3(original)}${ARCHIVE_SUFFIX}`);
+  io.rename(original, archived);
+  try {
+    io.rename(dk, original);
+  } catch (e) {
+    io.rename(archived, original);
+    throw e;
+  }
+  io.print(JSON.stringify({ ok: true, mode: "switch", folder: original, archive: archived }));
+  return 0;
+}
+
 var ENV_FILE2 = ".dkod-snapshot.env";
 var USAGE = [
   "Usage:",
@@ -3194,7 +3259,8 @@ var USAGE = [
   "  node dkod-migrate.mjs install-restart <the dk- app's folder>",
   "  node dkod-migrate.mjs side-by-side <the dk- app's folder> <original report.json> <dk report.json> [--run-dir <mktemp folder>]",
   "  node dkod-migrate.mjs stop-servers <the dk- app's folder> --run-dir <mktemp folder> [--ports a,b]",
-  "  node dkod-migrate.mjs clean <the dk- app's folder> [--run-dir <mktemp folder>]"
+  "  node dkod-migrate.mjs clean <the dk- app's folder> [--run-dir <mktemp folder>]",
+  "  node dkod-migrate.mjs switch <the dk- app's folder> <the original folder>"
 ].join(`
 `);
 var SOURCE_MAX_AGE_MIN = 10;
@@ -3202,10 +3268,10 @@ var SCRATCH_NAME = /_dkod_migrate(_[A-Za-z0-9_]+)?(_base)?$/;
 var CHECKS = ["name", "age (pg_database file time / pg_stat_database.stats_reset, when readable)"];
 var USE_OWN_STORE = "Snapshot the original's own store: its .env/.env.local URL, its running process (--original-url), or the --db-url the builder gives. Never make a database for the original or run its seed, fixtures, db push or reset to get data.";
 var NEW_APP_ONLY = "The original app has no data files and no local database this computer can copy. The migration is new-app-only: its tests run only on the dk- app. Ask the builder how the original reads its data. If it reads its database from its environment, run snapshot again with --db-url <url> or, with the original running, --original-url http://localhost:<port>. Never write .dkod/snapshot.json by hand.";
-var join7 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+var join8 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var norm = (p) => p.replace(/\/\.\//g, "/").replace(/\/+/g, "/");
-var snapshotPath = (dir) => join7(dir, ".dkod/snapshot.json");
-var recordPath = (dir) => join7(dir, ".dkod/migration.json");
+var snapshotPath = (dir) => join8(dir, ".dkod/snapshot.json");
+var recordPath = (dir) => join8(dir, ".dkod/migration.json");
 var SKIP2 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".worktrees"];
 var DATA2 = /\.(?:sqlite|sqlite3|db|db3)$/i;
 var FLAT = /\.(?:csv|json)$/i;
@@ -3227,7 +3293,7 @@ function checkSnapshot(dir, io) {
   }
   if (typeof r !== "object" || r === null || typeof r.seal !== "string" || typeof r.nonce !== "string" || sealOf(r, r.nonce) !== r.seal)
     return bad;
-  if (r.mode === "snapshot" && typeof r.scratch === "string" && r.scratch !== "" && io.readFile(join7(r.scratch, SEAL_FILE))?.trim() !== r.seal)
+  if (r.mode === "snapshot" && typeof r.scratch === "string" && r.scratch !== "" && io.readFile(join8(r.scratch, SEAL_FILE))?.trim() !== r.seal)
     return bad;
   return [];
 }
@@ -3326,7 +3392,7 @@ function copiedFile(original, files, value) {
   const raw = isUrl ? value.slice(5) : value;
   if (raw === "" || !isUrl && /^[a-z][a-z0-9+.-]*:/i.test(raw))
     return null;
-  const rel = norm(raw.startsWith("/") ? raw : join7(original, raw)).slice(norm(original).length).replace(/^\//, "");
+  const rel = norm(raw.startsWith("/") ? raw : join8(original, raw)).slice(norm(original).length).replace(/^\//, "");
   if (rel === "")
     return null;
   const copy = files.find((f) => norm(f).endsWith(`/${rel}`));
@@ -3337,7 +3403,7 @@ function relOfValue(original, value) {
   const raw = isUrl ? value.slice(5) : value;
   if (raw === "" || !isUrl && /^[a-z][a-z0-9+.-]*:/i.test(raw))
     return null;
-  const rel = norm(raw.startsWith("/") ? raw : join7(original, raw)).slice(norm(original).length).replace(/^\//, "");
+  const rel = norm(raw.startsWith("/") ? raw : join8(original, raw)).slice(norm(original).length).replace(/^\//, "");
   return rel === "" ? null : rel;
 }
 var ENV_READ = /(?:os\.environ(?:\.get)?\s*[\[(]\s*|os\.getenv\s*\(\s*|process\.env\s*\[\s*)["']([A-Za-z_][A-Za-z0-9_]*)["']|process\.env\.([A-Za-z_][A-Za-z0-9_]*)/;
@@ -3352,7 +3418,7 @@ function flatData(original, rels, named, mapText, io) {
     if (hit === undefined || found.has(hit))
       continue;
     if (/\.json$/i.test(hit)) {
-      const text = io.readFile(join7(original, hit));
+      const text = io.readFile(join8(original, hit));
       if (text === null || !parseJsonRows(text).ok)
         continue;
     }
@@ -3363,7 +3429,7 @@ function flatData(original, rels, named, mapText, io) {
     for (const file of rels) {
       if (!CODE2.test(file))
         continue;
-      const text = io.readFile(join7(original, file));
+      const text = io.readFile(join8(original, file));
       if (text === null || text.length > CODE_CAP)
         continue;
       for (const f of rest) {
@@ -3531,7 +3597,7 @@ async function snapshot(folder, io, args = []) {
     io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
     return 2;
   }
-  const scratch = io.mkdtemp(join7(io.tmpdir(), "dkod-migrate-"));
+  const scratch = io.mkdtemp(join8(io.tmpdir(), "dkod-migrate-"));
   const id = (scratch.split(/[\\/]/).pop() ?? "run").replace(/^dkod-migrate-/, "").replace(/[^A-Za-z0-9]/g, "_");
   const files = [];
   const bases = [];
@@ -3542,18 +3608,18 @@ async function snapshot(folder, io, args = []) {
       named.push([k, v, "process"]);
   const walked = io.walk(original, SKIP2);
   for (const file of envFiles(walked))
-    for (const [k, v] of envPairs(io.readFile(join7(original, file))))
+    for (const [k, v] of envPairs(io.readFile(join8(original, file))))
       named.push([k, v, file]);
-  const flatFound = flatData(original, walked, named.map(([k, v]) => [k, v]), io.readFile(join7(dir, ".dkod/map/app-map.json")), io);
+  const flatFound = flatData(original, walked, named.map(([k, v]) => [k, v]), io.readFile(join8(dir, ".dkod/map/app-map.json")), io);
   for (const rel of walked) {
     const flat = flatFound.get(rel);
     if (!DATA2.test(rel) && flat === undefined)
       continue;
-    const to = join7(scratch, rel);
-    io.copyFile(join7(original, rel), to);
+    const to = join8(scratch, rel);
+    io.copyFile(join8(original, rel), to);
     files.push(to);
-    const base = join7(scratch, `.dkod-base/${rel}`);
-    io.copyFile(join7(original, rel), base);
+    const base = join8(scratch, `.dkod-base/${rel}`);
+    io.copyFile(join8(original, rel), base);
     bases.push({ file: to, base, rel, sha256: io.sha256([base]), ...flat !== undefined ? { kind: /\.csv$/i.test(rel) ? "csv" : "json", found: flat } : {} });
   }
   const env = { DKOD_MIGRATE_DATA: scratch };
@@ -3657,9 +3723,9 @@ async function snapshot(folder, io, args = []) {
   record.nonce = randomBytes(16).toString("hex");
   record.seal = sealOf(record, record.nonce);
   if (!empty)
-    io.writeFile(join7(scratch, SEAL_FILE), record.seal);
+    io.writeFile(join8(scratch, SEAL_FILE), record.seal);
   if (!empty)
-    io.writeFile(join7(scratch, ENV_FILE2), Object.entries(env).map(([k, v]) => `${k}=${v.includes("'") ? `"${v}"` : `'${v}'`}
+    io.writeFile(join8(scratch, ENV_FILE2), Object.entries(env).map(([k, v]) => `${k}=${v.includes("'") ? `"${v}"` : `'${v}'`}
 `).join(""));
   io.writeFile(snapshotPath(dir), `${JSON.stringify(record, null, 2)}
 `);
@@ -3724,7 +3790,7 @@ async function runMigrateCli(argv, io) {
   if (command === "stop-servers" && folder !== undefined)
     return await stopServersCommand(argv.slice(2), io);
   if (command === "install-restart" && folder !== undefined) {
-    const to = join7(folder === "" ? io.cwd : folder, "tests/parity/restart.ts");
+    const to = join8(folder === "" ? io.cwd : folder, "tests/parity/restart.ts");
     io.writeFile(to, PARITY_RESTART_SOURCE);
     io.print(JSON.stringify({ ok: true, file: to }));
     return 0;
@@ -3743,6 +3809,8 @@ async function runMigrateCli(argv, io) {
     return await snapshot(folder, io, argv.slice(2));
   if (command === "clean" && folder !== undefined)
     return await clean(folder, io, argv.slice(2));
+  if (command === "switch" && folder !== undefined)
+    return switchFolders(folder, reportFile, io);
   if (command === "check-map" && folder !== undefined)
     return await checkMap(folder, io, argv.slice(2));
   io.print(USAGE);
@@ -3903,7 +3971,7 @@ async function discoverRuntime(baseUrl, mapped, codeRoutes, io) {
   return out;
 }
 
-var join8 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+var join9 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var SKIP3 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".dkod", "__pycache__"];
 var ASSET_KINDS = ["css", "font", "icon", "image"];
 var TEXT_MAX2 = 200;
@@ -4192,7 +4260,7 @@ function packageDirs(files, needle, io, original) {
   for (const f of files) {
     if (f !== "package.json" && !f.endsWith("/package.json"))
       continue;
-    if (needle.test(io.readFile(join8(original, f)) ?? ""))
+    if (needle.test(io.readFile(join9(original, f)) ?? ""))
       out.push(f.slice(0, f.length - "package.json".length));
   }
   return out;
@@ -4223,7 +4291,7 @@ function fileRoutes(files, io, original) {
   const out = [];
   const add = (path, file, method = "GET") => out.push({ path: normalizeRoute(path), method, file, relative: false });
   const addHandler = (path, file) => {
-    for (const method of handlerMethods(io.readFile(join8(original, file)) ?? ""))
+    for (const method of handlerMethods(io.readFile(join9(original, file)) ?? ""))
       add(path, file, method);
   };
   const next = packageDirs(files, /"next"\s*:/, io, original);
@@ -4268,7 +4336,7 @@ function sourceRoutes(files, io, original) {
     if (IS_TEST.test(f))
       continue;
     if (/(?:^|\/)netlify\.toml$/.test(f)) {
-      const toml = io.readFile(join8(original, f));
+      const toml = io.readFile(join9(original, f));
       for (const m of (toml ?? "").matchAll(/^\s*from\s*=\s*(["'])(\/[^"']*)\1/gm)) {
         if (!SPA_CATCH_ALL.test(m[2]) && !/\s/.test(m[2]))
           out.push({ path: normalizeRoute(m[2]), method: "ANY", file: f, relative: false });
@@ -4277,7 +4345,7 @@ function sourceRoutes(files, io, original) {
     }
     if (!CODE3.test(f) && !PY.test(f))
       continue;
-    const text = io.readFile(join8(original, f));
+    const text = io.readFile(join9(original, f));
     if (text === null)
       continue;
     const add = (path, method = "GET") => {
@@ -4362,13 +4430,13 @@ function discoverTables(original, io) {
     if (IS_TEST.test(f))
       continue;
     if (/(?:^|\/)data\/.+\.csv$/i.test(f)) {
-      const header = (io.readFile(join8(original, f)) ?? "").split(/\r?\n/, 1)[0] ?? "";
+      const header = (io.readFile(join9(original, f)) ?? "").split(/\r?\n/, 1)[0] ?? "";
       put((f.split("/").pop() ?? f).replace(/\.csv$/i, ""), header.split(",").map((c) => bare(c.trim())).filter((c) => c !== ""));
       continue;
     }
     if (!/\.sql$/i.test(f) && !CODE3.test(f) && !PY.test(f))
       continue;
-    const raw = io.readFile(join8(original, f));
+    const raw = io.readFile(join9(original, f));
     if (raw === null)
       continue;
     const text = raw.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
@@ -4418,7 +4486,7 @@ function discoverSettings(original, io) {
     if (IS_TEST.test(f) && ENV_FILE3.test(base))
       continue;
     if (ENV_FILE3.test(base) && !CODE3.test(base) && !PY.test(base) && !VUE.test(base)) {
-      for (const line of (io.readFile(join8(original, f)) ?? "").split(/\r?\n/)) {
+      for (const line of (io.readFile(join9(original, f)) ?? "").split(/\r?\n/)) {
         const key = /^\s*(?:export\s+)?([A-Za-z_]\w*)\s*=/.exec(line)?.[1];
         if (key !== undefined)
           names.add(key);
@@ -4427,7 +4495,7 @@ function discoverSettings(original, io) {
     }
     if (IS_TEST.test(f) || !CODE3.test(f) && !PY.test(f) && !VUE.test(f))
       continue;
-    const raw = io.readFile(join8(original, f));
+    const raw = io.readFile(join9(original, f));
     if (raw === null)
       continue;
     const text = codeOf(f, raw);
@@ -4468,13 +4536,13 @@ function discoverColors(original, io) {
     if (/\.[cm]?[jt]sx?$/.test(f)) {
       if (IS_TEST.test(f))
         continue;
-      for (const c of colorsInCode(io.readFile(join8(original, f)) ?? ""))
+      for (const c of colorsInCode(io.readFile(join9(original, f)) ?? ""))
         colors.add(c);
       continue;
     }
     if (!/\.(?:css|scss|sass|less)$/i.test(f))
       continue;
-    for (const c of colorsInCss(io.readFile(join8(original, f)) ?? ""))
+    for (const c of colorsInCss(io.readFile(join9(original, f)) ?? ""))
       colors.add(c);
   }
   return [...colors].sort();
@@ -4486,7 +4554,7 @@ function discoverFunctions(original, io) {
   for (const f of io.walk(original, SKIP3)) {
     if (IS_TEST.test(f) || !CODE3.test(f) && !PY.test(f) && !VUE.test(f))
       continue;
-    const raw = io.readFile(join8(original, f));
+    const raw = io.readFile(join9(original, f));
     if (raw === null)
       continue;
     const text = codeOf(f, raw);
@@ -4521,7 +4589,7 @@ function discoverQueries(original, io) {
   for (const f of io.walk(original, SKIP3)) {
     if (IS_TEST.test(f) || !CODE3.test(f) && !PY.test(f) && !VUE.test(f) && !/\.(?:html?|sql)$/i.test(f))
       continue;
-    const text = io.readFile(join8(original, f));
+    const text = io.readFile(join9(original, f));
     if (text === null)
       continue;
     for (const m of text.matchAll(LITERAL)) {
@@ -4563,7 +4631,7 @@ function scanFonts(original, io) {
   for (const f of io.walk(original, SKIP3)) {
     if (IS_TEST.test(f) || !STYLE.test(f) && !CODE3.test(f) && !MARKUP.test(f))
       continue;
-    const text = io.readFile(join8(original, f));
+    const text = io.readFile(join9(original, f));
     if (text === null)
       continue;
     for (const name of fontsIn(text, STYLE.test(f), stacks))
@@ -4615,7 +4683,7 @@ function discoverButtons(original, io) {
   for (const f of io.walk(original, SKIP3)) {
     if (IS_TEST.test(f) || !CODE3.test(f) && !MARKUP.test(f))
       continue;
-    const text = io.readFile(join8(original, f));
+    const text = io.readFile(join9(original, f));
     if (text === null)
       continue;
     idsIn(text, buttons, tooltips);
@@ -4645,7 +4713,7 @@ function discoverServices(original, io) {
     const plain = HOST_FILE.test(f) || ENV_FILE3.test(f.split("/").pop()) && !CODE3.test(f) && !py;
     if (IS_TEST.test(f) || !isPkg && !plain && !CODE3.test(f) && !py)
       continue;
-    const raw = io.readFile(join8(original, f));
+    const raw = io.readFile(join9(original, f));
     if (raw === null)
       continue;
     if (isPkg) {
@@ -4712,7 +4780,7 @@ function installedServers(map, original, io) {
   ];
   for (const f of io.walk(original, SKIP3)) {
     const base = f.split("/").pop();
-    const text = /^package\.json$|^requirements[\w.-]*\.txt$|^pyproject\.toml$/.test(base) ? io.readFile(join8(original, f)) : null;
+    const text = /^package\.json$|^requirements[\w.-]*\.txt$|^pyproject\.toml$/.test(base) ? io.readFile(join9(original, f)) : null;
     if (text === null)
       continue;
     let deps;
@@ -4771,11 +4839,11 @@ function recordsDevOverlay(value, top = true) {
 }
 function devOverlayStates(mapDir, io) {
   const out = [];
-  for (const rel of io.walk(join8(mapDir, "design"), [])) {
+  for (const rel of io.walk(join9(mapDir, "design"), [])) {
     const m = /^pages[/]([^/]+)[/]([^/]+)[.]json$/.exec(rel);
     if (m === null)
       continue;
-    const parsed = readJson(io.readFile(join8(join8(mapDir, "design"), rel)));
+    const parsed = readJson(io.readFile(join9(join9(mapDir, "design"), rel)));
     if (parsed.ok && recordsDevOverlay(parsed.value))
       out.push(`${m[1]}/${m[2]}`);
   }
@@ -4783,11 +4851,11 @@ function devOverlayStates(mapDir, io) {
 }
 function frameStates(mapDir, io) {
   const out = [];
-  for (const rel of io.walk(join8(mapDir, "design"), [])) {
+  for (const rel of io.walk(join9(mapDir, "design"), [])) {
     const m = /^pages[/]([^/]+)[/]([^/]+)[.]json$/.exec(rel);
     if (m === null)
       continue;
-    const parsed = readJson(io.readFile(join8(join8(mapDir, "design"), rel)));
+    const parsed = readJson(io.readFile(join9(join9(mapDir, "design"), rel)));
     const frames = parsed.ok && typeof parsed.value === "object" && parsed.value !== null ? parsed.value.frames : undefined;
     if (Array.isArray(frames) && frames.length > 0 && frames.every((f) => typeof f === "string"))
       out.push(`${m[1]}/${m[2]}`);
@@ -4802,18 +4870,18 @@ async function checkMap(folder, io, args = []) {
   const flag = args.findIndex((a) => a === "--original-url" || a.startsWith("--original-url="));
   const originalUrl = flag < 0 ? "" : args[flag].startsWith("--original-url=") ? args[flag].slice(15) : args[flag + 1] ?? "";
   const dir = folder === "" ? io.cwd : folder;
-  const original = originalOf(io.readFile(join8(dir, ".dkod/migration.json")));
+  const original = originalOf(io.readFile(join9(dir, ".dkod/migration.json")));
   if (original === null) {
     io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
     return 2;
   }
-  const mapDir = join8(dir, ".dkod/map");
+  const mapDir = join9(dir, ".dkod/map");
   const problems = [];
   const missing = [];
   const noShot = [];
   const counts = { routes: 0, pages: 0, stores: 0, tables: 0, services: 0, settings: 0, queries: 0, functions: 0, design: 0, found_routes: 0, screenshots: 0, assets: 0 };
-  const parsed = readJson(io.readFile(join8(mapDir, "app-map.json")));
-  const designFiles = new Set(io.walk(join8(mapDir, "design"), []));
+  const parsed = readJson(io.readFile(join9(mapDir, "app-map.json")));
+  const designFiles = new Set(io.walk(join9(mapDir, "design"), []));
   let map = null;
   if (!parsed.ok)
     problems.push(`app-map.json: ${parsed.why}`);
@@ -4961,10 +5029,10 @@ async function checkMap(folder, io, args = []) {
   for (const s of devOverlayPages)
     problems.push(`design/pages/${s}.json: the capture shows a framework dev overlay (dev_overlay). Run the original's production build and start (Next.js: next build, then next start), never a dev server, and capture ${s} again`);
   const framed = new Set(frameStates(mapDir, io));
-  for (const f of io.walk(join8(dir, "tests/parity"), ["node_modules"])) {
+  for (const f of io.walk(join9(dir, "tests/parity"), ["node_modules"])) {
     if (!/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(f))
       continue;
-    problems.push(...designProblems(testBlocks(io.readFile(join8(dir, `tests/parity/${f}`)) ?? ""), designFramed(framed)));
+    problems.push(...designProblems(testBlocks(io.readFile(join9(dir, `tests/parity/${f}`)) ?? ""), designFramed(framed)));
   }
   const byImage = new Map;
   for (const page of pages) {
@@ -4973,12 +5041,12 @@ async function checkMap(folder, io, args = []) {
     const rel = `pages/${pageSlug(page.path)}/default.png`;
     if (!designFiles.has(rel))
       continue;
-    const sha = io.sha256([join8(join8(mapDir, "design"), rel)]);
+    const sha = io.sha256([join9(join9(mapDir, "design"), rel)]);
     byImage.set(sha, [...byImage.get(sha) ?? [], page.path]);
   }
   const shotPages = [...byImage.values()].reduce((n, g) => n + g.length, 0);
   const placeholders = [...byImage.values()].filter((g) => g.length >= 3 || g.length === shotPages && shotPages >= 2).flat();
-  const assets = readJson(io.readFile(join8(mapDir, "assets/assets.json")));
+  const assets = readJson(io.readFile(join9(mapDir, "assets/assets.json")));
   if (!assets.ok)
     problems.push(`assets/assets.json: ${assets.why}`);
   else if (!Array.isArray(assets.value))
@@ -5071,7 +5139,7 @@ function walk(dir, skip) {
     for (const name of names) {
       if (skip.includes(name))
         continue;
-      const full = join9(at, name);
+      const full = join10(at, name);
       const next = rel === "" ? name : `${rel}/${name}`;
       let dirEntry;
       try {
@@ -5112,6 +5180,7 @@ var io = {
     mkdirSync(dirname(to), { recursive: true });
     copyFileSync(from, to);
   },
+  rename: (from, to) => renameSync(from, to),
   rm: (path, opts) => rmSync(path, { recursive: opts.recursive ?? false, force: opts.force ?? false }),
   mkdtemp: (prefix) => mkdtempSync(prefix),
   tmpdir,
@@ -5131,7 +5200,7 @@ var io = {
         return [];
       }
     })
-  ].some((dir) => dir !== "" && existsSync(join9(dir, program))),
+  ].some((dir) => dir !== "" && existsSync(join10(dir, program))),
   print: (line) => process.stdout.write(`${line}
 `),
   run: (cmd, args, env, cwd) => new Promise((resolve) => {

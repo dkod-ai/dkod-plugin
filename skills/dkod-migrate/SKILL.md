@@ -66,9 +66,22 @@ Skip this step when the snapshot said `new-app-only` and the app keeps no data.
 3. On "Deploy": call `dkoder.migrate.confirm` with the original's app key. Then do the dkod skill's "Push to prod" from the `folder`, with the app key `dk-<key>`: send the code, fill secrets, deploy, and follow `dkoder.build.status` until it is `delivered` and the app is up. The builder's "Deploy" and the import answer do not answer a Deploy governance question: ask every Deploy question not in `fixed` with the question tool, and never fill one in yourself.
 4. The new prod database is empty. When step 4 imported data into Dev, ask the builder once: "Copy the Dev data of <key> into the prod database of dk-<key>?" with the options "Copy" and "No" (the question tool; without one, ask in plain text and wait). Never answer it yourself. On "Copy": call `dkoder.devdb.copy_to_prod` with `app_key` the original's key, `app` `dk-<key>` and `confirm: true`. DKOD copies it inside the cluster, once. While it says `copying`, call it again without `confirm` every minute. Show the builder its `message` when it says `copied`, `skipped` or `failed`. On `copied`, call `dkoder.migrate.report` with step `data_in_prod`, so no later run copies again. The running app writes its own rows (a log, a sync) right after the deploy, so `skipped` can name prod tables with rows: then ask the builder once, "The new prod database already has rows the app wrote since its deploy: <tables and counts>. Replace them with the Dev data?" with the options "Replace" and "Keep prod as it is". On "Replace": call it again with `confirm: true` and `replace: true`. When it answers `not_new` or `pick_env`, do what its `next` says. Never copy rows into prod any other way.
 5. Call `dkoder.migrate.report` with step `shipped`. Run `node <scripts>/dkod-db.mjs down --dir <folder>`, then `node <migrate> clean <folder> --run-dir <the run folder>`.
-6. Reply with the app's URL, the imported row counts, and whether the data is in prod, in a few lines.
+6. Reply with the app's URL, the imported row counts, and whether the data is in prod, in a few lines. Then do step 7 at once.
 
 On "Not yet": ask what is wrong, fix it, and ask again.
+
+### 7. Switch to the new app
+
+After the first prod deploy, the builder moves to the new app. The original folder is kept as `<key>-archive`, the dk- folder takes the name `<key>`, and the app in prod loses the dk- prefix in its name and its URL. The prod data comes along. Nothing is deleted.
+
+1. Ask the builder: "dk-<key> is live. Switch to it now? Your original folder is kept as <key>-archive, dk-<key> becomes <key>, and the app in prod becomes <key> (its URL loses dk-), with its data." with the options "Confirm" and "Not now" (the question tool; without one, ask in plain text and wait). Never answer it yourself. On "Not now", stop: the next chat asks again.
+2. On "Confirm": call `dkoder.migrate.switch` with the `sessionId`, the original's app key and `confirm: true`. Do its `steps` in order. They are:
+   1. Run `node <migrate> switch <the dk- folder> <the original folder>`. It renames the two folders and changes no file in them. On exit 1, show the builder the sentence it printed and wait.
+   2. Run `node <scripts>/dkod-db.mjs up --app <key> --dir <the <key> folder> --detach`. The folder reads the same Dev database, and the same Dev files when the app has them, as before.
+   3. Do the dkod skill's "Push to prod" from the `<key>` folder with the app key `<key>`. Follow `dkoder.build.status` until the app is up at its new URL.
+   4. Ask the builder: "Copy the prod data of dk-<key> into <key>?" with the options "Copy" and "No". On "Copy", call `dkoder.devdb.copy_to_prod` with `app_key` `<key>`, `app` `<key>`, `from_app` `dk-<key>` and `confirm: true`, and follow it as in step 6.4 until it says `copied`.
+   5. Ask the builder: "<key> runs with its data. Remove dk-<key> from prod?" with the options "Remove" and "Keep". On "Remove", call `dkoder.remove` with the newest deployed build of dk-<key>. Its prod database is kept.
+   6. Reply with the new URL in a few lines. From now on the builder works in the `<key>` folder as a normal DKOD app: change it, deploy, check it in Dev, deploy to prod.
 
 ## Continue a migration
 
@@ -79,7 +92,8 @@ When `dkoder.migrate.start` answers `resumed: true` (or `dkoder.session.start` g
 - `data_in_dev`: skip the snapshot (step 2) and the import (step 4.4 and 4.5). Run check-build with `--data-in-dev`.
 - `deployed`: prod runs the dk- app at `done.prod.url`. Send the code and deploy again only when you changed the code in this run (a fix the checks asked for, or the builder's request). `done.prod.up` false: follow the newest build with `dkoder.build.status` and fix what it names.
 - `data_in_prod`: never call `dkoder.devdb.copy_to_prod` again. Without it, when `deployed` and `data_in_dev` are done, ask the copy question once (step 6.4).
-- `shipped`: never report shipped again, and never call `dkoder.migrate.confirm` again.
+- `shipped`: never report shipped again, and never call `dkoder.migrate.confirm` again. When `done.switched` is false, ask the switch question (step 7.1).
+- `switched`: the builder already confirmed the switch. Never call `dkoder.migrate.switch` again with a new answer and never ask again. Check each part of step 7.2 and do only the parts not done: the folders (`node <migrate> switch` says `already: true` when they are switched), the deploy of `<key>`, the copy (never twice), the removal of dk-<key>. Then work on `<key>` as a normal DKOD app.
 - Any other step whose DKOD tool says it is done (for example the app's files, when `dkoder.files.status` says every file is in the bucket) is checked, never done again.
 
 An attempt shipped before DKOD kept these two facts says `data_in_dev` and `data_in_prod` false. When `shipped` is done and `dev_database` is `ready`: do not snapshot or import; when the builder's app shows its data on Dev, report step `data_in_dev`. Do not copy to prod either: prod already serves users, so a copy is asked only when the builder asks for it.
