@@ -1662,6 +1662,10 @@ async function runFiles(flags, io, cwd) {
   }
   const report = await pushFiles({ filesUrl, from: resolvePath(cwd, from), prefix, print: io.print });
   io.print(JSON.stringify({ files: report.files, bytes: report.bytes, put: report.put, same: report.same, failed: report.failed }));
+  if (report.failed.length > 0 && report.put === 0 && report.same === 0 && report.failed.every((f) => f.reason.includes("bucket_unavailable"))) {
+    say("The app's dev files bucket is not there yet. Call dkoder.devdb.make with the app key and confirm: true (it only adds the bucket to an app made before), wait a few minutes, then run this again.");
+    return 1;
+  }
   if (report.failed.length > 0) {
     say(`${report.failed.length} file(s) are NOT in the dev bucket: ${report.failed.slice(0, 20).map((f) => f.path).join(", ")}`);
     return 1;
