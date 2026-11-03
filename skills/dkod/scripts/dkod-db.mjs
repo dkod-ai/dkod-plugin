@@ -1,7 +1,7 @@
 // Built by packages/dkoder-plugin/scripts/build-db.ts from dkod-app. Do not edit: run `bun run --cwd packages/dkoder-plugin build:db`.
 import { createHash as createHash5, randomUUID } from "node:crypto";
 import { spawn as spawn2 } from "node:child_process";
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync as readdirSync2, readFileSync as readFileSync2, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync as closeSync2, existsSync, mkdirSync, openSync as openSync2, readdirSync as readdirSync2, readFileSync as readFileSync2, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join as join4, resolve } from "node:path";
 
@@ -710,10 +710,10 @@ function connectWebSocket(rawUrl, headers, handlers) {
 
 import { createHash as createHash3 } from "node:crypto";
 import http from "node:http";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, createReadStream, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { join as join2, relative, sep } from "node:path";
 import { Readable } from "node:stream";
-var MAX_FILE_BYTES = 64 << 20;
+var MAX_FILE_BYTES = 5 * 1024 ** 3;
 var HOP = new Set(["connection", "keep-alive", "transfer-encoding", "upgrade", "host", "authorization", "content-length"]);
 var filesBaseOf = (gateway) => gateway.replace(/^wss:/, "https:").replace(/^ws:/, "http:").replace(/\/+$/, "");
 function startFilesProxy(opts) {
@@ -730,21 +730,20 @@ function startFilesProxy(opts) {
           headers[k] = v;
       let body;
       if (req.method === "PUT") {
-        const chunks = [];
-        let size = 0;
-        for await (const chunk of req) {
-          size += chunk.length;
-          if (size > MAX_FILE_BYTES) {
-            res.writeHead(413, { "content-type": "application/json" }).end(JSON.stringify({ error: "too_large" }));
-            req.destroy();
-            return;
-          }
-          chunks.push(chunk);
+        const length = Number(req.headers["content-length"] ?? Number.NaN);
+        if (!Number.isInteger(length) || length < 0) {
+          res.writeHead(411, { "content-type": "application/json" }).end(JSON.stringify({ error: "length_required" }));
+          return;
         }
-        body = Buffer.concat(chunks);
-        headers["content-length"] = String(body.length);
+        if (length > MAX_FILE_BYTES) {
+          res.writeHead(413, { "content-type": "application/json" }).end(JSON.stringify({ error: "too_large" }));
+          req.resume();
+          return;
+        }
+        headers["content-length"] = String(length);
+        body = Readable.toWeb(req);
       }
-      const upstream = await doFetch(target, { method: req.method ?? "GET", headers, ...body === undefined ? {} : { body: new Uint8Array(body) } });
+      const upstream = await doFetch(target, { method: req.method ?? "GET", headers, ...body === undefined ? {} : { body, duplex: "half" } });
       const out = {};
       upstream.headers.forEach((v, k) => {
         if (!HOP.has(k))
@@ -841,40 +840,126 @@ var TYPES = {
   xml: "application/xml"
 };
 var contentTypeOf = (path) => TYPES[path.slice(path.lastIndexOf(".") + 1).toLowerCase()] ?? "application/octet-stream";
+var PART_BYTES = 8 << 20;
+var DEFAULT_JOBS = 32;
+var RETRIES = 4;
+function s3Etags(path, size) {
+  if (size <= PART_BYTES)
+    return [createHash3("md5").update(readFileSync(path)).digest("hex")];
+  const fd = openSync(path, "r");
+  try {
+    const whole = createHash3("md5");
+    const all = createHash3("md5");
+    const buf = Buffer.allocUnsafe(PART_BYTES);
+    let parts = 0;
+    for (let pos = 0;pos < size; pos += PART_BYTES) {
+      const n = readSync(fd, buf, 0, Math.min(PART_BYTES, size - pos), pos);
+      whole.update(buf.subarray(0, n));
+      all.update(createHash3("md5").update(buf.subarray(0, n)).digest());
+      parts++;
+    }
+    return [whole.digest("hex"), `${all.digest("hex")}-${parts}`];
+  } finally {
+    closeSync(fd);
+  }
+}
+async function listBucket(base, prefix, doFetch) {
+  const held = new Map;
+  let after = "";
+  for (;; ) {
+    let page;
+    try {
+      const res = await doFetch(`${base}/?list&prefix=${encodeURIComponent(prefix)}&after=${encodeURIComponent(after)}`);
+      if (res.status !== 200)
+        return null;
+      page = await res.json();
+    } catch {
+      return null;
+    }
+    for (const k of page.keys)
+      held.set(k.key, { size: k.size, etag: k.etag.replace(/"/g, "") });
+    if (!page.truncated || page.keys.length === 0)
+      return held;
+    after = page.keys[page.keys.length - 1].key;
+  }
+}
+var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+var retryable = (status) => status === 0 || status === 408 || status === 429 || status >= 500;
 async function pushFiles(opts) {
   const doFetch = opts.fetch ?? fetch;
   const report = { files: 0, bytes: 0, put: 0, same: 0, failed: [] };
   const base = opts.filesUrl.replace(/\/+$/, "");
   const paths = listFiles(opts.from);
-  for (const rel of paths) {
-    report.files++;
+  const held = await listBucket(base, opts.prefix, doFetch);
+  const backoff = opts.backoffMs ?? 200;
+  let next = 0;
+  let done = 0;
+  const one = async (rel) => {
     const key = `${opts.prefix}${rel}`;
     const url = `${base}/${key.split("/").map(encodeURIComponent).join("/")}`;
-    try {
-      const bytes = readFileSync(join2(opts.from, rel));
-      report.bytes += bytes.length;
-      if (bytes.length > MAX_FILE_BYTES) {
-        report.failed.push({ path: key, reason: `larger than ${MAX_FILE_BYTES >> 20} MiB` });
-        continue;
-      }
-      const md5 = createHash3("md5").update(bytes).digest("hex");
-      const head = await doFetch(url, { method: "HEAD" });
-      if (head.status === 200 && head.headers.get("etag")?.replace(/"/g, "") === md5) {
-        report.same++;
-        continue;
-      }
-      const put = await doFetch(url, { method: "PUT", headers: { "content-type": contentTypeOf(rel), "content-length": String(bytes.length) }, body: new Uint8Array(bytes) });
-      if (put.status !== 201) {
-        report.failed.push({ path: key, reason: `HTTP ${put.status}: ${(await put.text()).slice(0, 200)}` });
-        continue;
-      }
-      report.put++;
-    } catch (error) {
-      report.failed.push({ path: key, reason: error instanceof Error ? error.message : "unknown" });
+    const full = join2(opts.from, rel);
+    const size = statSync(full).size;
+    report.files++;
+    report.bytes += size;
+    if (size > MAX_FILE_BYTES) {
+      report.failed.push({ path: key, reason: `larger than ${MAX_FILE_BYTES / 1024 ** 3} GiB` });
+      return;
     }
-    if (opts.print && report.files % 100 === 0)
-      opts.print(`dkod-db: files ${report.files} of ${paths.length}`);
-  }
+    const etags = s3Etags(full, size);
+    let last = "";
+    for (let attempt = 0;attempt < RETRIES; attempt++) {
+      if (attempt > 0)
+        await sleep(Math.random() * backoff * 2 ** attempt);
+      try {
+        if (held !== null) {
+          const h = held.get(key);
+          if (h !== undefined && h.size === size && etags.includes(h.etag)) {
+            report.same++;
+            return;
+          }
+        } else {
+          const head = await doFetch(url, { method: "HEAD" });
+          if (head.status === 200 && etags.includes(head.headers.get("etag")?.replace(/"/g, "") ?? "")) {
+            report.same++;
+            return;
+          }
+          if (head.status !== 200 && head.status !== 404) {
+            last = `HTTP ${head.status}`;
+            if (retryable(head.status))
+              continue;
+            break;
+          }
+        }
+        const body = size > PART_BYTES ? Readable.toWeb(createReadStream(full)) : new Uint8Array(readFileSync(full));
+        const put = await doFetch(url, { method: "PUT", headers: { "content-type": contentTypeOf(rel), "content-length": String(size) }, body, ...size > PART_BYTES ? { duplex: "half" } : {} });
+        if (put.status === 201) {
+          report.put++;
+          return;
+        }
+        last = `HTTP ${put.status}: ${(await put.text()).slice(0, 200)}`;
+        if (!retryable(put.status))
+          break;
+      } catch (error) {
+        last = error instanceof Error ? error.message : "unknown";
+      }
+    }
+    report.failed.push({ path: key, reason: last });
+  };
+  const worker = async () => {
+    while (next < paths.length) {
+      const rel = paths[next++];
+      try {
+        await one(rel);
+      } catch (error) {
+        report.failed.push({ path: `${opts.prefix}${rel}`, reason: error instanceof Error ? error.message : "unknown" });
+      }
+      done++;
+      if (opts.print && done % 500 === 0)
+        opts.print(`dkod-db: files ${done} of ${paths.length}`);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(opts.jobs ?? DEFAULT_JOBS, 128)) }, worker));
+  report.failed.sort((a, b) => a.path.localeCompare(b.path));
   return report;
 }
 
@@ -1034,7 +1119,7 @@ function parseArgs(argv) {
 var USAGE = [
   "Usage:",
   "  node dkod-db.mjs up --app <app key> [--port 6543] [--files-port <port + 1>] [--dir <app folder>] [--wait <seconds>] [--detach]",
-  "  node dkod-db.mjs files --from <folder> [--prefix media/] [--dir <app folder>]   (while `up` runs)",
+  "  node dkod-db.mjs files --from <folder> [--prefix media/] [--dir <app folder>] [--jobs 32]   (while `up` runs)",
   "  node dkod-db.mjs down [--dir <app folder>] [--all]",
   "  node dkod-db.mjs migrate [--dir <app folder>] [--port 6543]",
   "  node dkod-db.mjs import --app <app key> --from <local postgres URL | snapshot> [--dir <app folder>] [--port 6543]",
@@ -1660,7 +1745,12 @@ async function runFiles(flags, io, cwd) {
     say("There is no DKOD_FILES_URL in .env.local. Run `node dkod-db.mjs up --app <app key> --detach` first.");
     return 2;
   }
-  const report = await pushFiles({ filesUrl, from: resolvePath(cwd, from), prefix, print: io.print });
+  const jobs = flags.has("jobs") ? Number(flags.get("jobs")) : undefined;
+  if (jobs !== undefined && (!Number.isInteger(jobs) || jobs < 1 || jobs > 128)) {
+    say("--jobs must be a number from 1 to 128.");
+    return 2;
+  }
+  const report = await pushFiles({ filesUrl, from: resolvePath(cwd, from), prefix, print: io.print, ...jobs === undefined ? {} : { jobs } });
   io.print(JSON.stringify({ files: report.files, bytes: report.bytes, put: report.put, same: report.same, failed: report.failed }));
   if (report.failed.length > 0 && report.put === 0 && report.same === 0 && report.failed.every((f) => f.reason.includes("bucket_unavailable"))) {
     say("The app's dev files bucket is not there yet. Call dkoder.devdb.make with the app key and confirm: true (it only adds the bucket to an app made before), wait a few minutes, then run this again.");
@@ -2508,7 +2598,7 @@ function readState(io, path) {
     return null;
   }
 }
-var sleep = (io, ms) => new Promise((resolve) => {
+var sleep2 = (io, ms) => new Promise((resolve) => {
   io.schedule(ms, resolve);
 });
 var POLL_MS = 250;
@@ -2533,7 +2623,7 @@ async function stopTunnel(io, state) {
   for (let waited = 0;waited < 5000; waited += POLL_MS) {
     if (!io.alive(state.pid) && (state.port === undefined || !await probe(state.port)))
       break;
-    await sleep(io, POLL_MS);
+    await sleep2(io, POLL_MS);
   }
   if (io.alive(state.pid))
     io.kill(state.pid, "SIGKILL");
@@ -2586,7 +2676,7 @@ async function runUpDetached(flags, io) {
   io.writeFile(paths.state, JSON.stringify({ pid, app, dir: paths.dir, log: paths.log }));
   const startedAt = io.now();
   for (;; ) {
-    await sleep(io, POLL_MS);
+    await sleep2(io, POLL_MS);
     const log = io.readFile(paths.log) ?? "";
     const port = Number(READY_LINE.exec(log)?.[1] ?? 0);
     if (port > 0 && readDatabaseUrl(io.readFile(join3(paths.dir, ".env.local"))) !== null && await probe(port)) {
@@ -2754,9 +2844,9 @@ process.exitCode = await runDbCli(process.argv.slice(2), {
     process.once("SIGTERM", fn);
   },
   spawnDetached: (args, logPath) => {
-    const log = openSync(logPath, "w");
+    const log = openSync2(logPath, "w");
     const child = spawn2(process.execPath, [process.argv[1], ...args], { detached: true, stdio: ["ignore", log, log], env: process.env });
-    closeSync(log);
+    closeSync2(log);
     child.on("exit", () => {
       if (child.pid !== undefined)
         exited.add(child.pid);
