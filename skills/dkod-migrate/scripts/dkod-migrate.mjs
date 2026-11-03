@@ -3402,7 +3402,7 @@ var ARCHIVE_SUFFIX = "-archive";
 function switchRefusal(dk, original, io) {
   const name = base3(original);
   const dkName = base3(dk);
-  if (name === "" || dkName === name || !dkName.endsWith(name) || dkName.length === name.length) {
+  if (name === "" || dkName.toLowerCase() === name.toLowerCase() || !dkName.toLowerCase().endsWith(name.toLowerCase()) || dkName.length === name.length) {
     return `${dk} is not the dk- folder of ${original}: its name must be the prefix (dk-) and then ${name}.`;
   }
   if (parent(dk) !== parent(original))

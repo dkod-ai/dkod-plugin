@@ -92,9 +92,10 @@ After the first prod deploy, the builder moves to the new app. The original fold
 2. On "Confirm": call `dkoder.migrate.switch` with the `sessionId`, the original's app key and `confirm: true`. Do its `steps` in order. They are:
    1. Run `node <migrate> switch <the dk- folder> <the original folder>`. It renames the two folders and changes no file in them. On exit 1, show the builder the sentence it printed and wait.
    2. Run `node <scripts>/dkod-db.mjs up --app <key> --dir <the <key> folder> --detach`. The folder reads the same Dev database, and the same Dev files when the app has them, as before.
+      Then check the files: when the `<key>` folder has no `src/dkod-files.ts` (or `dkod_files.py`), or `dkod-db.mjs files` still puts files, the app was shipped before DKOD kept files. Do step 4b in the `<key>` folder now (it finds the original in `<key>-archive`), before the push in point 3, so the deploy gives the app its files bucket. An app that reads no files of its own (`files` finds none) skips this.
    3. Do the dkod skill's "Push to prod" from the `<key>` folder with the app key `<key>`. Follow `dkoder.build.status` until the app is up at its new URL.
    4. Ask the builder: "Copy the prod data of dk-<key> into <key>?" with the options "Copy" and "No". On "Copy", call `dkoder.devdb.copy_to_prod` with `app_key` `<key>`, `app` `<key>`, `from_app` `dk-<key>` and `confirm: true`, and follow it as in step 6.4 until it says `copied`.
-   5. When the app has files (step 4b), call `dkoder.files.copy_to_prod` with `app_key` `<key>`, `app` `<key>` and `confirm: true` (the builder's Confirm covers it), and follow it as in step 6.5 until it says `copied`.
+   5. When the app has files (step 4b, or point 2 above), call `dkoder.files.copy_to_prod` with `app_key` `<key>`, `app` `<key>` and `confirm: true` (the builder's Confirm covers it), and follow it as in step 6.5 until it says `copied`.
    6. Ask the builder: "<key> runs with its data. Remove dk-<key> from prod?" with the options "Remove" and "Keep". On "Remove", call `dkoder.remove` with the newest deployed build of dk-<key>. Its prod database is kept.
    7. Reply with the new URL in a few lines. From now on the builder works in the `<key>` folder as a normal DKOD app: change it, deploy, check it in Dev, deploy to prod.
 
