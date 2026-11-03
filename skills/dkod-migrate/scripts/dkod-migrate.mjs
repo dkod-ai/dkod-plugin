@@ -3630,6 +3630,22 @@ async function dbLinks(url, prefixes, io, cwd) {
   }
   return { links };
 }
+async function switchedOriginal(dir, io) {
+  const here = io.realpath(dir);
+  if (here === null)
+    return null;
+  const archive = io.realpath(`${resolve(here, "..")}${sep}${baseName2(here)}-archive`);
+  if (archive === null)
+    return null;
+  if (io.readFile(join8(archive, "package.json")) !== null)
+    return archive;
+  const res = await io.run("find", [archive, "-mindepth", "2", "-maxdepth", "2", "-name", "package.json", "-type", "f"], {}, archive);
+  if (res.status !== 0)
+    return null;
+  const apps = res.stdout.split(`
+`).map((l) => l.trim()).filter(Boolean).map((p) => resolve(p, ".."));
+  return apps.length === 1 ? apps[0] : null;
+}
 async function filesCommand(folder, io, args = []) {
   const dir = folder === "" ? io.cwd : folder;
   const record = io.readFile(join8(dir, ".dkod/migration.json"));
@@ -3640,8 +3656,10 @@ async function filesCommand(folder, io, args = []) {
   } catch {
     original = null;
   }
+  if (original === null)
+    original = await switchedOriginal(dir, io);
   if (original === null) {
-    io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
+    io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder, and no <name>-archive beside it. Do step 1 of the dkod-migrate skill first.");
     return 2;
   }
   const given = {};
