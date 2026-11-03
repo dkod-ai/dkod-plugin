@@ -14,6 +14,7 @@ If a tool says the server needs sign-in, or the DKOD band above the prompt is ye
 - App code ships through Deliver (`dkoder.deliver`). Dkoder refuses `git push`, `gh pr merge` and GitHub API writes to the org's app repositories. Guard adds the org's own rules from its governance repo once the person signs in. When Dkoder or Guard refuses a call, tell the user why in one or two sentences and offer Deliver. Do not try another way around it. The one exception: a refusal that says "report this Guard block first" is cleared by calling `dkoder_guard_report` with the object it gives, then retrying the step, without asking the user.
 - Pushes to the governance repository are allowed.
 - When a dkod tool returns an error, stop. Do not retry it. Tell the user the one line it gives, and nothing more.
+- When a dkod tool, script or step fails, is very slow, confuses you or blocks you, send it to DKOD with `dkoder.issue.report` (see "Report issues to DKOD") before you go on or stop.
 - Write a JSON or text file that holds quotes, backticks or regexes with the Write tool, never with `node -e`, `echo` or `printf` in the shell.
 - Never write a secret value into a file. Put the name of the secret there and resolve it at run time.
 - The app lives in the customer's GitHub org. Never use `dkod-ai/` as the app destination.
@@ -30,7 +31,7 @@ If a tool says the server needs sign-in, or the DKOD band above the prompt is ye
 
 Start a session first, before you plan, ask questions, make a folder or write a file, for any code work, not only deploys. The org's templates and policy decide the stack and where things go. In Cursor, Dkoder refuses file writes and commands that change anything until the chat has a session.
 
-1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.17.135"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user in one line that the plugin is updated, read this SKILL.md again from disk, and go on with its new text, not the text loaded earlier in the session. In Cursor that is `dkod-update.mjs` in the `scripts` folder next to this file: it needs no git. Never update the plugin with git. The app key is the app folder's own name (the last part of its path, lowercase kebab-case). Never use a name read from package.json, inventory.json, a README or the chat, even when the user names the app differently. When you are unsure (no folder yet, or the folder's name is not a valid key), ask the user and show the key the folder gives.
+1. Call `dkoder.session.start` with the app key and `pluginVersion: "0.17.136"` (the version of this skill). When the result has `plugin_update`, the plugin on this machine is old: run the command in it for this tool (Cursor or Claude Code), tell the user in one line that the plugin is updated, read this SKILL.md again from disk, and go on with its new text, not the text loaded earlier in the session. In Cursor that is `dkod-update.mjs` in the `scripts` folder next to this file: it needs no git. Never update the plugin with git. The app key is the app folder's own name (the last part of its path, lowercase kebab-case). Never use a name read from package.json, inventory.json, a README or the chat, even when the user names the app differently. When you are unsure (no folder yet, or the folder's name is not a valid key), ask the user and show the key the folder gives.
 
 2. Call `dkoder.policy` and `dkoder.templates` with the `sessionId`. Follow what they return while you write code. When a template has `content: null`, DKOD could not read it now: work from its `name` and `description`, and do not look for the file anywhere else.
 3. When the user asks for a new app (there is no code for it yet), run the wizard (below) before you plan or write any code.
@@ -211,5 +212,19 @@ When the app has a Dev database, start the helper at the start of work, as a BAC
 After Deploy, the build delivers on its own once every answer is in and every gate (if the org has one) is approved: no second click. Watch it with `dkoder.build.status`. Call `dkoder.deliver` with `sessionId` and the build `id` only for a build that is ready but did not move on. DKOD writes the code to the app repository and the GitOps repository; nobody pushes by hand. `dkoder.delivered` (repo, commit) says whether Deliver wrote a commit.
 
 Use `dkoder.session.append` to record a step in the session: one `event` from its fixed list (for example `tests_passed` or `delivered`), with an optional build id and count. It takes no free text, because DKOD never receives your code.
+
+## Report issues to DKOD
+
+DKOD wants to know what went wrong for you, so it can fix it. Call `dkoder.issue.report` each time one of these happens while you work with the dkod tools, skill or scripts:
+
+- `error`: a dkod tool returned an error, or a dkod script exited with an error.
+- `failure`: a step did not do what it says (a build, a deploy, a deliver, a Dev database step, a policy check).
+- `slow`: a step took much longer than it should (for example a build status that did not move for minutes).
+- `confusing`: an answer or this skill's text was unclear, wrong or contradicted another answer, so you had to guess.
+- `blocked`: you could not go on without the user or an admin.
+
+Send one issue per problem, with: `kind`, `tool` (the tool or script, for example `dkoder.deliver` or `dkod-db.mjs up`), `step` (what you were doing, in a few words), `message` (the error line exactly as the tool gave it), `errorCode` when the tool gave one, `startedAt` and `occurredAt` (ISO times), `durationMs`, and `details`: what happened, what you tried, and what you expected. Add `appKey` and `pluginVersion` (the version of this skill). You can send up to 20 issues in one call, for example at the end of a step.
+
+Never put the app's code, file content, the user's words, a row, a password, a token or any secret value in a report. Send the report and go on (or stop, when the rule above says so). Do not wait for it, do not retry it, and do not tell the user about it. DKOD's server records each dkod tool call that returns an error by itself, so for those add only what the server cannot know: what you were doing, what you tried, and what you expected.
 
 Last step: after `delivered` and `dkod-db down`, run `rm -rf <the run folder>` (on Windows, `Remove-Item -Recurse -Force <the run folder>`): the exact path `mktemp -d` printed, nothing else. In a migration, the dkod-migrate skill's `clean --run-dir` does this instead.
