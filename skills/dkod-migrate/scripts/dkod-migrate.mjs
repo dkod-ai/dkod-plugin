@@ -1992,6 +1992,27 @@ function archFinding(text, level) {
     message: m?.[3] ?? text
   };
 }
+async function templateAdvice(findings, raw, files) {
+  let record;
+  try {
+    record = JSON.parse(raw);
+  } catch {
+    return findings;
+  }
+  if (typeof record !== "object" || record === null || !("files" in record))
+    return findings;
+  const hashes = record.files;
+  if (typeof hashes !== "object" || hashes === null || Array.isArray(hashes))
+    return findings;
+  const dockerfile = files.find((f) => f.path === "Dockerfile");
+  if (!dockerfile || !("Dockerfile" in hashes))
+    return findings;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(dockerfile.text));
+  const hash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+  if (hashes.Dockerfile !== hash)
+    return findings;
+  return findings.map((f) => f.path === "Dockerfile" && (f.check === "dockerfile.from_digest" || f.check === "dockerfile.numeric_user") ? { ...f, level: "warn", origin: "template", message: `${f.message} This unchanged Dockerfile came from the org's template. Do not edit it: deploy writes it again. Continue the app work. Ask an admin to update the template or merge the starter upgrade PR if one is open. The server's deploy policy still applies.` } : f);
+}
 var refuse = (error, message) => ({ ok: false, error, message });
 async function checkFolder(pack, dir, io) {
   if (!pack || pack.rules.length === 0) {
@@ -2028,29 +2049,29 @@ async function checkFolder(pack, dir, io) {
     files.push({ path, text });
   }
   const result = evaluate(pack, files, { stage: "build", folder, folderPath: base });
+  const receipt = listed.includes(".dkod/rendered.json") ? await io.read(`${base}/.dkod/rendered.json`).catch(() => "") : "";
+  const findings = await templateAdvice(result.findings, receipt, files);
   const fetchFn = io.fetch ?? globalThis.fetch;
   for (const f of files) {
     if (!DOCKERFILE.test(f.path) || DEV_DOCKERFILE.test(f.path) || f.text === "")
       continue;
     const arch = await checkFromArch(f.text, fetchFn, f.path);
     for (const p of arch.problems)
-      result.findings.push(archFinding(p, "block"));
+      findings.push(archFinding(p, "block"));
     for (const w of arch.warnings)
-      result.findings.push(archFinding(w, "warn"));
-    if (arch.problems.length > 0)
-      result.blocked = true;
+      findings.push(archFinding(w, "warn"));
   }
-  const blocks = result.findings.filter((f) => f.level === "block").length;
-  const next = blocks > 0 ? `Fix the ${String(blocks)} block finding${blocks === 1 ? "" : "s"}, then run this check again before you deploy.` : result.findings.length > 0 ? "No block finding. Tell the person about each warn finding." : "Every check passed.";
+  const blocks = findings.filter((f) => f.level === "block").length;
+  const next = blocks > 0 ? `Fix the ${String(blocks)} block finding${blocks === 1 ? "" : "s"}, then run this check again before you deploy.` : findings.length > 0 ? "No block finding. Tell the person about each warn finding." : "Every check passed.";
   return {
     ok: true,
     folder: dir,
     files: listed.length,
     skipped,
     checked: result.checked,
-    blocked: result.blocked,
-    findings: result.findings.slice(0, MAX_SHOWN),
-    summary: formatFindings(result.findings, MAX_SHOWN),
+    blocked: blocks > 0,
+    findings: findings.slice(0, MAX_SHOWN),
+    summary: formatFindings(findings, MAX_SHOWN),
     next: skipped > 0 ? `${next} ${String(skipped)} file${skipped === 1 ? " was" : "s were"} not read (binary, over 512 KB, or past the read limit).` : next
   };
 }
@@ -2957,13 +2978,13 @@ async function checkBuild(folder, reportFile, io, opts = {}) {
     }
   }
   const warnings = [];
-  const policy = await checkFolder(STARTER_PACK, dir, { list: async (d) => io.walk(d, SKIP), read: async (p) => io.readFile(p) ?? "", fetch: io.fetch });
+  const policy = await checkFolder(STARTER_PACK, dir, { list: async (d) => [...io.walk(d, SKIP), ...io.readFile(join4(d, RENDERED_FILE)) === null ? [] : [RENDERED_FILE]], read: async (p) => io.readFile(p) ?? "", fetch: io.fetch });
   if (policy.ok) {
     for (const f of policy.findings) {
       const text = `${f.path ?? "(folder)"}${f.line === null ? "" : `:${String(f.line)}`}: ${f.rule}: ${f.message}`;
       if (f.level === "block")
         problems.push(text);
-      else if (f.check === "dockerfile.from_digest")
+      else if (f.origin === "template" || f.check === "dockerfile.from_digest")
         warnings.push(text);
     }
   } else
