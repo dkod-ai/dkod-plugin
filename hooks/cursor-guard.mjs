@@ -131,7 +131,7 @@ const NO_GIT = [
 ].join(" ");
 
 const KEEP_GOING =
-  "DKOD: this app's migration is not finished. If your last message asked the builder a question, stop and wait for the answer. Otherwise go on now with the next step of the dkod-migrate skill, and do not stop until the app is deployed or you need the builder's answer.";
+  "DKOD: this app's migration is not finished. If your last message asked the builder a question, or said that the next step waits for an admin or the builder, stop and wait. Do not ask a new question only to stop. Otherwise go on now with the next step of the dkod-migrate skill, and do not stop until the app is deployed or you need the builder's answer.";
 
 /** Stops in a row the stop hook sends an open migration on; the manifest's loop_limit is the same number. */
 const KEEP_LIMIT = 3;
@@ -239,7 +239,15 @@ function transcriptFacts(path) {
 }
 
 /** The message ends by asking the builder something: a question mark in its last lines. */
-const asksBuilder = (text) => text.slice(-400).includes("?");
+const asksBuilder = (text) => text.slice(-400).includes("?") || waitsForSomeone(text.slice(-400));
+
+/**
+ * The message ends by saying the agent waits for a person: "Let me know when that's done", "until the admin
+ * answers". 2026-11-04 (365Scores gBall): a deploy waited for the admin, the nudge sent the agent on twice,
+ * and it made up a question to the builder only to stop.
+ */
+const waitsForSomeone = (text) =>
+  /\b(?:let me know|tell me when|ping me|i(?:'ll| will) wait|waiting (?:for|on)|wait(?:s)? (?:for|on|until) (?:the |your |an )?(?:admin|builder|you)|until (?:the |your |an )?(?:org's )?admin)/i.test(text);
 
 /**
  * In a DKOD chat, the first change after each new question is denied once (see the header).
