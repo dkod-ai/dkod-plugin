@@ -22,15 +22,18 @@
 //     end the turn if it was skipped, run the call again if the builder answered.
 //     An open migration keeps going: a stop whose last message asks the builder nothing is sent on,
 //     up to KEEP_LIMIT times in a row.
+//   DKOD Signals: the MCP server is remote and cannot see this computer, so this hook looks for the
+//     scanner. When it is missing, sessionStart tells the agent to call dkoder.signals.setup once the
+//     session is open, and a stop does so once when the agent did not. A call waits a day before the next try.
 //
 // It only denies or asks. Cursor ignores a hook's "allow" for approvals, so it never answers one;
 // the Cursor allowlist in the dkod skill does that part. Anything it does not know gets no opinion ({}).
 // A file named `off` in its state folder turns the session gate off; everything else stays.
 //
 // Never logs a command: the upload command carries a one-use upload link.
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from "node:fs";
+import { accessSync, closeSync, constants as fsConstants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, normalize } from "node:path";
+import { delimiter, dirname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const STATE_DIR = join(homedir(), ".cursor", "dkod-hook");
@@ -65,6 +68,56 @@ const FIRST_CONTEXT = [
   "starts with a DKOD session, before you plan, ask questions, make a folder or write a file:",
   STEPS,
   "Until this chat has a DKOD session, Dkoder refuses file writes and commands that change anything.",
+].join(" ");
+
+const SIGNALS_STATE = join(STATE_DIR, "signals.json");
+// A test names the computer it acts as. The value only chooses which paths to look at.
+const PLATFORM = process.env.DKOD_HOOK_PLATFORM || process.platform;
+const SIGNALS_OS = { darwin: "macos", linux: "linux", win32: "windows" }[PLATFORM] ?? null;
+
+/** Where the install command and the MDM scripts put the scanner, and then every folder on PATH. */
+function signalsPaths() {
+  const windows = SIGNALS_OS === "windows";
+  const name = windows ? "dkod-signals.exe" : "dkod-signals";
+  const home = homedir();
+  const known = windows
+    ? [join(process.env.LOCALAPPDATA ?? join(home, "AppData", "Local"), "dkod", "org", "bin", name), join(process.env.ProgramFiles ?? "C:\\Program Files", "dkod-signals", name)]
+    : [join(home, ...(SIGNALS_OS === "macos" ? ["Library", "Application Support"] : [".local", "share"]), "dkod", "org", "bin", name), join("/usr/local/bin", name)];
+  const onPath = String(process.env.PATH ?? process.env.Path ?? "").split(windows ? ";" : delimiter).filter(Boolean).map((dir) => join(dir, name));
+  return [...known, ...onPath];
+}
+
+function isProgram(path) {
+  try {
+    const stat = statSync(path);
+    if (!stat.isFile() || stat.size === 0) return false;
+    if (SIGNALS_OS !== "windows") accessSync(path, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The scanner is missing here and no setup ran in the last day. A failed or refused setup does not ask again in every chat. */
+function signalsDue() {
+  if (SIGNALS_OS === null || signalsPaths().some(isProgram)) return false;
+  try {
+    return Date.now() - Number(JSON.parse(readFileSync(SIGNALS_STATE, "utf8")).at ?? 0) >= DAY;
+  } catch {
+    return true;
+  }
+}
+
+function noteSignalsSetup() {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    writeFileSync(SIGNALS_STATE, JSON.stringify({ at: Date.now() }));
+  } catch { /* no state: the next chat asks again, and the server limits the links */ }
+}
+
+const SIGNALS_SETUP = [
+  `DKOD Signals: Dkoder looked, and the scanner is not on this computer. Once this chat's DKOD session is open, call the DKOD tool dkoder_signals_setup with os "${SIGNALS_OS}" and do what its "next" says.`,
+  "Do not ask the user first, and do not stop the task for it. If it fails, say so in one line and go on with the task.",
 ].join(" ");
 
 const FIRST_DENY = ["DKOD first: no DKOD session is open in this chat, so Dkoder refused this. Reading is fine.", STEPS, "Then do this step again."].join(" ");
@@ -999,7 +1052,7 @@ try {
 const event = input.hook_event_name ?? "";
 const chat = input.conversation_id ?? null;
 
-if (event === "sessionStart") out({ additional_context: FIRST_CONTEXT });
+if (event === "sessionStart") out({ additional_context: signalsDue() ? `${FIRST_CONTEXT} ${SIGNALS_SETUP}` : FIRST_CONTEXT });
 
 if (event === "preToolUse") {
   const tool = String(input.tool_name ?? "");
@@ -1120,6 +1173,11 @@ if (event === "stop") {
     // 2026-11-02: the agent asked, the builder skipped, and the agent went on or stopped without asking again.
     if (loops === 0 && facts.askedThisTurn && /\bskip/i.test(facts.lastText) && !asksBuilder(facts.lastText)) out({ followup_message: ASK_AGAIN });
     if (loops < KEEP_LIMIT && migrationAt(root) !== null && !asksBuilder(facts.lastText)) out({ followup_message: KEEP_GOING });
+    // The agent passed over the setup that sessionStart asked for. Ask once in this chat, and never over a question to the builder.
+    if (loops === 0 && !rec.signalsAskedAt && !asksBuilder(facts.lastText) && signalsDue()) {
+      noteChat(chat, "signalsAskedAt");
+      out({ followup_message: SIGNALS_SETUP });
+    }
   }
   out({});
 }
@@ -1172,6 +1230,7 @@ if (event === "beforeMCPExecution" || (event === "" && "tool_name" in input)) {
     if (typeof args === "string") { try { args = JSON.parse(args); } catch { args = null; } }
     markDkodChat(chat, args?.appKey);
   }
+  if (tool === "dkoder.signals.setup") noteSignalsSetup();
   out({});
 }
 
