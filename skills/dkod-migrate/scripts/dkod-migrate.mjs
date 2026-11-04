@@ -4068,9 +4068,9 @@ async function removeSnapshot(dir, io) {
 }
 async function snapshot(folder, io, args = []) {
   const dir = folder === "" ? io.cwd : folder;
-  const original = originalOf(io.readFile(recordPath(dir)));
+  const original = originalOf(io.readFile(recordPath(dir))) ?? await switchedOriginal(dir, io);
   if (original === null) {
-    io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
+    io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder, and no <name>-archive beside it. Do step 1 of the dkod-migrate skill first.");
     return 2;
   }
   const scratch = io.mkdtemp(join9(io.tmpdir(), "dkod-migrate-"));
@@ -4186,6 +4186,7 @@ async function snapshot(folder, io, args = []) {
   const record = {
     ok: true,
     mode: empty ? "new-app-only" : "snapshot",
+    original,
     scratch: empty ? "" : scratch,
     files,
     databases,

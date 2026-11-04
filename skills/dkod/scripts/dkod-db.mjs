@@ -2299,7 +2299,7 @@ async function runImport(flags, io, cwd) {
       lightSource = true;
       const file = typeof pg.source?.file === "string" ? pg.source.file : "";
       const key = typeof pg.source?.key === "string" ? pg.source.key : "DATABASE_URL";
-      const original = originalOfRecord(io.readFile(join3(dir, ".dkod/migration.json")));
+      const original = originalOfRecord(io.readFile(join3(dir, ".dkod/migration.json"))) ?? (typeof r?.original === "string" && r.original !== "" ? r.original : null);
       if (original !== null && file !== "" && !file.split("/").includes("..")) {
         const named = envValue(io.readFile(join3(original, file)), key);
         try {
