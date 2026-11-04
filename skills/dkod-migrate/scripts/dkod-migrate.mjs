@@ -1723,6 +1723,9 @@ function contextFor(source, name, tables, values) {
       ctx[root] = { ...ctx[root], ...own };
   }
   const dkod = ctx.dkod;
+  const registry = ctx.policy.registry;
+  if (dkod.image_repository === undefined && typeof registry === "string" && registry.trim() !== "")
+    dkod.image_repository = `${registry.trim().replace(/\/+$/, "")}/${name}`;
   for (const key of UNWRITTEN_KEYS)
     if (dkod[key] === undefined)
       dkod[key] = "";
