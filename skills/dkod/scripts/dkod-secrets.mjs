@@ -656,7 +656,38 @@ function viewFrom(body) {
 }
 
 var refuse = (error, message) => ({ ok: false, error, message });
-async function sealFromEnv(envText, targetText, addOthers) {
+var nodeFetchText = async (url) => {
+  try {
+    const res = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(15000) });
+    return res.ok ? await res.text() : null;
+  } catch {
+    return null;
+  }
+};
+function certUrl(inner) {
+  const cert = typeof inner === "object" && inner !== null ? inner.cert : undefined;
+  const url = typeof cert === "object" && cert !== null ? cert.url : undefined;
+  if (typeof url !== "string")
+    return null;
+  try {
+    const u = new URL(url);
+    const loopback = u.protocol === "http:" && (u.hostname === "127.0.0.1" || u.hostname === "localhost");
+    if (u.protocol !== "https:" && !loopback || !u.pathname.startsWith("/api/v1/dkoder/sealing-cert/"))
+      return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+async function withFetchedPem(inner, url, fetchText) {
+  const pem = await fetchText(url);
+  if (pem === null || !pem.includes("BEGIN CERTIFICATE"))
+    return null;
+  const b = inner;
+  return { ...b, cert: { ...b.cert, pem } };
+}
+var CERT_UNREACHABLE = "The sealing certificate could not be read from cert.url in the target file. Call dkoder.secrets.target again, write its answer to the file again, and retry.";
+async function sealFromEnv(envText, targetText, addOthers, fetchText = nodeFetchText) {
   const parsed = parseEnvFile(envText);
   if (!parsed.ok) {
     if (parsed.problem === "too_large")
@@ -673,8 +704,16 @@ async function sealFromEnv(envText, targetText, addOthers) {
   } catch {
     return refuse("target_unreadable", "The target file is not the JSON answer of dkoder.secrets.target.");
   }
-  const inner = typeof target === "object" && target !== null && "structuredContent" in target ? target.structuredContent : target;
-  const view = viewFrom(inner);
+  let inner = typeof target === "object" && target !== null && "structuredContent" in target ? target.structuredContent : target;
+  const url = certUrl(inner);
+  const pemOf = (x) => x?.cert?.pem;
+  if (url !== null && typeof pemOf(inner) !== "string") {
+    const fetched = await withFetchedPem(inner, url, fetchText);
+    if (fetched === null)
+      return refuse("cert_unreachable", CERT_UNREACHABLE);
+    inner = fetched;
+  }
+  let view = viewFrom(inner);
   if (view === null)
     return refuse("target_unreadable", "The target file is not the JSON answer of dkoder.secrets.target.");
   const plan = planEnvFill(view, parsed.entries);
@@ -682,11 +721,20 @@ async function sealFromEnv(envText, targetText, addOthers) {
   const report = envFillReport(plan, addOthers);
   if (values.length === 0)
     return { ok: true, save: null, next: "No name was filled, so there is nothing to save.", ...report };
+  const next = "Send save to dkoder.secrets.save as it is: certFingerprint and secrets, with the sessionId and appKey. Then deploy the app again.";
   try {
-    const save = await sealAppSecrets(view.cert, view.target, values);
-    return { ok: true, save, next: "Send save to dkoder.secrets.save as it is: certFingerprint and secrets, with the sessionId and appKey. Then deploy the app again.", ...report };
+    return { ok: true, save: await sealAppSecrets(view.cert, view.target, values), next, ...report };
   } catch {
-    return refuse("seal_failed", "The values could not be sealed on this computer. The apps cluster's sealing certificate did not check out. Call dkoder.secrets.target again and retry.");
+    if (url !== null) {
+      const fetched = await withFetchedPem(inner, url, fetchText);
+      view = fetched === null ? null : viewFrom(fetched);
+      if (view === null)
+        return refuse("cert_unreachable", CERT_UNREACHABLE);
+      try {
+        return { ok: true, save: await sealAppSecrets(view.cert, view.target, values), next, ...report };
+      } catch {}
+    }
+    return refuse("seal_failed", "The certificate in the target file does not match cert.fingerprint, so nothing was sealed. It was most likely changed when the file was written. Call dkoder.secrets.target again and write its answer to the file again, leaving out cert.pem: this script gets it from cert.url.");
   }
 }
 var USAGE = "Usage: node dkod-secrets.mjs seal <.env file> <target file> [--others]";
