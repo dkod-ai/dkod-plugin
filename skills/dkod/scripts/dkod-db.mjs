@@ -1601,6 +1601,18 @@ async function startUp(flags, io, cwd) {
     let pendingBytes = 0;
     let ready = false;
     let ws = null;
+    let wsFull = false;
+    let held = false;
+    const send = (chunk) => {
+      if (!ws.sendBinary(chunk)) {
+        wsFull = true;
+        sock.pause();
+      }
+    };
+    const resumeIfFree = () => {
+      if (!wsFull && !held)
+        sock.resume();
+    };
     io.print(`dkod-db: connection opened (${app})`);
     sock.on("data", (chunk) => {
       if (!ready) {
@@ -1613,8 +1625,7 @@ async function startUp(flags, io, cwd) {
         pending.push(chunk);
         return;
       }
-      if (!ws.sendBinary(chunk))
-        sock.pause();
+      send(chunk);
     });
     sock.on("close", () => {
       io.print(`dkod-db: connection closed (${app})`);
@@ -1625,8 +1636,7 @@ async function startUp(flags, io, cwd) {
         ready = true;
         open.add(ws);
         for (const chunk of pending)
-          if (!ws.sendBinary(chunk))
-            sock.pause();
+          send(chunk);
         pending = [];
       },
       onBinary(data) {
@@ -1636,13 +1646,25 @@ async function startUp(flags, io, cwd) {
         }
       },
       onText(text) {
+        let type;
         try {
-          if (JSON.parse(text).type === "renewed")
-            io.print("dkod-db: token renewed");
-        } catch {}
+          type = JSON.parse(text).type;
+        } catch {
+          return;
+        }
+        if (type === "renewed")
+          io.print("dkod-db: token renewed");
+        else if (type === "pause") {
+          held = true;
+          sock.pause();
+        } else if (type === "resume") {
+          held = false;
+          resumeIfFree();
+        }
       },
       onDrain() {
-        sock.resume();
+        wsFull = false;
+        resumeIfFree();
       },
       onRefused(status, reason) {
         io.print(`dkod-db: connect refused: ${reason || `HTTP ${status}`}`);
