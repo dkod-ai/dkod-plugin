@@ -2752,6 +2752,7 @@ var DESTRUCTIVE_SEED = [
 var stripComments3 = (text) => text.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/.*$/gm, "$1").replace(/(^|\s)--.*$/gm, "$1");
 var SEED_FILE = /\.(?:[cm]?[jt]s|sql|py)$/i;
 var NEXT_MARKERS = ["__NEXT_DATA__", "/_next/static/", "next-route-announcer"];
+var TEST_PATH = /(^|\/)(?:tests?|__tests__|__fixtures__|fixtures|testdata|test-data|spec)\//i;
 var isRec5 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 var json3 = (text) => {
   try {
@@ -2951,7 +2952,7 @@ async function checkBuild(folder, reportFile, io, opts = {}) {
       problems.push(`${f}: the original's build output in the dk- folder. Never copy build output; rebuild every page on the stack.`);
     }
   }
-  const pages = sources.filter((f) => HTML.test(f) && !f.startsWith("tests/"));
+  const pages = sources.filter((f) => HTML.test(f) && !TEST_PATH.test(f));
   if (pages.length > 0) {
     const rendered = new Set(io.walk(original, SKIP).filter((f) => HTML.test(f)).map((f) => io.sha256([join4(original, f)])));
     for (const f of pages) {
@@ -3340,10 +3341,23 @@ function devStore(base: string): Store {
   };
 }
 
+// Under bun test (NODE_ENV=test) the dev port is off, even when .env.local names it: Bun loads .env.local for tests
+// too, and an app's tests must never reach the dev bucket. A test that needs it sets DKOD_FILES_IN_TESTS=1.
+function devUrl(): string | undefined {
+  if (process.env.NODE_ENV === "test" && process.env.DKOD_FILES_IN_TESTS !== "1") return undefined;
+  return process.env.DKOD_FILES_URL || undefined;
+}
+
+/** True when the app has its files: the bucket in prod, the dev port in dev. Switch a feature on files with this,
+ * never by reading DKOD_FILES_URL or DKOD_FILES_BUCKET yourself. */
+export function filesOn(): boolean {
+  return !!(process.env.DKOD_FILES_BUCKET || devUrl());
+}
+
 let store: Store | null = null;
 function files(): Store {
   if (store) return store;
-  const bucket = process.env.DKOD_FILES_BUCKET, dev = process.env.DKOD_FILES_URL;
+  const bucket = process.env.DKOD_FILES_BUCKET, dev = devUrl();
   if (bucket) store = bucketStore(bucket, process.env.AWS_REGION || "us-east-1");
   else if (dev) store = devStore(dev);
   else throw new Error("dkod-files: no DKOD_FILES_BUCKET (prod) and no DKOD_FILES_URL (dev). In dev, run dkod-db.mjs up and load .env.local.");
