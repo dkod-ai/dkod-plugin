@@ -1,5 +1,7 @@
 // Built by packages/dkoder-plugin/scripts/build-secrets.ts from dkod-app. Do not edit: run `bun run --cwd packages/dkoder-plugin build:secrets`.
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 
 var ENV_FILE_MAX_BYTES = 256 * 1024;
 var QUOTES = { "'": "single", '"': "double", "`": "backtick" };
@@ -655,6 +657,161 @@ function viewFrom(body) {
   };
 }
 
+var SKIP = new Set(["node_modules", ".git", ".venv", "venv", "dist", "build", ".next", ".turbo", ".dkod", "coverage", "test-results", "playwright-report", "__pycache__", ".cache"]);
+
+var MAX_MESSAGE_BYTES = 16 << 20;
+var MAX_HANDSHAKE_BYTES = 16 << 10;
+
+var MAX_FILE_BYTES = 5 * 1024 ** 3;
+var HOP = new Set(["connection", "keep-alive", "transfer-encoding", "upgrade", "host", "authorization", "content-length"]);
+var PART_BYTES = 8 << 20;
+
+var WAIT_LIMIT_MS = 10 * 60000;
+var GATEWAY_LOAD_BUDGET_MS = 2 * 60000;
+var PENDING_CAP = 1 << 20;
+var RENEW_BEFORE_MS = 5 * 60000;
+var USAGE = [
+  "Usage:",
+  "  node dkod-db.mjs up --app <app key> [--port 6543] [--files-port <port + 1>] [--dir <app folder>] [--wait <seconds>] [--detach]",
+  "  node dkod-db.mjs files --from <folder> [--prefix media/] [--dir <app folder>] [--jobs 32]   (while `up` runs)",
+  "  node dkod-db.mjs down [--dir <app folder>] [--all]",
+  "  node dkod-db.mjs migrate [--dir <app folder>] [--port 6543]",
+  "  node dkod-db.mjs import --app <app key> --from <local postgres URL | snapshot> [--dir <app folder>] [--port 6543]",
+  "  node dkod-db.mjs detect [--dir <app folder>]"
+].join(`
+`);
+var NO_DEVICE = "This computer has no Dkoder device token yet. Call the DKOD tool dkoder.devdb.connect, then run this same command again at once with --code <code> --dashboard <dashboard_url> from its answer. The code works once, for 60 seconds.";
+function trustedDashboard(raw) {
+  if (typeof raw !== "string")
+    return null;
+  try {
+    const url = new URL(raw);
+    const local = url.hostname === "127.0.0.1" || url.hostname === "localhost";
+    if (url.protocol === "https:" || url.protocol === "http:" && local)
+      return url.origin;
+  } catch {}
+  return null;
+}
+function resolveCredentials(env, configPath, readFile, pluginRoot, devicePath) {
+  if (env.DKOD_URL && env.DKODER_TOKEN) {
+    const dashboardUrl = trustedDashboard(env.DKOD_URL);
+    return dashboardUrl ? { dashboardUrl, token: env.DKODER_TOKEN } : null;
+  }
+  const candidates = [configPath, env.CLAUDE_PLUGIN_ROOT && `${env.CLAUDE_PLUGIN_ROOT}/dkoder.json`, env.CURSOR_PLUGIN_ROOT && `${env.CURSOR_PLUGIN_ROOT}/dkoder.json`, pluginRoot && `${pluginRoot}/dkoder.json`];
+  for (const path of candidates) {
+    if (!path)
+      continue;
+    const text = readFile(path);
+    if (text === null)
+      continue;
+    try {
+      const parsed = JSON.parse(text);
+      const dashboardUrl = trustedDashboard(parsed.dashboardUrl);
+      if (dashboardUrl && typeof parsed.token === "string" && parsed.token)
+        return { dashboardUrl, token: parsed.token };
+    } catch {}
+    if (path === configPath)
+      return null;
+  }
+  return devicePath ? readDeviceFile(devicePath, readFile) : null;
+}
+function readDeviceFile(path, readFile) {
+  const text = readFile(path);
+  if (text === null)
+    return null;
+  try {
+    const d = JSON.parse(text);
+    const dashboardUrl = trustedDashboard(d.dashboardUrl);
+    if (!dashboardUrl || typeof d.token !== "string" || !d.token || typeof d.refresh !== "string" || !d.refresh || typeof d.expiresAt !== "number")
+      return null;
+    return { dashboardUrl, token: d.token, refresh: d.refresh, expiresAt: d.expiresAt };
+  } catch {
+    return null;
+  }
+}
+function saveDevice(io, creds) {
+  const path = io.devicePath?.();
+  if (!path)
+    return;
+  const text = JSON.stringify({ dashboardUrl: creds.dashboardUrl, token: creds.token, refresh: creds.refresh, expiresAt: creds.expiresAt });
+  (io.writePrivate ?? io.writeFile)(path, text);
+}
+function dashboardFor(flag, io) {
+  if (flag !== undefined)
+    return trustedDashboard(flag);
+  if (io.env.DKOD_URL)
+    return trustedDashboard(io.env.DKOD_URL);
+  const mcp = io.pluginRoot ? io.readFile(`${io.pluginRoot}/.mcp.json`) : null;
+  if (mcp !== null) {
+    try {
+      const url = JSON.parse(mcp).mcpServers?.dkod?.url;
+      const origin = trustedDashboard(url);
+      if (origin)
+        return origin;
+    } catch {}
+  }
+  return "https://dashboard.dkod.app";
+}
+var pairOf = (dashboardUrl, body) => {
+  const expiresAt = typeof body.expires_at === "string" ? Date.parse(body.expires_at) : NaN;
+  if (typeof body.token !== "string" || !body.token || typeof body.refresh !== "string" || !body.refresh || Number.isNaN(expiresAt))
+    return null;
+  return { dashboardUrl, token: body.token, refresh: body.refresh, expiresAt };
+};
+var CODE_GONE = "The connect code was refused: it works once, for 60 seconds. Call dkoder.devdb.connect again and run this at once with the new code.";
+async function connectWithCode(code, dashboardUrl, io) {
+  if (!/^dkodc_[a-z0-9]{16,64}_[A-Za-z0-9_-]{20,}$/.test(code))
+    return "--code takes the code dkoder.devdb.connect gave (it starts with dkodc_).";
+  let res;
+  try {
+    res = await io.fetch(`${dashboardUrl}/api/v1/dkoder/connect/exchange`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code }) });
+  } catch {
+    return "Could not reach the dashboard. Check the network, then call dkoder.devdb.connect again.";
+  }
+  if (res.status === 401)
+    return CODE_GONE;
+  let body = {};
+  try {
+    body = JSON.parse(await res.text());
+  } catch {}
+  const creds = res.status === 201 || res.status === 200 ? pairOf(dashboardUrl, body) : null;
+  if (!creds)
+    return "DKOD could not connect this computer right now. Call dkoder.devdb.connect again in a minute.";
+  saveDevice(io, creds);
+  return creds;
+}
+var RENEW_DEVICE_BEFORE_MS = 5 * 60000;
+async function freshCredentials(creds, io) {
+  if (!creds.refresh || creds.expiresAt === undefined || creds.expiresAt - RENEW_DEVICE_BEFORE_MS > io.now())
+    return creds;
+  let res;
+  try {
+    res = await io.fetch(`${creds.dashboardUrl}/api/v1/dkoder/connect/refresh`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ refresh: creds.refresh }) });
+  } catch {
+    throw new TokenError("unavailable", "Could not reach the dashboard. Check the network and try again.");
+  }
+  if (res.status === 401)
+    throw new TokenError("refused", `DKOD no longer accepts this computer's helper token. ${NO_DEVICE}`);
+  let body = {};
+  try {
+    body = JSON.parse(await res.text());
+  } catch {}
+  const next = res.status === 201 || res.status === 200 ? pairOf(creds.dashboardUrl, body) : null;
+  if (!next)
+    throw new TokenError("unavailable", "DKOD could not renew this computer's helper token right now. Try again in a minute.");
+  saveDevice(io, next);
+  return next;
+}
+
+class TokenError extends Error {
+  kind;
+  constructor(kind, message) {
+    super(message);
+    this.kind = kind;
+    this.name = "TokenError";
+  }
+}
+
 var refuse = (error, message) => ({ ok: false, error, message });
 var nodeFetchText = async (url) => {
   try {
@@ -721,7 +878,7 @@ async function sealFromEnv(envText, targetText, addOthers, fetchText = nodeFetch
   const report = envFillReport(plan, addOthers);
   if (values.length === 0)
     return { ok: true, save: null, next: "No name was filled, so there is nothing to save.", ...report };
-  const next = "Send save to dkoder.secrets.save as it is: certFingerprint and secrets, with the sessionId and appKey. Then deploy the app again.";
+  const next = "Run this again with --send --session <sessionId> --app <appKey>: it saves the sealed text itself. Never copy save into dkoder.secrets.save by hand. Then deploy the app again.";
   try {
     return { ok: true, save: await sealAppSecrets(view.cert, view.target, values), next, ...report };
   } catch {
@@ -737,12 +894,107 @@ async function sealFromEnv(envText, targetText, addOthers, fetchText = nodeFetch
     return refuse("seal_failed", "The certificate in the target file does not match cert.fingerprint, so nothing was sealed. It was most likely changed when the file was written. Call dkoder.secrets.target again and write its answer to the file again, leaving out cert.pem: this script gets it from cert.url.");
   }
 }
-var USAGE = "Usage: node dkod-secrets.mjs seal <.env file> <target file> [--others]";
+var USAGE2 = "Usage: node dkod-secrets.mjs seal <.env file> <target file> [--others] [--send --session <sessionId> --app <appKey> [--code <code> --dashboard <url>]]";
+var APP_KEY = /^[a-z0-9][a-z0-9-]{0,62}$/;
+var SESSION_ID = /^[A-Za-z0-9_-]{8,128}$/;
+function toolAnswer(text) {
+  const line = text.trimStart().startsWith("{") ? text : text.split(`
+`).find((l) => l.startsWith("data:"))?.slice(5) ?? "";
+  try {
+    const rpc = JSON.parse(line);
+    if (!rpc.result)
+      return { isError: true, body: { error: "rpc_error", message: typeof rpc.error?.message === "string" ? rpc.error.message : "DKOD refused the call." } };
+    const r = rpc.result;
+    let body = r.structuredContent;
+    if (typeof body !== "object" || body === null) {
+      const t = r.content?.[0]?.text;
+      try {
+        body = typeof t === "string" ? JSON.parse(t) : null;
+      } catch {
+        body = { message: typeof t === "string" ? t : "" };
+      }
+    }
+    return { isError: r.isError === true, body: typeof body === "object" && body !== null ? body : {} };
+  } catch {
+    return null;
+  }
+}
+async function sendSealed(save, sessionId, appKey, flags, io) {
+  const dbIo = io;
+  let creds = null;
+  if (flags.code !== undefined) {
+    const dashboardUrl = dashboardFor(flags.dashboard, io);
+    if (dashboardUrl === null)
+      return { ok: false, error: "bad_dashboard", message: "--dashboard takes the dashboard_url dkoder.devdb.connect gave (https)." };
+    const got = await connectWithCode(flags.code, dashboardUrl, dbIo);
+    if (typeof got === "string")
+      return { ok: false, error: "no_device", message: got };
+    creds = got;
+  } else {
+    creds = resolveCredentials(io.env, undefined, io.readFile, io.pluginRoot, io.devicePath?.());
+  }
+  if (creds === null)
+    return { ok: false, error: "no_device", message: NO_DEVICE };
+  try {
+    creds = await freshCredentials(creds, dbIo);
+  } catch (error) {
+    return { ok: false, error: "no_device", message: error instanceof TokenError ? error.message : NO_DEVICE };
+  }
+  const body = JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: { name: "dkoder.secrets.save", arguments: { sessionId, appKey, certFingerprint: save.certFingerprint, secrets: save.secrets } }
+  });
+  let res;
+  try {
+    res = await io.fetch(`${creds.dashboardUrl}/api/v1/dkoder/mcp`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${creds.token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body
+    });
+  } catch {
+    return { ok: false, error: "unreachable", message: "Could not reach the dashboard. Check the network and run this again." };
+  }
+  if (res.status === 401)
+    return { ok: false, error: "no_device", message: `DKOD did not accept this computer's helper token. ${NO_DEVICE}` };
+  const answer = res.status === 200 ? toolAnswer(await res.text()) : null;
+  if (answer === null)
+    return { ok: false, error: "unavailable", message: "DKOD could not save the secrets right now. Run this again in a minute." };
+  const b = answer.body;
+  if (answer.isError)
+    return { ok: false, error: typeof b.error === "string" ? b.error : "refused", message: typeof b.message === "string" ? b.message : "DKOD refused the save." };
+  const names = (v) => Array.isArray(v) ? v.filter((n) => typeof n === "string") : [];
+  return { ok: true, saved: names(b.saved), has: names(b.has) };
+}
+var VALUE_FLAGS = new Set(["--session", "--app", "--code", "--dashboard"]);
 async function runSecretsCli(argv, io) {
   const [command, envFile, targetFile, ...rest] = argv;
-  const flags = new Set(rest);
-  if (command !== "seal" || !envFile || !targetFile || [...flags].some((f) => f !== "--others")) {
-    io.print(JSON.stringify(refuse("usage", USAGE)));
+  const flags = new Set;
+  const values = new Map;
+  let bad = false;
+  for (let i = 0;i < rest.length; i++) {
+    const f = rest[i];
+    if (VALUE_FLAGS.has(f)) {
+      const v = rest[i + 1];
+      if (v === undefined || v.startsWith("--"))
+        bad = true;
+      else
+        values.set(f, v);
+      i++;
+    } else if (f === "--others" || f === "--send")
+      flags.add(f);
+    else
+      bad = true;
+  }
+  const send = flags.has("--send");
+  const session = values.get("--session"), app = values.get("--app");
+  if (send && (!session || !SESSION_ID.test(session) || !app || !APP_KEY.test(app) || !io.send))
+    bad = true;
+  if (!send && values.size > 0)
+    bad = true;
+  if (command !== "seal" || !envFile || !targetFile || bad) {
+    io.print(JSON.stringify(refuse("usage", USAGE2)));
     return 2;
   }
   let envText, targetText;
@@ -765,12 +1017,51 @@ async function runSecretsCli(argv, io) {
     result = refuse("failed", "The secrets could not be sealed.");
   }
   envText = "";
-  io.print(JSON.stringify(result));
-  return result.ok ? 0 : 1;
+  if (!send || !result.ok) {
+    io.print(JSON.stringify(result));
+    return result.ok ? 0 : 1;
+  }
+  const { save, next: _next, ...report } = result;
+  if (save === null) {
+    io.print(JSON.stringify({ ...report, sent: false, next: "No name was filled, so nothing was saved." }));
+    return 0;
+  }
+  const sent = await sendSealed(save, session, app, { code: values.get("--code"), dashboard: values.get("--dashboard") }, io.send);
+  if (!sent.ok) {
+    io.print(JSON.stringify({ ...report, ok: false, sent: false, error: sent.error, message: sent.message }));
+    return 1;
+  }
+  io.print(JSON.stringify({ ...report, sent: true, saved: sent.saved, has: sent.has, next: "Saved in DKOD. Deploy the app again so the values apply." }));
+  return 0;
 }
 
+function devicePath() {
+  const dir = join(homedir(), ".dkod", "db");
+  mkdirSync(dir, { recursive: true, mode: 448 });
+  chmodSync(dir, 448);
+  return join(dir, "device.json");
+}
 process.exitCode = await runSecretsCli(process.argv.slice(2), {
   read: (path) => readFileSync(path, "utf8"),
   print: (line) => process.stdout.write(`${line}
-`)
+`),
+  send: {
+    env: process.env,
+    readFile: (path) => {
+      try {
+        return readFileSync(path, "utf8");
+      } catch {
+        return null;
+      }
+    },
+    writeFile: (path, text) => writeFileSync(path, text, "utf8"),
+    writePrivate: (path, text) => {
+      writeFileSync(path, text, { encoding: "utf8", mode: 384 });
+      chmodSync(path, 384);
+    },
+    devicePath,
+    pluginRoot: resolve(dirname(process.argv[1] ?? "."), "..", "..", ".."),
+    fetch: async (url, init) => await fetch(url, { ...init, redirect: "error" }),
+    now: () => Date.now()
+  }
 });
