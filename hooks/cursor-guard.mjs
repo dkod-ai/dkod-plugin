@@ -29,9 +29,11 @@
 // It only denies or asks. Cursor ignores a hook's "allow" for approvals, so it never answers one;
 // the Cursor allowlist in the dkod skill does that part. Anything it does not know gets no opinion ({}).
 // A file named `off` in its state folder turns the session gate off; everything else stays.
+// The session gate is off too in a chat whose Cursor tool list has no dkod session tool (signed out,
+// disconnected): it cannot open a session, so the gate would only leave the builder stuck.
 //
 // Never logs a command: the upload command carries a one-use upload link.
-import { accessSync, closeSync, constants as fsConstants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, closeSync, constants as fsConstants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -195,6 +197,37 @@ function noteChat(conversationId, field) {
 
 const isDkodChat = (conversationId) => Boolean(conversationId && readState()[conversationId]);
 const gateOff = () => existsSync(join(STATE_DIR, "off"));
+
+/**
+ * 2026-11-05 (OBS): Can this chat call dkoder_session_start at all? Cursor writes the MCP tools a chat
+ * has into <project>/mcps/<server>/tools/*.json, next to <project>/agent-transcripts. A signed-out or
+ * disconnected dkod server has no such tool (STATUS.md says it needs auth, or the folder is gone), and
+ * the session gate then left the builder stuck: every write denied, and no tool to open a session.
+ * false only when Cursor's own list shows dkod cannot start a session; null when the list is not found.
+ */
+function dkodToolsHere(transcriptPath) {
+  const path = String(transcriptPath ?? "");
+  const cut = path.lastIndexOf("/agent-transcripts/");
+  if (cut <= 0) return null;
+  const mcps = join(path.slice(0, cut), "mcps");
+  let servers;
+  try {
+    servers = readdirSync(mcps);
+  } catch {
+    return null;
+  }
+  for (const name of servers) {
+    let dkod = /(^|-)dkod$/.test(name);
+    if (!dkod) {
+      try { dkod = JSON.parse(readFileSync(join(mcps, name, "SERVER_METADATA.json"), "utf8"))?.serverName === "dkod"; } catch { /* not a server folder */ }
+    }
+    if (dkod && !existsSync(join(mcps, name, "STATUS.md")) && existsSync(join(mcps, name, "tools", "dkoder_session_start.json"))) return true;
+  }
+  return false;
+}
+
+/** The session gate applies: not turned off, and the chat can open a DKOD session. */
+const gateOn = (input) => !gateOff() && dkodToolsHere(input?.transcript_path) !== false;
 
 /**
  * What the chat's transcript says: how many questions the agent asked (Cursor's AskQuestion tool),
@@ -1064,7 +1097,7 @@ if (event === "sessionStart") out({ additional_context: signalsDue() ? `${FIRST_
 
 if (event === "preToolUse") {
   const tool = String(input.tool_name ?? "");
-  if (!isDkodChat(chat) && !gateOff() && WRITES.test(tool)) {
+  if (!isDkodChat(chat) && WRITES.test(tool) && gateOn(input)) {
     out({ permission: "deny", user_message: "DKOD: start a DKOD session first. The agent is told how.", agent_message: FIRST_DENY });
   }
   {
@@ -1146,7 +1179,7 @@ if (event === "preToolUse") {
     if (original !== null && !readOnly(command) && touchesOriginal(join(found.folder, ".dkod"), dir, command, join(found.folder, ".dkod", "map"))) {
       out({ permission: "deny", user_message: "DKOD: the original app is read only while a migration is open.", agent_message: recordDeny() });
     }
-    if (!isDkodChat(chat) && !gateOff() && !readOnly(command)) out({ permission: "deny", user_message: "DKOD: start a DKOD session first. The agent is told how.", agent_message: FIRST_DENY });
+    if (!isDkodChat(chat) && !readOnly(command) && gateOn(input)) out({ permission: "deny", user_message: "DKOD: start a DKOD session first. The agent is told how.", agent_message: FIRST_DENY });
   }
   out({});
 }
@@ -1180,7 +1213,8 @@ if (event === "stop") {
     const facts = transcriptFacts(input.transcript_path);
     // 2026-11-02: the agent asked, the builder skipped, and the agent went on or stopped without asking again.
     if (loops === 0 && facts.askedThisTurn && /\bskip/i.test(facts.lastText) && !asksBuilder(facts.lastText)) out({ followup_message: ASK_AGAIN });
-    if (loops < KEEP_LIMIT && migrationAt(root) !== null && !asksBuilder(facts.lastText)) out({ followup_message: KEEP_GOING });
+    // With no dkod tools (signed out), the migration cannot go on, so no nudge.
+    if (loops < KEEP_LIMIT && migrationAt(root) !== null && !asksBuilder(facts.lastText) && dkodToolsHere(input.transcript_path) !== false) out({ followup_message: KEEP_GOING });
     // The agent passed over the setup that sessionStart asked for. Ask once in this chat, and never over a question to the builder.
     if (loops === 0 && !rec.signalsAskedAt && !asksBuilder(facts.lastText) && signalsDue()) {
       noteChat(chat, "signalsAskedAt");
@@ -1280,7 +1314,7 @@ if (event === "beforeShellExecution" || (event === "" && "command" in input)) {
     if (gitSetup(command)) out({ permission: "deny", user_message: "DKOD blocked git setup for this app: DKOD makes the repository itself.", agent_message: NO_GIT });
     out({});
   }
-  if (event !== "" && !gateOff() && !readOnly(command)) {
+  if (event !== "" && !readOnly(command) && gateOn(input)) {
     out({ permission: "deny", user_message: "DKOD: start a DKOD session first. The agent is told how.", agent_message: FIRST_DENY });
   }
   out({});
