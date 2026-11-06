@@ -68,9 +68,10 @@ Every file the original reads or serves must be in the dk- app: images, JSON, te
 
 1. Build it with its build script, and run the template's required checks.
 2. Run every command the folder's CI workflow runs (read `.github/workflows/` in the `folder`: install, typecheck, lint, tests, build), exactly as written there, with no `.env.local` value it would not have. CI must pass the first time. When a test fails, run the same test in the original folder: when it fails there too, it was broken before the migration. Skip only that test (`test.skip`, with the comment `// failed on the original before the migration`), tell the builder its name in the final reply, and never change what it checks. Fix every other failure in the dk- app's code.
-3. Run `node <migrate> check-build <folder>`. It checks the template files, the lock file, `.gitignore`, that the data was imported, and the org's policy. It prints `"ok":true` or the problems. In a resumed migration whose `done.data_in_dev` is true, run `node <migrate> check-build <folder> --data-in-dev` instead: the data is already in Dev.
-4. Run the dkod skill's policy checks on the `folder` only (never on the original).
-5. Fix what any of them names and run them again, until all pass.
+3. With the build done and the Dev database helper still running (step 4.2), run `node <migrate> memory <folder>`. It starts the built app itself (its start script, a free port, its `.env.local`), loads its pages and files, measures the memory of the app's processes, stops the app, and writes `<folder>/.dkod/memory.json` (keep it; it is committed with the code). The deploy sizes the app's memory request and limit from it, so the pod is not stopped for lack of memory. On `"ok":false` because there is no start script, go on. On any other `"ok":false`, fix what it names (the app must start with its start script) and run it again.
+4. Run `node <migrate> check-build <folder>`. It checks the template files, the lock file, `.gitignore`, that the data was imported, and the org's policy. It prints `"ok":true` or the problems. In a resumed migration whose `done.data_in_dev` is true, run `node <migrate> check-build <folder> --data-in-dev` instead: the data is already in Dev.
+5. Run the dkod skill's policy checks on the `folder` only (never on the original).
+6. Fix what any of them names and run them again, until all pass.
 
 ### 6. Deploy
 
