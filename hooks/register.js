@@ -1067,7 +1067,10 @@ function hasHost(text, host) {
 }
 function envValueIsLocal(value) {
   const text = value.toLowerCase();
-  return hasHost(text, "localhost") || hasHost(text, "host.docker.internal") || hasHost(text, "127.0.0.1") || text.includes("[::1]") || text.trim() === "::1";
+  return isHomePath(value.trim()) || hasHost(text, "localhost") || hasHost(text, "host.docker.internal") || hasHost(text, "127.0.0.1") || text.includes("[::1]") || text.trim() === "::1";
+}
+function isHomePath(value) {
+  return /^(?:\/Users\/|\/home\/|~\/|[A-Za-z]:[\\/]Users[\\/])/.test(value);
 }
 function envValueHasReference(entry) {
   if (entry.quote === "single")
@@ -1518,7 +1521,7 @@ function planEnvImport({ entries, rows, sealed, usesOrg, settled, given, room })
   for (const entry of entries) {
     if (shown.has(entry.name))
       continue;
-    if (given(entry.name))
+    if (given(entry.name) || DKOD_PROVIDED.has(entry.name))
       plan.given.push(entry.name);
     else if (!isRuntimeSecretName(entry.name))
       plan.unusable += 1;
