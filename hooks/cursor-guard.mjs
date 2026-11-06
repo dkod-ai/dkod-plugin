@@ -154,8 +154,8 @@ const SWITCH_SKIPPED =
 
 const CHECK_FIRST = [
   "DKOD: files changed in this chat after the org's policy checks last ran. Before you finish, run them on the app's folder",
-  `as the dkod skill's "Policy checks" says (${SKILL}): write the answer of dkoder_policy to a temp file and run`,
-  "node <scripts>/dkod-policy.mjs check <that file> <the app's folder>. Fix every block finding, tell the user each warn finding, then finish.",
+  `as the dkod skill's "Policy checks" says (${SKILL}): call dkoder_policy, then run`,
+  "node <scripts>/dkod-policy.mjs check --saved <the app's folder>. Fix every block finding, tell the user each warn finding, then finish.",
 ].join(" ");
 
 function out(answer) {
@@ -1224,9 +1224,47 @@ if (event === "stop") {
   out({});
 }
 
+/** DKO-1549: the answer object of a dkoder.policy result (Cursor's result_json, any shape), or null. */
+function policyAnswer(result) {
+  let seen = 0;
+  const find = (v) => {
+    if (++seen > 200) return null;
+    if (typeof v === "string") {
+      if (!v.includes("policy_pack")) return null;
+      try { return find(JSON.parse(v)); } catch { return null; }
+    }
+    if (Array.isArray(v)) {
+      for (const x of v) { const hit = find(x); if (hit) return hit; }
+      return null;
+    }
+    if (v && typeof v === "object") {
+      if (v.isError === true) return null;
+      if (v.policy_pack && typeof v.policy_pack === "object") return v;
+      for (const x of Object.values(v)) { const hit = find(x); if (hit) return hit; }
+    }
+    return null;
+  };
+  return find(result);
+}
+
+function savePolicy(result) {
+  const answer = policyAnswer(result);
+  if (answer === null) return;
+  try {
+    const dir = join(homedir(), ".dkod", "policy");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "last.json"), JSON.stringify({ savedAt: Date.now(), answer }), { mode: 0o600 });
+  } catch {
+    // The skill's fallback (the Write tool) still works.
+  }
+}
+
 if (event === "afterMCPExecution") {
   const tool = String(input.tool_name ?? "").replace(/_/g, ".");
   const result = String(input.result_json ?? "");
+  // DKO-1549: keep the answer of dkoder.policy, so `dkod-policy.mjs check --saved` reads it. The agent never
+  // copies that JSON into a shell command: a quote in it broke the command and Guard refused it.
+  if (tool === "dkoder.policy") savePolicy(result);
   // The mark from before the call is taken back when the call did not open a session.
   if (tool === "dkoder.session.start" && chat && (/"isError"\s*:\s*true/.test(result) || !/\\?"id\\?"\s*:/.test(result))) {
     const all = readState();

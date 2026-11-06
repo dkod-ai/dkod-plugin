@@ -1,6 +1,7 @@
 // Built by packages/dkoder-plugin/scripts/build-policy.ts from dkod-app. Do not edit: run `bun run --cwd packages/dkoder-plugin build:policy`.
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 var STUBS = new Set(["git", "python3"]);
@@ -1306,7 +1307,10 @@ async function listWithShell(run, dir) {
 }
 
 var absolutePath = (cwd, path) => path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path) ? path : `${cwd.replace(/[\\/]+$/, "")}/${path}`;
-var USAGE = "Usage: node dkod-policy.mjs check <policy file> [folder]";
+var USAGE = "Usage: node dkod-policy.mjs check --saved [folder], or node dkod-policy.mjs check <policy file> [folder]";
+var SAVED_POLICY = [".dkod", "policy", "last.json"];
+var SAVED_POLICY_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+var NO_SAVED = "No saved answer of dkoder.policy from the last 12 hours on this computer. Call dkoder.policy, then run this command again. If it still says this, write the answer with the Write tool (never node -e, echo or a heredoc) to a file in the run's scratch folder, and run: node dkod-policy.mjs check <that file> <the app's folder>.";
 async function runPolicyCli(argv, io) {
   const [command, policyFile, folder, ...rest] = argv;
   if (command !== "check" || !policyFile || rest.length > 0) {
@@ -1314,12 +1318,27 @@ async function runPolicyCli(argv, io) {
     return 2;
   }
   let raw;
-  try {
-    raw = JSON.parse(io.read(policyFile));
-  } catch {
-    io.print(JSON.stringify({ ok: false, error: "policy_unreadable", message: "The policy file is not the JSON answer of dkoder.policy. Call dkoder.policy, save its answer as it is, and try again." }));
-    return 1;
-  }
+  if (policyFile === "--saved") {
+    let saved = null;
+    try {
+      saved = io.savedPath ? JSON.parse(io.read(io.savedPath)) : null;
+    } catch {
+      saved = null;
+    }
+    const at = typeof saved?.savedAt === "number" ? saved.savedAt : NaN;
+    const now = (io.now ?? Date.now)();
+    if (!saved || typeof saved.answer !== "object" || saved.answer === null || !(now - at <= SAVED_POLICY_MAX_AGE_MS)) {
+      io.print(JSON.stringify({ ok: false, error: "no_saved_policy", message: NO_SAVED }));
+      return 1;
+    }
+    raw = saved.answer;
+  } else
+    try {
+      raw = JSON.parse(io.read(policyFile));
+    } catch {
+      io.print(JSON.stringify({ ok: false, error: "policy_unreadable", message: "The policy file is not the JSON answer of dkoder.policy. Call dkoder.policy, save its answer as it is, and try again." }));
+      return 1;
+    }
   const dir = absolutePath(io.cwd(), folder ?? ".").replace(/[\\/]+$/, "").replace(/[\\/]\.$/, "");
   const result = await checkFolder(packFromAnswer(raw), dir, { list: (d) => io.list(d), read: async (p) => io.read(p) });
   io.print(JSON.stringify(result));
@@ -1360,6 +1379,7 @@ var known = new Map;
 var run = (argv, init) => runReal(host, argv, init, known);
 process.exitCode = await runPolicyCli(process.argv.slice(2), {
   read: (path) => readFileSync(path, "utf8"),
+  savedPath: join(homedir(), ...SAVED_POLICY),
   list: async (dir) => await listWithShell(run, dir) ?? walk(dir),
   cwd: () => process.cwd(),
   print: (line) => process.stdout.write(`${line}
