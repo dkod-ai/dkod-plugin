@@ -2292,6 +2292,10 @@ async function runImport(flags, io, cwd) {
     try {
       rec = JSON.parse(io.readFile(from === "snapshot" ? snapshotFile : /^([/\\]|[a-z]:[/\\])/i.test(from) ? from : join3(dir, from)) ?? "null");
     } catch {}
+    if (from === "snapshot" && rec === null) {
+      say("There is no .dkod/snapshot.json in this folder: something deleted it (a copy that deletes, such as `rsync --delete`). Run `node <dkod-migrate scripts>/dkod-migrate.mjs snapshot <this folder>` again, then import again. Never import from the original's live database instead.");
+      return 2;
+    }
     const r = rec;
     const dbs = r && r.mode === "snapshot" && Array.isArray(r.databases) ? r.databases : [];
     const pg = dbs.find((d) => typeof d.url === "string" && /^postgres(ql)?:\/\//i.test(d.url));
