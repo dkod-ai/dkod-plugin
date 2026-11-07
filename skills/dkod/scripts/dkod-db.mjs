@@ -1088,7 +1088,7 @@ var RENEW_BEFORE_MS = 5 * 60000;
 var RENEW_MIN_MS = 30000;
 var RETRY_STEPS_MS = [30000, 60000, 120000, 300000];
 var FLAGS = {
-  up: ["app", "port", "files-port", "dir", "gateway", "config", "wait", "code", "dashboard"],
+  up: ["app", "port", "files-port", "dir", "gateway", "config", "wait", "code", "dashboard", "org"],
   files: ["from", "prefix", "dir"],
   down: ["dir"],
   migrate: ["dir", "port"],
@@ -1118,7 +1118,7 @@ function parseArgs(argv) {
 }
 var USAGE = [
   "Usage:",
-  "  node dkod-db.mjs up --app <app key> [--port 6543] [--files-port <port + 1>] [--dir <app folder>] [--wait <seconds>] [--detach]",
+  "  node dkod-db.mjs up --app <app key> [--org <org_id>] [--port 6543] [--files-port <port + 1>] [--dir <app folder>] [--wait <seconds>] [--detach]",
   "  node dkod-db.mjs files --from <folder> [--prefix media/] [--dir <app folder>] [--jobs 32]   (while `up` runs)",
   "  node dkod-db.mjs down [--dir <app folder>] [--all]",
   "  node dkod-db.mjs migrate [--dir <app folder>] [--port 6543]",
@@ -1183,18 +1183,38 @@ function readDeviceFile(path, readFile) {
     const dashboardUrl = trustedDashboard(d.dashboardUrl);
     if (!dashboardUrl || typeof d.token !== "string" || !d.token || typeof d.refresh !== "string" || !d.refresh || typeof d.expiresAt !== "number")
       return null;
-    return { dashboardUrl, token: d.token, refresh: d.refresh, expiresAt: d.expiresAt };
+    return { dashboardUrl, token: d.token, refresh: d.refresh, expiresAt: d.expiresAt, ...typeof d.org === "string" && ORG_ID.test(d.org) ? { org: d.org } : {} };
   } catch {
     return null;
   }
 }
+var ORG_ID = /^[A-Za-z0-9_-]{1,64}$/;
+var orgDevicePath = (devicePath, org) => devicePath.replace(/device\.json$/, `device-${org}.json`);
 function saveDevice(io, creds) {
   const path = io.devicePath?.();
   if (!path)
     return;
-  const text = JSON.stringify({ dashboardUrl: creds.dashboardUrl, token: creds.token, refresh: creds.refresh, expiresAt: creds.expiresAt });
-  (io.writePrivate ?? io.writeFile)(path, text);
+  const text = JSON.stringify({ dashboardUrl: creds.dashboardUrl, token: creds.token, refresh: creds.refresh, expiresAt: creds.expiresAt, ...creds.org ? { org: creds.org } : {} });
+  const write = io.writePrivate ?? io.writeFile;
+  write(path, text);
+  if (creds.org && ORG_ID.test(creds.org))
+    write(orgDevicePath(path, creds.org), text);
 }
+function wantedOrg(flags, dir, readFile) {
+  const flag = flags.get("org");
+  if (flag !== undefined)
+    return ORG_ID.test(flag) ? flag : { error: "--org takes the org_id that dkoder.devdb.status gave." };
+  const text = readFile(join3(dir, ".dkod/org.json"));
+  if (text === null)
+    return null;
+  try {
+    const org = JSON.parse(text)?.org;
+    return typeof org === "string" && ORG_ID.test(org) ? org : null;
+  } catch {
+    return null;
+  }
+}
+var wrongOrg = (have, want) => `This computer's dkod-db helper is signed in to another DKOD organization (${have}) than this app's session (${want}), so it would open that organization's Dev database. Call the DKOD tool dkoder.devdb.connect in this session, then run this same command again at once with --code <code> --dashboard <dashboard_url> from its answer.`;
 function dashboardFor(flag, io) {
   if (flag !== undefined)
     return trustedDashboard(flag);
@@ -1211,11 +1231,12 @@ function dashboardFor(flag, io) {
   }
   return "https://dashboard.dkod.app";
 }
-var pairOf = (dashboardUrl, body) => {
+var pairOf = (dashboardUrl, body, org) => {
   const expiresAt = typeof body.expires_at === "string" ? Date.parse(body.expires_at) : NaN;
   if (typeof body.token !== "string" || !body.token || typeof body.refresh !== "string" || !body.refresh || Number.isNaN(expiresAt))
     return null;
-  return { dashboardUrl, token: body.token, refresh: body.refresh, expiresAt };
+  const said = typeof body.org === "string" && ORG_ID.test(body.org) ? body.org : org;
+  return { dashboardUrl, token: body.token, refresh: body.refresh, expiresAt, ...said ? { org: said } : {} };
 };
 var CODE_GONE = "The connect code was refused: it works once, for 60 seconds. Call dkoder.devdb.connect again and run this at once with the new code.";
 async function connectWithCode(code, dashboardUrl, io) {
@@ -1255,7 +1276,7 @@ async function freshCredentials(creds, io) {
   try {
     body = JSON.parse(await res.text());
   } catch {}
-  const next = res.status === 201 || res.status === 200 ? pairOf(creds.dashboardUrl, body) : null;
+  const next = res.status === 201 || res.status === 200 ? pairOf(creds.dashboardUrl, body, creds.org) : null;
   if (!next)
     throw new TokenError("unavailable", "DKOD could not renew this computer's helper token right now. Try again in a minute.");
   saveDevice(io, next);
@@ -1298,7 +1319,7 @@ async function fetchDbToken(creds, app, io) {
   if (res.status !== 200 || typeof body.token !== "string" || !body.token || Number.isNaN(expiresAt)) {
     throw new TokenError("unavailable", "DKOD could not make a token right now. Try again in a minute.");
   }
-  return { token: body.token, expiresAt, gatewayUrl: typeof body.gateway_url === "string" ? body.gateway_url : null };
+  return { token: body.token, expiresAt, gatewayUrl: typeof body.gateway_url === "string" ? body.gateway_url : null, org: typeof body.org === "string" && ORG_ID.test(body.org) ? body.org : null };
 }
 var pgMessage = (type, body) => {
   const head = Buffer.alloc(5);
@@ -1453,6 +1474,9 @@ async function startUp(flags, io, cwd) {
   const refusal = originalFolderRefusal(dir, cwd, io.readFile);
   if (refusal)
     return fail(2, refusal);
+  const wanted = wantedOrg(flags, resolvePath(cwd, dir), io.readFile);
+  if (wanted !== null && typeof wanted === "object")
+    return fail(2, wanted.error);
   let creds;
   const code = flags.get("code");
   if (code !== undefined) {
@@ -1464,11 +1488,15 @@ async function startUp(flags, io, cwd) {
       return fail(2, got);
     creds = got;
   } else {
-    const found = resolveCredentials(io.env, flags.get("config"), io.readFile, io.pluginRoot, io.devicePath?.());
+    const devicePath = io.devicePath?.();
+    const own = wanted && devicePath ? readDeviceFile(orgDevicePath(devicePath, wanted), io.readFile) : null;
+    const found = own ?? resolveCredentials(io.env, flags.get("config"), io.readFile, io.pluginRoot, devicePath);
     if (!found)
       return fail(2, NO_DEVICE);
     creds = found;
   }
+  if (wanted && creds.org && creds.org !== wanted)
+    return fail(2, wrongOrg(creds.org, wanted));
   const dbToken = async () => {
     creds = await freshCredentials(creds, io);
     return await fetchDbToken(creds, app, io);
@@ -1478,6 +1506,14 @@ async function startUp(flags, io, cwd) {
     issued = await dbToken();
   } catch (error) {
     return fail(error instanceof TokenError && error.kind === "unavailable" ? 1 : 2, error instanceof Error ? error.message : "Could not get a token.");
+  }
+  if (wanted && issued.org && issued.org !== wanted)
+    return fail(2, wrongOrg(issued.org, wanted));
+  if (wanted) {
+    try {
+      io.writeFile(join3(resolvePath(cwd, dir), ".dkod/org.json"), `${JSON.stringify({ org: wanted })}
+`);
+    } catch {}
   }
   const gatewayBase = flags.get("gateway") ?? issued.gatewayUrl;
   if (!gatewayBase)
@@ -1731,6 +1767,9 @@ async function startUp(flags, io, cwd) {
   if (!gitignoreCoversEnvLocal(io.readFile(join3(dir, ".gitignore"))))
     io.print("dkod-db: warning: .gitignore does not ignore .env.local. Add it so it is never committed.");
   io.print(`dkod-db: ${app} Dev database on 127.0.0.1:${actualPort} (DATABASE_URL in .env.local)`);
+  const orgSaid = issued.org ?? creds.org;
+  if (orgSaid)
+    io.print(`dkod-db: DKOD organization ${orgSaid}`);
   io.print(`dkod-db: ${app} dev files bucket on http://127.0.0.1:${files.port} (DKOD_FILES_URL in .env.local)`);
   return {
     handle: {

@@ -675,7 +675,7 @@ var PENDING_CAP = 1 << 20;
 var RENEW_BEFORE_MS = 5 * 60000;
 var USAGE = [
   "Usage:",
-  "  node dkod-db.mjs up --app <app key> [--port 6543] [--files-port <port + 1>] [--dir <app folder>] [--wait <seconds>] [--detach]",
+  "  node dkod-db.mjs up --app <app key> [--org <org_id>] [--port 6543] [--files-port <port + 1>] [--dir <app folder>] [--wait <seconds>] [--detach]",
   "  node dkod-db.mjs files --from <folder> [--prefix media/] [--dir <app folder>] [--jobs 32]   (while `up` runs)",
   "  node dkod-db.mjs down [--dir <app folder>] [--all]",
   "  node dkod-db.mjs migrate [--dir <app folder>] [--port 6543]",
@@ -727,17 +727,22 @@ function readDeviceFile(path, readFile) {
     const dashboardUrl = trustedDashboard(d.dashboardUrl);
     if (!dashboardUrl || typeof d.token !== "string" || !d.token || typeof d.refresh !== "string" || !d.refresh || typeof d.expiresAt !== "number")
       return null;
-    return { dashboardUrl, token: d.token, refresh: d.refresh, expiresAt: d.expiresAt };
+    return { dashboardUrl, token: d.token, refresh: d.refresh, expiresAt: d.expiresAt, ...typeof d.org === "string" && ORG_ID.test(d.org) ? { org: d.org } : {} };
   } catch {
     return null;
   }
 }
+var ORG_ID = /^[A-Za-z0-9_-]{1,64}$/;
+var orgDevicePath = (devicePath, org) => devicePath.replace(/device\.json$/, `device-${org}.json`);
 function saveDevice(io, creds) {
   const path = io.devicePath?.();
   if (!path)
     return;
-  const text = JSON.stringify({ dashboardUrl: creds.dashboardUrl, token: creds.token, refresh: creds.refresh, expiresAt: creds.expiresAt });
-  (io.writePrivate ?? io.writeFile)(path, text);
+  const text = JSON.stringify({ dashboardUrl: creds.dashboardUrl, token: creds.token, refresh: creds.refresh, expiresAt: creds.expiresAt, ...creds.org ? { org: creds.org } : {} });
+  const write = io.writePrivate ?? io.writeFile;
+  write(path, text);
+  if (creds.org && ORG_ID.test(creds.org))
+    write(orgDevicePath(path, creds.org), text);
 }
 function dashboardFor(flag, io) {
   if (flag !== undefined)
@@ -755,11 +760,12 @@ function dashboardFor(flag, io) {
   }
   return "https://dashboard.dkod.app";
 }
-var pairOf = (dashboardUrl, body) => {
+var pairOf = (dashboardUrl, body, org) => {
   const expiresAt = typeof body.expires_at === "string" ? Date.parse(body.expires_at) : NaN;
   if (typeof body.token !== "string" || !body.token || typeof body.refresh !== "string" || !body.refresh || Number.isNaN(expiresAt))
     return null;
-  return { dashboardUrl, token: body.token, refresh: body.refresh, expiresAt };
+  const said = typeof body.org === "string" && ORG_ID.test(body.org) ? body.org : org;
+  return { dashboardUrl, token: body.token, refresh: body.refresh, expiresAt, ...said ? { org: said } : {} };
 };
 var CODE_GONE = "The connect code was refused: it works once, for 60 seconds. Call dkoder.devdb.connect again and run this at once with the new code.";
 async function connectWithCode(code, dashboardUrl, io) {
@@ -799,7 +805,7 @@ async function freshCredentials(creds, io) {
   try {
     body = JSON.parse(await res.text());
   } catch {}
-  const next = res.status === 201 || res.status === 200 ? pairOf(creds.dashboardUrl, body) : null;
+  const next = res.status === 201 || res.status === 200 ? pairOf(creds.dashboardUrl, body, creds.org) : null;
   if (!next)
     throw new TokenError("unavailable", "DKOD could not renew this computer's helper token right now. Try again in a minute.");
   saveDevice(io, next);
