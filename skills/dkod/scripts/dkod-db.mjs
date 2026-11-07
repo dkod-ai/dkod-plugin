@@ -1836,10 +1836,14 @@ ${result.stderr}`.split(`
 `).filter((l) => APPLIED.test(l)).length;
   say(`${tool.name} finished with exit status ${result.status}; ${applied} line${applied === 1 ? "" : "s"} look like applied migrations.`);
   if (result.status !== 0) {
-    const tail = result.stderr.trim().split(`
-`).slice(-20);
+    const plain = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+    const tail = plain(`${result.stdout}
+${result.stderr}`).split(`
+`).filter((l) => l.trim() !== "").slice(-20);
     for (const l of tail)
       io.print(l);
+    if (!tail.some((l) => /error|exception|fail|refused|denied/i.test(l)))
+      say(`${tool.name} gave no reason. It gives none when it cannot reach the database: run \`node dkod-db.mjs up --app <app key>\` again and wait until it prints \`ready\`, then run migrate again.`);
   }
   return result.status === 0 ? 0 : 1;
 }
