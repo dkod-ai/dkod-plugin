@@ -744,6 +744,7 @@ function saveDevice(io, creds) {
   if (creds.org && ORG_ID.test(creds.org))
     write(orgDevicePath(path, creds.org), text);
 }
+var wrongOrg = (have, want) => `This computer's dkod-db helper is signed in to another DKOD organization (${have}) than this app's session (${want}), so it would open that organization's Dev database. Call the DKOD tool dkoder.devdb.connect in this session, then run this same command again at once with --code <code> --dashboard <dashboard_url> from its answer.`;
 function dashboardFor(flag, io) {
   if (flag !== undefined)
     return trustedDashboard(flag);
@@ -903,7 +904,7 @@ async function sealFromEnv(envText, targetText, addOthers, fetchText = nodeFetch
     return refuse("seal_failed", "The certificate in the target file does not match cert.fingerprint, so nothing was sealed. It was most likely changed when the file was written. Call dkoder.secrets.target again and write its answer to the file again, leaving out cert.pem: this script gets it from cert.url.");
   }
 }
-var USAGE2 = "Usage: node dkod-secrets.mjs seal <.env file> <target file> [--others] [--send --session <sessionId> --app <appKey> [--code <code> --dashboard <url>]]";
+var USAGE2 = "Usage: node dkod-secrets.mjs seal <.env file> <target file> [--others] [--send --session <sessionId> --app <appKey> [--org <org_id>] [--code <code> --dashboard <url>]]";
 var APP_KEY = /^[a-z0-9][a-z0-9-]{0,62}$/;
 var SESSION_ID = /^[A-Za-z0-9_-]{8,128}$/;
 function toolAnswer(text) {
@@ -940,10 +941,14 @@ async function sendSealed(save, sessionId, appKey, flags, io) {
       return { ok: false, error: "no_device", message: got };
     creds = got;
   } else {
-    creds = resolveCredentials(io.env, undefined, io.readFile, io.pluginRoot, io.devicePath?.());
+    const devicePath = io.devicePath?.();
+    const own = flags.org && devicePath ? readDeviceFile(orgDevicePath(devicePath, flags.org), io.readFile) : null;
+    creds = own ?? resolveCredentials(io.env, undefined, io.readFile, io.pluginRoot, devicePath);
   }
   if (creds === null)
     return { ok: false, error: "no_device", message: NO_DEVICE };
+  if (flags.org && creds.org && creds.org !== flags.org)
+    return { ok: false, error: "no_device", message: wrongOrg(creds.org, flags.org) };
   try {
     creds = await freshCredentials(creds, dbIo);
   } catch (error) {
@@ -967,6 +972,8 @@ async function sendSealed(save, sessionId, appKey, flags, io) {
   }
   if (res.status === 401)
     return { ok: false, error: "no_device", message: `DKOD did not accept this computer's helper token. ${NO_DEVICE}` };
+  if (res.status === 404)
+    return { ok: false, error: "no_device", message: `DKOD did not find this session for this computer's helper login, which can be another DKOD organization's. Call the DKOD tool dkoder.devdb.connect in this session, then run this same command again at once with --code <code> --dashboard <dashboard_url> from its answer.` };
   const answer = res.status === 200 ? toolAnswer(await res.text()) : null;
   if (answer === null)
     return { ok: false, error: "unavailable", message: "DKOD could not save the secrets right now. Run this again in a minute." };
@@ -976,7 +983,7 @@ async function sendSealed(save, sessionId, appKey, flags, io) {
   const names = (v) => Array.isArray(v) ? v.filter((n) => typeof n === "string") : [];
   return { ok: true, saved: names(b.saved), has: names(b.has) };
 }
-var VALUE_FLAGS = new Set(["--session", "--app", "--code", "--dashboard"]);
+var VALUE_FLAGS = new Set(["--session", "--app", "--code", "--dashboard", "--org"]);
 async function runSecretsCli(argv, io) {
   const [command, envFile, targetFile, ...rest] = argv;
   const flags = new Set;
@@ -1035,7 +1042,12 @@ async function runSecretsCli(argv, io) {
     io.print(JSON.stringify({ ...report, sent: false, next: "No name was filled, so nothing was saved." }));
     return 0;
   }
-  const sent = await sendSealed(save, session, app, { code: values.get("--code"), dashboard: values.get("--dashboard") }, io.send);
+  const org = values.get("--org");
+  if (org !== undefined && !ORG_ID.test(org)) {
+    io.print(JSON.stringify({ ...report, sent: false, error: "usage", message: "--org takes the org_id that dkoder.devdb.status gave." }));
+    return 2;
+  }
+  const sent = await sendSealed(save, session, app, { code: values.get("--code"), dashboard: values.get("--dashboard"), org }, io.send);
   if (!sent.ok) {
     io.print(JSON.stringify({ ...report, ok: false, sent: false, error: sent.error, message: sent.message }));
     return 1;
