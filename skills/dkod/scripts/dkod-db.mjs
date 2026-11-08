@@ -2575,6 +2575,10 @@ ${inOrder.map(hashSql).join(`
       differing.push(t.name);
   });
   if (differing.length > 0) {
+    const others = await psql(devUrl, devEnv, ["-c", "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()"]);
+    const count = others.status === 0 ? Number.parseInt(others.stdout.trim(), 10) : 0;
+    if (Number.isFinite(count) && count > 0)
+      say(`Dev has ${count} other open ${count === 1 ? "connection" : "connections"} now: another program on this computer (an older copy of the app, a dev server or a worker) can write into Dev through port ${port}, and the rows below can be its rows, not the migrations'. Find it with \`lsof -nP -iTCP:${port} -sTCP:ESTABLISHED\`, stop it, then drop and remake Dev, run db:migrate and import again.`);
     for (const n of differing)
       say(`Dev table ${n} already has rows that differ from the original's: the dk- app's own migrations insert rows in ${n} that differ from the original's. Change those migrations to insert exactly the original's rows (or none), then drop and remake Dev, run db:migrate and import again. Never delete or edit Dev rows by hand; import never overwrites.`);
     const refused = inOrder.map((t, i) => ({ name: t.name, source: expected[i], dev: before[i], match: before[i].rows === expected[i].rows && before[i].md5 === expected[i].md5 }));
