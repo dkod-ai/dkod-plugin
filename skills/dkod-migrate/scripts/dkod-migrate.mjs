@@ -3140,6 +3140,12 @@ function importMissing(dir, io, dataInDev = false) {
     return [".dkod/snapshot.json: missing. Run `dkod-migrate.mjs snapshot` first."];
   if (rec.mode !== "snapshot" || rec.imported === true)
     return [];
+  const databases = Array.isArray(rec.databases) ? rec.databases : [];
+  const bases = Array.isArray(rec.bases) ? rec.bases : [];
+  const flatOnly = databases.length === 0 && bases.length > 0 && bases.every((b) => isRec5(b) && (b.kind === "json" || b.kind === "csv"));
+  const tool = ["drizzle.config.ts", "drizzle.config.js", "drizzle.config.mjs", "alembic.ini"].some((f) => io.readFile(join6(dir, f)) !== null);
+  if (flatOnly && !tool)
+    return [];
   return ["the original's data is not in Dev yet: run `dkod-db.mjs import --app <key> --from snapshot --dir <folder>` after db:migrate."];
 }
 async function checkBuild(folder, reportFile, io, opts = {}) {
