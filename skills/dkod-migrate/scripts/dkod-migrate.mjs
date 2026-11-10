@@ -1760,8 +1760,11 @@ async function render2(args, io) {
   const sampleDir = !isRec2(map) && isRec2(record) && typeof record.original === "string" && record.original !== "" ? join2(templateFile.replace(/[\\/][^\\/]*$/, "") || ".", "template-sample") : null;
   const name = baseName(dir === "." ? io.cwd : dir);
   const rendered = renderTemplateFiles(source, contextFor(source, name, tables, values));
-  if (rendered.errors.length > 0 || rendered.gaps.length > 0)
-    return fail(rendered.errors, rendered.gaps.map((g) => g.path));
+  if (rendered.errors.length > 0 || rendered.gaps.length > 0) {
+    const gaps = rendered.gaps.map((g) => g.path);
+    const hint = gaps.some((g) => g.startsWith("policy.")) ? [`${valuesFile ?? "the values file"}: it has no value for ${gaps.filter((g) => g.startsWith("policy.")).join(", ")}. Copy the \`policy\` object of the dkoder.templates answer into it as "policy", then run render again.`] : [];
+    return fail([...rendered.errors, ...hint], gaps);
+  }
   const errors = [];
   const written = [];
   const skipped = [];
