@@ -1965,6 +1965,16 @@ var sequenceResets = (tables) => {
     }
   return sql;
 };
+var TOOL_TABLE = /^(?:sqlite_.*|_prisma_migrations|__drizzle_migrations|drizzle_migrations|knex_migrations(?:_lock)?|alembic_version|django_migrations|schema_migrations|ar_internal_metadata|SequelizeMeta|typeorm_metadata|migrations|_litestream_.*)$/i;
+function markImported(c) {
+  let record = null;
+  try {
+    record = JSON.parse(c.io.readFile(c.snapshotFile) ?? "null");
+  } catch {}
+  if (record && record.mode === "snapshot")
+    c.io.writeFile(c.snapshotFile, `${JSON.stringify({ ...record, imported: true, imported_tables: record.imported_tables ?? {}, dev_url: c.devUrl }, null, 2)}
+`);
+}
 async function importSqlite(c) {
   const { io, say, dir, app } = c;
   const cannot = (why) => {
@@ -1981,18 +1991,35 @@ async function importSqlite(c) {
       return 1;
     }
   }
-  const mapped = readSqliteMapTables(io.readFile(join3(dir, ".dkod/map/app-map.json")));
-  if (mapped.length === 0) {
-    say("The migration map has no tables to import (.dkod/map/app-map.json).");
-    return 2;
-  }
-  const baseOf = (store) => c.bases.length === 1 ? c.bases[0] : c.bases.find((b) => store !== null && (store === b.rel || b.rel.endsWith(`/${store}`) || store.endsWith(`/${b.rel}`)));
   const schemas = new Map;
   for (const b of c.bases)
     schemas.set(b.rel, await sqliteSchema(io.run, c.baseEnv, b.base, dir));
   for (const s of schemas.values())
     if (!s.ok)
       return cannot(s.missing ? noBinary : `${s.reason}. Run \`dkod-migrate.mjs snapshot\` again.`);
+  const mapped = readSqliteMapTables(io.readFile(join3(dir, ".dkod/map/app-map.json")));
+  const fromFile = mapped.length === 0 && c.light;
+  if (fromFile) {
+    for (const b of c.bases) {
+      const s = schemas.get(b.rel);
+      if (s?.ok) {
+        for (const name of s.value.columns.keys())
+          if (!TOOL_TABLE.test(name) && !mapped.some((m) => m.name === name))
+            mapped.push({ name, store: b.rel });
+      }
+    }
+    if (mapped.length === 0) {
+      say("The original's SQLite file has no tables: there is no data to import.");
+      markImported(c);
+      io.print(JSON.stringify({ ok: true, app, tables: [], already_present: [], imported: true, skipped_tables: [], dropped_columns: {} }));
+      return 0;
+    }
+  }
+  if (mapped.length === 0) {
+    say("The migration map has no tables to import (.dkod/map/app-map.json).");
+    return 2;
+  }
+  const baseOf = (store) => c.bases.length === 1 ? c.bases[0] : c.bases.find((b) => store !== null && (store === b.rel || b.rel.endsWith(`/${store}`) || store.endsWith(`/${b.rel}`)));
   const sourceCols = new Map;
   const edges = [];
   for (const t of mapped) {
@@ -2026,13 +2053,17 @@ async function importSqlite(c) {
   for (const name of present) {
     const have = devCols.get(name);
     if (!have) {
-      say(`Table ${name} is not in the Dev database. Run the app's db:migrate first.`);
+      say(fromFile ? `Table ${name} of the original is not in the Dev database: the app's migrations do not make it. Give the app's schema this table with the same name and the same column names, run \`dkod-db.mjs migrate\`, then import again.` : `Table ${name} is not in the Dev database. Run the app's db:migrate first.`);
       return 2;
     }
     const src = sourceCols.get(name).cols;
     const cols = src.filter((col) => have.has(col));
     if (cols.length === 0) {
       say(`Table ${name} shares no column with the Dev database.`);
+      return 2;
+    }
+    if (fromFile && cols.length < src.length) {
+      say(`Table ${name} in the Dev database lacks columns of the original: ${src.filter((col) => !have.has(col)).join(", ")}. Give the app's schema these columns with the same names, run \`dkod-db.mjs migrate\`, then import again.`);
       return 2;
     }
     if (cols.length < src.length)
@@ -2144,7 +2175,14 @@ function pickFlat(c) {
   const picked = [];
   const skipped = [];
   for (const b of c.bases) {
-    const table = mapped.find((t) => storeHit(t.store, b.rel))?.name ?? mapped.find((t) => t.name === stem(b.rel))?.name ?? (c.bases.length === 1 && mapped.length === 1 ? mapped[0].name : undefined);
+    let table = mapped.find((t) => storeHit(t.store, b.rel))?.name ?? mapped.find((t) => t.name === stem(b.rel))?.name ?? (c.bases.length === 1 && mapped.length === 1 ? mapped[0].name : undefined);
+    if (table === undefined && c.light && mapped.length === 0) {
+      table = stem(b.rel);
+      if (picked.some((p) => p.table === table)) {
+        skipped.push(b.rel);
+        continue;
+      }
+    }
     if (table === undefined) {
       if (b.found?.how === "code" || b.found?.how === "data-folder" || b.found?.how === "env") {
         skipped.push(b.rel);
@@ -2187,6 +2225,10 @@ async function importFlat(c, plan) {
   for (const p of picked) {
     const have = devCols.get(p.table);
     if (!have) {
+      if (c.light) {
+        skipped.push(p.base.rel);
+        continue;
+      }
       say(`Table ${p.table} (for ${p.base.rel}) is not in the Dev database. Run the app's db:migrate first.`);
       return 2;
     }
@@ -2202,6 +2244,12 @@ async function importFlat(c, plan) {
   }
   for (const [n, cols] of Object.entries(droppedColumns))
     say(`warning: ${n} has columns in the original's file that the Dev table lacks, so they were not imported: ${cols.join(", ")}.`);
+  if (tables.length === 0) {
+    say("No data file of the original has a table of its name in the Dev database: the files travel with the app's code, and there are no rows to import.");
+    markImported(c);
+    io.print(JSON.stringify({ ok: true, app, tables: [], already_present: [], imported: true, skipped_tables: skipped, dropped_columns: {} }));
+    return 0;
+  }
   const devHash = await c.psql(c.devUrl, c.devEnv, ["-f", "-"], `${PG_SETTINGS}
 ${tables.map(hashSql).join(`
 `)}
@@ -2427,10 +2475,11 @@ async function runImport(flags, io, cwd) {
   dev.password = "";
   const devUrl = dev.toString();
   const freezeText = io.readFile(join3(dir, ".dkod/parity/freeze.json"));
-  if (freezeText === null && !lightSource) {
+  if (freezeText === null && !lightSource && sqliteBases === null) {
     say("There is no .dkod/parity/freeze.json. Freeze the parity suite (step 3 of the dkod-migrate skill) before the import.");
     return 2;
   }
+  const light = freezeText === null;
   const baseEnv = { ...PG_TIMEOUT };
   for (const name of ["PATH", "HOME", "USER", "USERPROFILE", "TMPDIR", "TEMP", "SystemRoot", "LANG"])
     if (io.env[name] !== undefined)
@@ -2449,7 +2498,11 @@ async function runImport(flags, io, cwd) {
     return 1;
   };
   if (sqliteBases !== null) {
-    const ctx = { app, dir, io, say, baseEnv, devUrl, devEnv, bases: sqliteBases, snapshotFile, psql, failed };
+    if (light && sqliteBases.length > 0 && flatBases.length > 0) {
+      say(`warning: these files were not imported, the app's data is in its SQLite file: ${flatBases.map((b) => b.rel).join(", ")}.`);
+      flatBases = [];
+    }
+    const ctx = { app, dir, io, say, baseEnv, devUrl, devEnv, bases: sqliteBases, light, snapshotFile, psql, failed };
     const flatCtx = { ...ctx, bases: flatBases };
     const plan = flatBases.length > 0 ? pickFlat(flatCtx) : null;
     if (typeof plan === "number")

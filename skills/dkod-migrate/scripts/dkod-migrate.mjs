@@ -1755,7 +1755,9 @@ async function render2(args, io) {
       return fail([`${valuesFile}: not found or not a JSON object.`]);
   }
   const map = json2(io.readFile(join2(dir, ".dkod/map/app-map.json")));
-  const tables = isRec2(map) && Array.isArray(map.tables) && map.tables.length > 0;
+  const tables = isRec2(map) && Array.isArray(map.tables) && map.tables.length > 0 || snapshotHasDatabase(json2(io.readFile(join2(dir, ".dkod/snapshot.json"))));
+  const record = json2(io.readFile(join2(dir, ".dkod/migration.json")));
+  const sampleDir = !isRec2(map) && isRec2(record) && typeof record.original === "string" && record.original !== "" ? join2(templateFile.replace(/[\\/][^\\/]*$/, "") || ".", "template-sample") : null;
   const name = baseName(dir === "." ? io.cwd : dir);
   const rendered = renderTemplateFiles(source, contextFor(source, name, tables, values));
   if (rendered.errors.length > 0 || rendered.gaps.length > 0)
@@ -1771,7 +1773,13 @@ async function render2(args, io) {
   }
   if (errors.length > 0)
     return fail(errors);
+  const sample = [];
   for (const file of todo) {
+    if (sampleDir !== null && !isAppFolderFile(file.path)) {
+      io.writeFile(join2(sampleDir, file.path), file.content);
+      sample.push(file.path);
+      continue;
+    }
     const path = join2(dir, file.path);
     if (!force && io.readFile(path) !== null) {
       skipped.push(file.path);
@@ -1786,8 +1794,23 @@ async function render2(args, io) {
       infra[file.path] = renderedHash(file.content);
   io.writeFile(join2(dir, RENDERED_FILE), `${JSON.stringify({ files: infra }, null, 2)}
 `);
-  io.print(JSON.stringify({ ok: true, written, skipped, gaps: [], errors: [] }));
+  io.print(JSON.stringify({
+    ok: true,
+    written,
+    skipped,
+    gaps: [],
+    errors: [],
+    ...sampleDir !== null ? { sample: { folder: sampleDir, files: sample, note: "The template's sample app was not written into the folder: the app keeps its own code and its own framework. Read these files for the wiring the template's CI and Dockerfile expect (the scripts in package.json, the probes, the JSON logs, the database client), and add only that to the app's code." } } : {}
+  }));
   return 0;
+}
+var isAppFolderFile = (path) => isTemplateInfraPath(path) || path === ".gitignore" || /^drizzle\.config\.[cm]?[jt]s$/.test(path) || path === "alembic.ini" || path.startsWith("migrations/");
+function snapshotHasDatabase(snapshot) {
+  if (!isRec2(snapshot) || snapshot.mode !== "snapshot")
+    return false;
+  if (Array.isArray(snapshot.databases) && snapshot.databases.length > 0)
+    return true;
+  return Array.isArray(snapshot.bases) && snapshot.bases.some((b) => isRec2(b) && b.kind !== "csv" && b.kind !== "json");
 }
 var RENDERED_FILE = ".dkod/rendered.json";
 var renderedHash = (text) => createHash2("sha256").update(text).digest("hex");
@@ -4046,7 +4069,7 @@ var recordPath = (dir) => join10(dir, ".dkod/migration.json");
 var SKIP3 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".worktrees"];
 var DATA2 = /\.(?:sqlite|sqlite3|db|db3)$/i;
 var FLAT = /\.(?:csv|json)$/i;
-var NOT_DATA = /(?:^|\/)(?:package(?:-lock)?|composer(?:\.lock)?|tsconfig[^/]*|jsconfig[^/]*|app|vercel|now|firebase|deno|bun|manifest|renovate|[^/]*\.config|\.eslintrc[^/]*|\.prettierrc[^/]*|\.babelrc)\.json$|(?:^|\/)\.dkod\/|(?:^|\/)composer\.lock$/i;
+var NOT_DATA = /(?:^|\/)(?:package(?:-lock)?|composer(?:\.lock)?|tsconfig[^/]*|jsconfig[^/]*|app|vercel|now|firebase|deno|bun|manifest|renovate|[^/]*\.config|\.eslintrc[^/]*|\.prettierrc[^/]*|\.babelrc)\.json$|(?:^|\/)\.dkod\/|(?:^|\/)composer\.lock$|(?:^|\/)(?:tests?|__tests__|specs?|e2e|fixtures?|__fixtures__|__mocks__|mocks?|testdata|test-data)\//i;
 var CODE3 = /\.(?:py|js|mjs|cjs|jsx|ts|tsx|rb|php|go|java|cs|rs|sh)$/i;
 var CODE_CAP = 256 * 1024;
 var LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
