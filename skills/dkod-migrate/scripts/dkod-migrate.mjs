@@ -3767,6 +3767,11 @@ function switchFolders(dkFolder, originalFolder, io) {
     io.print(`dkod-migrate: ${refusal}`);
     return 1;
   }
+  const here = io.realpath(io.cwd) ?? io.cwd;
+  if (here === dk || here.startsWith(dk) && ["/", "\\"].includes(here.slice(dk.length, dk.length + 1))) {
+    io.print(JSON.stringify({ ok: false, mode: "switch", cd_first: parent(dk), message: `This shell stands in ${dk}, which the switch renames. Run \`cd ${parent(dk)}\` as a command on its own, then run the switch again. Nothing was renamed.` }));
+    return 3;
+  }
   const archived = join8(parent(original), `${base3(original)}${ARCHIVE_SUFFIX}`);
   io.rename(original, archived);
   try {
