@@ -1,7 +1,7 @@
 // Built by packages/dkoder-plugin/scripts/build-migrate.ts from dkod-app. Do not edit: run `bun run --cwd packages/dkoder-plugin build:migrate`.
 import { spawn as spawn2 } from "node:child_process";
 import { createHash as createHash4 } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join as join12 } from "node:path";
 
@@ -4413,15 +4413,24 @@ async function snapshot(folder, io, args = []) {
     for (const [k, v] of envPairs(io.readFile(join10(original, file))))
       named.push([k, v, file]);
   const flatFound = flatData(original, walked, named.map(([k, v]) => [k, v]), io.readFile(join10(dir, ".dkod/map/app-map.json")), io);
-  for (const rel of walked) {
+  const picked = walked.filter((rel) => DATA2.test(rel) || flatFound.has(rel));
+  const present = new Set(walked);
+  const short = diskShort(picked, present, original, io);
+  if (short !== null) {
+    io.rm(scratch, { recursive: true, force: true });
+    io.print(`dkod-migrate: ${short}`);
+    return 1;
+  }
+  for (const rel of picked) {
     const flat = flatFound.get(rel);
-    if (!DATA2.test(rel) && flat === undefined)
-      continue;
     const to = join10(scratch, rel);
-    io.copyFile(join10(original, rel), to);
+    await copyData(original, rel, to, present, io);
     files.push(to);
     const base = join10(scratch, `.dkod-base/${rel}`);
-    io.copyFile(join10(original, rel), base);
+    io.copyFile(to, base);
+    for (const side of SQLITE_SIDECARS)
+      if (present.has(`${rel}${side}`) && io.size?.(`${to}${side}`) != null)
+        io.copyFile(`${to}${side}`, `${base}${side}`);
     bases.push({ file: to, base, rel, sha256: io.sha256([base]), ...flat !== undefined ? { kind: /\.csv$/i.test(rel) ? "csv" : "json", found: flat } : {} });
   }
   const env = { DKOD_MIGRATE_DATA: scratch };
@@ -4534,6 +4543,39 @@ async function snapshot(folder, io, args = []) {
 `);
   io.print(JSON.stringify(printable(record)));
   return 0;
+}
+var SQLITE_SIDECARS = ["-wal"];
+async function copyData(original, rel, to, present, io) {
+  io.copyFile(join10(original, rel), to);
+  if (!DATA2.test(rel) || !present.has(`${rel}-wal`))
+    return;
+  io.copyFile(join10(original, `${rel}-wal`), `${to}-wal`);
+  if (!io.hasTool("sqlite3"))
+    return;
+  const res = await io.run("sqlite3", [to, "PRAGMA journal_mode=DELETE;"], {}, io.cwd).catch(() => null);
+  if (res !== null && res.status === 0) {
+    io.rm(`${to}-wal`, { force: true });
+    io.rm(`${to}-shm`, { force: true });
+  }
+}
+var GB = 1024 ** 3;
+var gb = (n) => `${(n / GB).toFixed(1)} GB`;
+function diskShort(picked, present, original, io) {
+  if (!io.freeBytes || !io.size)
+    return null;
+  let need = 0;
+  for (const rel of picked) {
+    need += io.size(join10(original, rel)) ?? 0;
+    for (const side of SQLITE_SIDECARS)
+      if (present.has(`${rel}${side}`))
+        need += io.size(join10(original, `${rel}${side}`)) ?? 0;
+  }
+  need = need * 2 + 256 * 1024 * 1024;
+  const dir = io.tmpdir();
+  const free = io.freeBytes(dir);
+  if (free === null || free >= need)
+    return null;
+  return `the snapshot needs about ${gb(need)} in ${dir} (each data file is stored twice: the copy the original runs on and its untouched base), and only ${gb(free)} is free there. Free space on that disk, or point the temp folder at a disk with room (TMPDIR on macOS and Linux; TEMP and TMP on Windows), then run snapshot again. Nothing was copied.`;
 }
 function runDirRefusal(runDir, dkDir, io) {
   const norm = (p) => {
@@ -6002,6 +6044,14 @@ var io = {
     }
   },
   env: (name) => process.env[name],
+  freeBytes: (dir) => {
+    try {
+      const s = statfsSync(dir);
+      return Number(s.bavail) * Number(s.bsize);
+    } catch {
+      return null;
+    }
+  },
   rm: (path, opts) => rmSync(path, { recursive: opts.recursive ?? false, force: opts.force ?? false }),
   mkdtemp: (prefix) => mkdtempSync(prefix),
   tmpdir,
