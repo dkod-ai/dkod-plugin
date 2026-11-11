@@ -449,6 +449,73 @@ function gatewayUrlProblem(raw) {
     return null;
   return "The gateway address must start with wss://.";
 }
+var LOOPBACK = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+function proxyFor(host, env = process.env) {
+  const raw = (env.HTTPS_PROXY ?? env.https_proxy ?? "").trim();
+  const name = host.toLowerCase();
+  if (!raw || LOOPBACK.has(name))
+    return null;
+  for (const entry of (env.NO_PROXY ?? env.no_proxy ?? "").split(",")) {
+    const e = entry.trim().toLowerCase().replace(/^([^:]+):\d+$/, "$1");
+    if (e === "*")
+      return null;
+    const bare = e.replace(/^\*?\./, "");
+    if (bare && (name === bare || name.endsWith(`.${bare}`)))
+      return null;
+  }
+  let url;
+  try {
+    url = new URL(raw.includes("://") ? raw : `http://${raw}`);
+  } catch {
+    return null;
+  }
+  return url.protocol === "http:" ? url : null;
+}
+function openTunnel(proxy, host, port, onReady, onFail) {
+  const raw = net.connect({ host: proxy.hostname.replace(/^\[|\]$/g, ""), port: proxy.port ? Number(proxy.port) : 80 });
+  const target = `${host}:${port}`;
+  const auth = proxy.username ? `Proxy-Authorization: Basic ${Buffer.from(`${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`).toString("base64")}\r
+` : "";
+  let head = Buffer.alloc(0);
+  let done = false;
+  const settle = (reason) => {
+    if (done)
+      return;
+    done = true;
+    raw.off("data", onData);
+    raw.off("error", onError);
+    raw.off("close", onClose);
+    if (reason === null) {
+      onReady(raw);
+      return;
+    }
+    raw.destroy();
+    onFail(reason);
+  };
+  const onData = (chunk) => {
+    head = Buffer.concat([head, chunk]);
+    const end = head.indexOf(`\r
+\r
+`);
+    if (end < 0) {
+      if (head.length > MAX_HANDSHAKE_BYTES)
+        settle("bad proxy answer");
+      return;
+    }
+    const status = Number(/^HTTP\/1\.[01] (\d{3})/.exec(head.subarray(0, end).toString("latin1"))?.[1] ?? 0);
+    settle(status !== 200 ? `proxy refused the tunnel (${status || "no status"})` : end + 4 < head.length ? "bad proxy answer" : null);
+  };
+  const onError = (error) => settle(`proxy ${error.code ?? "socket_error"}`);
+  const onClose = () => settle("proxy closed the connection");
+  raw.on("data", onData);
+  raw.on("error", onError);
+  raw.on("close", onClose);
+  raw.once("connect", () => raw.write(`CONNECT ${target} HTTP/1.1\r
+Host: ${target}\r
+${auth}\r
+`));
+  return raw;
+}
 function frame(opcode, payload) {
   const len = payload.length;
   const head = len < 126 ? Buffer.alloc(2) : len < 65536 ? Buffer.alloc(4) : Buffer.alloc(10);
@@ -484,7 +551,8 @@ function connectWebSocket(rawUrl, headers, handlers) {
   let fragmentBytes = 0;
   let fragmentOpcode = 0;
   let needDrain = false;
-  const socket = secure ? tls.connect({ host, port, servername: host, rejectUnauthorized: true }) : net.connect({ host, port });
+  let socket;
+  let tunnel;
   const finish = (code, reason) => {
     if (closed)
       return;
@@ -492,7 +560,7 @@ function connectWebSocket(rawUrl, headers, handlers) {
     handlers.onClose?.(code, reason);
   };
   const write = (data) => {
-    if (socket.destroyed || !socket.writable)
+    if (!socket || socket.destroyed || !socket.writable)
       return true;
     const ok = socket.write(data);
     if (!ok)
@@ -504,7 +572,7 @@ function connectWebSocket(rawUrl, headers, handlers) {
       sentClose = true;
       write(frame(8, closeBody(code, reason)));
     }
-    socket.destroy();
+    socket?.destroy();
     finish(code, reason);
   };
   const closeBody = (code, reason) => {
@@ -527,10 +595,9 @@ function connectWebSocket(rawUrl, headers, handlers) {
       "",
       ""
     ];
-    socket.write(lines.join(`\r
+    socket?.write(lines.join(`\r
 `));
   };
-  socket.once(secure ? "secureConnect" : "connect", sendRequest);
   const handleFrames = () => {
     for (;; ) {
       if (buf.length < 2)
@@ -577,7 +644,7 @@ function connectWebSocket(rawUrl, headers, handlers) {
             sentClose = true;
             write(frame(8, payload.length >= 2 ? payload.subarray(0, 2) : Buffer.alloc(0)));
           }
-          socket.end();
+          socket?.end();
           finish(code, reason);
           return;
         }
@@ -610,80 +677,97 @@ function connectWebSocket(rawUrl, headers, handlers) {
         return;
     }
   };
-  socket.on("data", (chunk) => {
-    if (opened) {
-      buf = buf.length === 0 ? chunk : Buffer.concat([buf, chunk]);
-      handleFrames();
-      return;
-    }
-    head = Buffer.concat([head, chunk]);
-    const end = head.indexOf(`\r
-\r
-`);
-    if (end < 0) {
-      if (head.length > MAX_HANDSHAKE_BYTES) {
-        socket.destroy();
-        finish(1006, "bad handshake");
-      }
-      return;
-    }
-    const text = head.subarray(0, end).toString("latin1");
-    const rest = head.subarray(end + 4);
-    const [statusLine, ...headerLines] = text.split(`\r
-`);
-    const status = Number(/^HTTP\/1\.[01] (\d{3})/.exec(statusLine ?? "")?.[1] ?? 0);
-    const got = new Map(headerLines.map((l) => {
-      const i = l.indexOf(":");
-      return [l.slice(0, i).trim().toLowerCase(), l.slice(i + 1).trim()];
-    }));
-    if (status !== 101) {
-      const want = Math.min(Number(got.get("content-length") ?? 0) || 0, 8192);
-      const deliver = (body) => {
-        let reason = "";
-        try {
-          const parsed = JSON.parse(body.toString("utf8"));
-          if (typeof parsed.error === "string")
-            reason = parsed.error;
-        } catch {}
-        socket.removeAllListeners("data");
-        socket.destroy();
-        closed = true;
-        handlers.onRefused?.(status, reason);
-      };
-      if (rest.length >= want) {
-        deliver(rest);
+  const wire = (s) => {
+    socket = s;
+    s.once(secure ? "secureConnect" : "connect", sendRequest);
+    s.on("data", (chunk) => {
+      if (opened) {
+        buf = buf.length === 0 ? chunk : Buffer.concat([buf, chunk]);
+        handleFrames();
         return;
       }
-      let body = rest;
-      socket.removeAllListeners("data");
-      socket.on("data", (more) => {
-        body = Buffer.concat([body, more]);
-        if (body.length >= want)
-          deliver(body);
-      });
-      return;
-    }
-    if (got.get("upgrade")?.toLowerCase() !== "websocket" || got.get("sec-websocket-accept") !== expectedAccept) {
-      socket.destroy();
-      finish(1006, "bad handshake");
-      return;
-    }
-    opened = true;
-    head = Buffer.alloc(0);
-    handlers.onOpen?.();
-    if (rest.length > 0) {
-      buf = Buffer.from(rest);
-      handleFrames();
-    }
-  });
-  socket.on("drain", () => {
-    if (needDrain) {
-      needDrain = false;
-      handlers.onDrain?.();
-    }
-  });
-  socket.on("error", (error) => finish(1006, error.code ?? "socket_error"));
-  socket.on("close", () => finish(1006, "connection closed"));
+      head = Buffer.concat([head, chunk]);
+      const end = head.indexOf(`\r
+\r
+`);
+      if (end < 0) {
+        if (head.length > MAX_HANDSHAKE_BYTES) {
+          s.destroy();
+          finish(1006, "bad handshake");
+        }
+        return;
+      }
+      const text = head.subarray(0, end).toString("latin1");
+      const rest = head.subarray(end + 4);
+      const [statusLine, ...headerLines] = text.split(`\r
+`);
+      const status = Number(/^HTTP\/1\.[01] (\d{3})/.exec(statusLine ?? "")?.[1] ?? 0);
+      const got = new Map(headerLines.map((l) => {
+        const i = l.indexOf(":");
+        return [l.slice(0, i).trim().toLowerCase(), l.slice(i + 1).trim()];
+      }));
+      if (status !== 101) {
+        const want = Math.min(Number(got.get("content-length") ?? 0) || 0, 8192);
+        const deliver = (body) => {
+          let reason = "";
+          try {
+            const parsed = JSON.parse(body.toString("utf8"));
+            if (typeof parsed.error === "string")
+              reason = parsed.error;
+          } catch {}
+          s.removeAllListeners("data");
+          s.destroy();
+          closed = true;
+          handlers.onRefused?.(status, reason);
+        };
+        if (rest.length >= want) {
+          deliver(rest);
+          return;
+        }
+        let body = rest;
+        s.removeAllListeners("data");
+        s.on("data", (more) => {
+          body = Buffer.concat([body, more]);
+          if (body.length >= want)
+            deliver(body);
+        });
+        return;
+      }
+      if (got.get("upgrade")?.toLowerCase() !== "websocket" || got.get("sec-websocket-accept") !== expectedAccept) {
+        s.destroy();
+        finish(1006, "bad handshake");
+        return;
+      }
+      opened = true;
+      head = Buffer.alloc(0);
+      handlers.onOpen?.();
+      if (rest.length > 0) {
+        buf = Buffer.from(rest);
+        handleFrames();
+      }
+    });
+    s.on("drain", () => {
+      if (needDrain) {
+        needDrain = false;
+        handlers.onDrain?.();
+      }
+    });
+    s.on("error", (error) => finish(1006, error.code ?? "socket_error"));
+    s.on("close", () => finish(1006, "connection closed"));
+  };
+  const proxy = secure ? proxyFor(host) : null;
+  if (proxy) {
+    tunnel = openTunnel(proxy, host, port, (raw) => {
+      tunnel = undefined;
+      if (closed) {
+        raw.destroy();
+        return;
+      }
+      wire(tls.connect({ socket: raw, servername: host, rejectUnauthorized: true }));
+    }, (reason) => finish(1006, reason));
+  } else {
+    wire(secure ? tls.connect({ host, port, servername: host, rejectUnauthorized: true }) : net.connect({ host, port }));
+  }
   return {
     sendBinary: (data) => write(frame(2, data)),
     sendText: (text) => write(frame(1, Buffer.from(text))),
@@ -691,19 +775,20 @@ function connectWebSocket(rawUrl, headers, handlers) {
       if (closed || sentClose)
         return;
       if (!opened) {
-        socket.destroy();
+        tunnel?.destroy();
+        socket?.destroy();
         finish(code, reason);
         return;
       }
       sentClose = true;
       write(frame(8, closeBody(code, reason)));
-      setTimeout(() => socket.destroy(), 1000).unref();
+      setTimeout(() => socket?.destroy(), 1000).unref();
     },
     pause: () => {
-      socket.pause();
+      socket?.pause();
     },
     resume: () => {
-      socket.resume();
+      socket?.resume();
     }
   };
 }
