@@ -1918,6 +1918,23 @@ var probe = (port) => new Promise((resolve) => {
   s.once("error", () => resolve(false));
 });
 var APPLIED = /running upgrade|\bapplied\b|migrat\w* (?:complete|done|success)|\.sql\b/i;
+var NOT_STARTED = 127;
+var platform = (io) => io.platform ?? process.platform;
+var missing = (r) => r.status === NOT_STARTED || r.status === 9009 || /No module named '?alembic\b/.test(`${r.stdout}
+${r.stderr}`);
+function alembicCommands(dir, exists, os) {
+  const args = ["upgrade", "head"];
+  const out = [];
+  for (const venv of [".venv", "venv"]) {
+    const bin = os === "win32" ? join3(dir, `${venv}\\Scripts\\alembic.exe`) : join3(dir, `${venv}/bin/alembic`);
+    if (exists(bin))
+      out.push({ cmd: bin, args });
+  }
+  out.push({ cmd: "alembic", args });
+  for (const py of os === "win32" ? ["python", "py"] : ["python3", "python"])
+    out.push({ cmd: py, args: ["-m", "alembic", ...args] });
+  return out;
+}
 async function runMigrate(flags, io, cwd, exists) {
   const say = (line) => io.print(`dkod-db: ${line}`);
   const dir = flags.get("dir") ?? cwd;
@@ -1945,16 +1962,28 @@ async function runMigrate(flags, io, cwd, exists) {
     return 2;
   }
   const drizzle = ["drizzle.config.ts", "drizzle.config.js", "drizzle.config.mjs"].some((f) => exists(join3(dir, f)));
-  const tool = drizzle ? { name: "drizzle-kit", cmd: "bunx", args: ["drizzle-kit", "migrate"] } : exists(join3(dir, "alembic.ini")) ? { name: "alembic", cmd: "alembic", args: ["upgrade", "head"] } : null;
-  if (!tool) {
+  const alembic = !drizzle && exists(join3(dir, "alembic.ini"));
+  if (!drizzle && !alembic) {
     say("No migration tool found: expected drizzle.config.ts (or .js, .mjs) or alembic.ini in the app folder.");
     return 2;
   }
+  const tries = drizzle ? [{ cmd: "bunx", args: ["drizzle-kit", "migrate"] }] : alembicCommands(dir, exists, platform(io));
+  const name = drizzle ? "drizzle-kit" : "alembic";
   const env = { DATABASE_URL: url };
-  for (const name of ["PATH", "HOME", "USER", "USERPROFILE", "TMPDIR", "TEMP", "SystemRoot", "LANG"])
-    if (io.env[name] !== undefined)
-      env[name] = io.env[name];
-  const result = await io.run(tool.cmd, tool.args, env, dir);
+  for (const key of ["PATH", "HOME", "USER", "USERPROFILE", "TMPDIR", "TEMP", "SystemRoot", "LANG"])
+    if (io.env[key] !== undefined)
+      env[key] = io.env[key];
+  let result = { status: NOT_STARTED, stdout: "", stderr: "" };
+  for (const t of tries) {
+    result = await io.run(t.cmd, t.args, env, dir);
+    if (!missing(result))
+      break;
+  }
+  if (missing(result) && alembic) {
+    say(`alembic is not installed for this app. In the app folder, make its virtual environment and install the app into it: \`${platform(io) === "win32" ? "python -m venv .venv; .venv\\Scripts\\python -m pip install -e ." : "python3 -m venv .venv && .venv/bin/python -m pip install -e ."}\` (or \`-r requirements.txt\` in place of \`-e .\`). Then run migrate again.`);
+    return 1;
+  }
+  const tool = { name };
   const applied = `${result.stdout}
 ${result.stderr}`.split(`
 `).filter((l) => APPLIED.test(l)).length;
