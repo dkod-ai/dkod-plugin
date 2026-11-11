@@ -1067,6 +1067,8 @@ function hasHost(text, host) {
 }
 function envValueIsLocal(value) {
   const text = value.toLowerCase();
+  if (/^(?:file|sqlite3?):/.test(text.trim()))
+    return true;
   return isHomePath(value.trim()) || hasHost(text, "localhost") || hasHost(text, "host.docker.internal") || hasHost(text, "127.0.0.1") || text.includes("[::1]") || text.trim() === "::1";
 }
 function isHomePath(value) {
