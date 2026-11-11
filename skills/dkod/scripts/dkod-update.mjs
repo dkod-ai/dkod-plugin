@@ -10,8 +10,10 @@
 // The new plugin is written next to the folder first, then the two folders are swapped, so Cursor
 // never loads half a plugin. The folder is replaced only when it holds the dkod plugin already
 // (.cursor-plugin/plugin.json named dkod): the script never deletes anything else.
+// On Windows a folder that Cursor holds open cannot be renamed. Then the new files are written over
+// the old ones in place, plugin.json last, with a copy of the old folder to put back on a failure.
 // Prints one JSON line: { ok, from, to, files } or { ok: false, error }.
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -26,6 +28,9 @@ const done = (out, code = 0) => { process.stdout.write(`${JSON.stringify(out)}\n
 const fail = (error) => done({ ok: false, error }, 1);
 // Said when Cursor's sandbox stops the download or the write, so the agent can tell the user the fix.
 const SANDBOX_HINT = "Cursor's sandbox stopped it. In Cursor Settings, Agents, set Run Mode to \"Allowlist\" (not \"with Sandbox\"), then run this again";
+// Said when the plugin files are held open (Windows locks a folder a running program uses).
+const LOCKED_HINT = "The plugin files are in use. Quit Cursor fully (also from the system tray), run `dk upgrade` in PowerShell or a terminal, then open Cursor again. Do not go on with the old plugin";
+const locked = (err) => /EPERM|EBUSY|EACCES|ENOTEMPTY/.test(String(err?.code ?? "") + String(err?.message ?? ""));
 const sandboxed = (err) => process.env.CURSOR_SANDBOX && /EPERM|EACCES|ENOTFOUND|fetch failed/.test(String(err?.code ?? "") + String(err?.message ?? "") + String(err?.cause?.code ?? ""));
 
 const [folderArg, url] = process.argv.slice(2);
@@ -65,6 +70,7 @@ const planned = bundle.files.map((f) => {
 });
 if (!bundle.files.some((f) => f.path === ".cursor-plugin/plugin.json")) fail("the downloaded plugin has no .cursor-plugin/plugin.json");
 rmSync(stage, { recursive: true, force: true });
+const why = (err) => `${err instanceof Error ? err.message : String(err)}${sandboxed(err) ? `. ${SANDBOX_HINT}` : locked(err) ? `. ${LOCKED_HINT}` : ""}`;
 try {
   for (const f of planned) {
     mkdirSync(dirname(f.target), { recursive: true });
@@ -73,12 +79,41 @@ try {
   }
   if (pluginName(stage) !== "dkod") throw new Error("the downloaded plugin is not named dkod");
   mkdirSync(dirname(folder), { recursive: true });
+} catch (err) {
+  rmSync(stage, { recursive: true, force: true });
+  fail(`could not write the plugin: ${why(err)}`);
+}
+let inPlace = false;
+try {
   if (existsSync(folder)) renameSync(folder, old);
   renameSync(stage, folder);
-  rmSync(old, { recursive: true, force: true });
 } catch (err) {
   if (!existsSync(folder) && existsSync(old)) renameSync(old, folder);
-  rmSync(stage, { recursive: true, force: true });
-  fail(`could not write the plugin: ${err instanceof Error ? err.message : String(err)}${sandboxed(err) ? `. ${SANDBOX_HINT}` : ""}`);
+  if (sandboxed(err) || !locked(err) || !existsSync(folder)) {
+    rmSync(stage, { recursive: true, force: true });
+    fail(`could not write the plugin: ${why(err)}`);
+  }
+  // The folder is held open: write each file over the old one. plugin.json goes last, so the version
+  // only moves when every other file is new. A failure puts the copy of the old folder back.
+  try {
+    rmSync(old, { recursive: true, force: true });
+    cpSync(folder, old, { recursive: true });
+    const manifest = join(stage, ".cursor-plugin", "plugin.json");
+    const order = [...planned.filter((f) => f.target !== manifest), ...planned.filter((f) => f.target === manifest)];
+    for (const f of order) {
+      const target = join(folder, f.target.slice(stage.length + 1));
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, f.bytes);
+      if (process.platform !== "win32") chmodSync(target, f.mode);
+    }
+    inPlace = true;
+  } catch (err2) {
+    try { if (existsSync(old)) cpSync(old, folder, { recursive: true, force: true }); } catch { /* the old files stay as they are */ }
+    rmSync(stage, { recursive: true, force: true });
+    rmSync(old, { recursive: true, force: true });
+    fail(`could not write the plugin: ${why(err2)}`);
+  }
 }
-done({ ok: true, folder, from: before, to: bundle.version ?? null, files: bundle.files.length });
+// What is left next to the folder is cleaned when it can be; a file still held open stays.
+for (const dir of [stage, old]) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* left for the next run */ } }
+done({ ok: true, folder, from: before, to: bundle.version ?? null, files: bundle.files.length, ...(inPlace ? { in_place: true } : {}) });

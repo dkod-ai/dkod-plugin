@@ -5,6 +5,8 @@
 #
 # Writes the new plugin next to the folder, then swaps the two, so Cursor never loads half a plugin.
 # Replaces the folder only when it holds the dkod plugin already. Prints one JSON line.
+# On Windows a folder that Cursor holds open cannot be renamed. Then the new files are written over
+# the old ones in place, plugin.json last, with a copy of the old folder to put back on a failure.
 import base64, json, os, re, shutil, sys, urllib.request
 
 
@@ -15,6 +17,17 @@ def done(out, code=0):
 
 def fail(error):
     done({"ok": False, "error": error}, 1)
+
+
+LOCKED_HINT = "The plugin files are in use. Quit Cursor fully (also from the system tray), run `dk upgrade` in PowerShell or a terminal, then open Cursor again. Do not go on with the old plugin"
+
+
+def locked(err):
+    return isinstance(err, PermissionError) or getattr(err, "winerror", None) in (5, 32, 145) or getattr(err, "errno", None) in (13, 16, 39, 66)
+
+
+def why(err):
+    return f"{err}. {LOCKED_HINT}" if locked(err) else str(err)
 
 
 def plugin(dir_):
@@ -68,13 +81,42 @@ try:
     if (plugin(stage) or {}).get("name") != "dkod":
         raise RuntimeError("the downloaded plugin is not named dkod")
     os.makedirs(os.path.dirname(folder), exist_ok=True)
+except Exception as err:
+    shutil.rmtree(stage, ignore_errors=True)
+    fail(f"could not write the plugin: {why(err)}")
+in_place = False
+try:
     if os.path.exists(folder):
         os.rename(folder, old)
     os.rename(stage, folder)
-    shutil.rmtree(old, ignore_errors=True)
 except Exception as err:
     if not os.path.exists(folder) and os.path.exists(old):
         os.rename(old, folder)
-    shutil.rmtree(stage, ignore_errors=True)
-    fail(f"could not write the plugin: {err}")
-done({"ok": True, "folder": folder, "from": before, "to": bundle.get("version"), "files": len(files)})
+    if not locked(err) or not os.path.exists(folder):
+        shutil.rmtree(stage, ignore_errors=True)
+        fail(f"could not write the plugin: {why(err)}")
+    # The folder is held open: write each file over the old one, plugin.json last.
+    try:
+        shutil.rmtree(old, ignore_errors=True)
+        shutil.copytree(folder, old)
+        manifest = os.path.join(stage, ".cursor-plugin", "plugin.json")
+        for target, data, mode in [p for p in planned if p[0] != manifest] + [p for p in planned if p[0] == manifest]:
+            dest = os.path.join(folder, os.path.relpath(target, stage))
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with open(dest, "wb") as out:
+                out.write(data)
+            if os.name != "nt":
+                os.chmod(dest, mode)
+        in_place = True
+    except Exception as err2:
+        try:
+            if os.path.exists(old):
+                shutil.copytree(old, folder, dirs_exist_ok=True)
+        except Exception:
+            pass
+        shutil.rmtree(stage, ignore_errors=True)
+        shutil.rmtree(old, ignore_errors=True)
+        fail(f"could not write the plugin: {why(err2)}")
+shutil.rmtree(stage, ignore_errors=True)
+shutil.rmtree(old, ignore_errors=True)
+done({"ok": True, "folder": folder, "from": before, "to": bundle.get("version"), "files": len(files), **({"in_place": True} if in_place else {})})
