@@ -3,7 +3,7 @@ import { spawn as spawn2 } from "node:child_process";
 import { createHash as createHash4 } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join as join14 } from "node:path";
+import { dirname, join as join15 } from "node:path";
 
 import { createHash as createHash3 } from "node:crypto";
 
@@ -4220,6 +4220,417 @@ async function verifyApp(folder, io, args = []) {
   return finish2(dir, record, io);
 }
 
+var join12 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+var PREFLIGHT_FILE = ".dkod/preflight.json";
+var PREFLIGHT_RULE_IDS = [
+  "bind-loopback",
+  "start-download",
+  "start-writes",
+  "second-process",
+  "fk-target",
+  "sqlite-wal",
+  "template-page",
+  "dockerfile-policy",
+  "probe-paths",
+  "two-app-keys"
+];
+var PREFLIGHT_FIX = {
+  "bind-loopback": "Listen on 0.0.0.0 (or on HOST, which the Dockerfile sets to 0.0.0.0). A server on 127.0.0.1 or localhost never answers the pod's probes.",
+  "start-download": "Install and build in the Dockerfile, not at start. The container's root file system is read only, so npx, bunx, an install or a download at start fails.",
+  "start-writes": "Build in the Dockerfile and write only under /tmp at start. The container's root file system is read only.",
+  "second-process": "Run one process per container. Start only the server; move a worker or a second server to its own app or into the server's own code.",
+  "fk-target": "Point every foreign key at a primary key or a unique column. When two tables point at each other, make one constraint DEFERRABLE INITIALLY DEFERRED, or the data import fails.",
+  "sqlite-wal": "Do not ship a SQLite file. The app's data goes to its database; the snapshot copies the original's data, with its -wal file folded in.",
+  "template-page": "Replace the template's sample page (src/web/main.tsx) with the original app's pages before you deploy.",
+  "dockerfile-policy": "Pin every FROM by digest (image:tag@sha256:...) and set USER to a number (USER 10001). Deploy blocks this even when the Dockerfile came from the template.",
+  "probe-paths": "Answer GET /healthz (the process is up) and GET /readyz (it can serve), with no sign-in, fast. Without them the pod gets no HTTP probes and is never Ready.",
+  "two-app-keys": "Use one app key. The dk- folder is named after the app key in .dkod/migration.json; rename nothing by hand, and ask the builder before you go on."
+};
+function overridesOf(raw) {
+  const inner = typeof raw === "object" && raw !== null && "structuredContent" in raw ? raw.structuredContent : raw;
+  const map = typeof inner === "object" && inner !== null && "rules" in inner ? inner.rules : inner;
+  const out = {};
+  if (typeof map !== "object" || map === null || Array.isArray(map))
+    return out;
+  for (const [id, value] of Object.entries(map)) {
+    if (!PREFLIGHT_RULE_IDS.includes(id) || typeof value !== "object" || value === null)
+      continue;
+    const v = value;
+    out[id] = {
+      ...v.off === true ? { off: true } : {},
+      ...typeof v.text === "string" && v.text.trim() !== "" ? { text: v.text.slice(0, 600) } : {}
+    };
+  }
+  return out;
+}
+var SKIP3 = ["node_modules", ".git", "dist", "build", ".next", ".dkod", "coverage", ".turbo", ".cache", ".venv", "__pycache__"];
+var SOURCE4 = /\.(?:[cm]?[jt]sx?|py|go|rb)$/i;
+var SQL = /\.sql$/i;
+var DB_FILE = /\.(?:db|sqlite3?)$/i;
+var MAX_FILES2 = 4000;
+var MAX_BYTES = 512 * 1024;
+function at(text, re) {
+  const lines = text.split(`
+`);
+  for (let i = 0;i < lines.length; i++)
+    if (re.test(lines[i]))
+      return i + 1;
+  return null;
+}
+function startCommands(f) {
+  const out = [];
+  const pkg = f.read("package.json");
+  if (pkg !== null) {
+    try {
+      const scripts = JSON.parse(pkg).scripts ?? {};
+      const start = scripts.start;
+      if (typeof start === "string") {
+        out.push({ file: "package.json", text: start });
+        for (const m of start.matchAll(/\b(?:bun|npm|pnpm|yarn)\s+(?:run\s+)?([A-Za-z0-9:_-]+)/g)) {
+          const next = scripts[m[1]];
+          if (m[1] !== "start" && typeof next === "string")
+            out.push({ file: "package.json", text: next });
+        }
+      }
+    } catch {}
+  }
+  for (const name of ["start.sh", "entrypoint.sh", "docker-entrypoint.sh", "scripts/start.sh"]) {
+    const text = f.read(name);
+    if (text !== null)
+      out.push({ file: name, text });
+  }
+  const docker = f.read("Dockerfile");
+  if (docker !== null) {
+    for (const line of docker.split(`
+`))
+      if (/^\s*(?:CMD|ENTRYPOINT)\b/i.test(line))
+        out.push({ file: "Dockerfile", text: line });
+  }
+  return out;
+}
+var DOWNLOAD = /(?:^|[\s;&|("'`])(?:npx|bunx|pnpx|(?:pnpm|yarn)\s+dlx|npm\s+(?:exec|install|i|ci)|bun\s+(?:install|add|x)|yarn\s+(?:install|add)|pnpm\s+(?:install|add)|pip3?\s+install|curl|wget|apk\s+add|apt(?:-get)?\s+install)(?=\s|$|["'`;)])/;
+var BUILD_AT_START = /(?:^|[\s;&|(])(?:(?:bun|npm|pnpm|yarn)\s+(?:run\s+)?build|next\s+build|vite\s+build|tsc(?:\s|$)|prisma\s+generate)/;
+var WRITE_AT_START = /(?:^|[\s;&|(])(?:mkdir|touch|cp|mv|tee|chmod|chown)\s+(?:-\S+\s+)*(?!-|\/tmp\b|\/dev\b|"\$TMPDIR|\$TMPDIR)\S/;
+var REDIRECT = /(?:^|[^0-9&>])>{1,2}\s*(?!\/tmp\b|\/dev\b|&)[^\s&|;]+/;
+var BACKGROUND = /(?:^|[^&|>])&(?!&|>)\s*(?:$|[;\n]|\w)/m;
+function startRules(f) {
+  const out = [];
+  for (const c of startCommands(f)) {
+    const text = c.text.split(`
+`).filter((l) => !/^\s*#/.test(l)).join(`
+`);
+    if (DOWNLOAD.test(text))
+      out.push(finding("start-download", c.file, at(c.text, DOWNLOAD), "The start command downloads or installs a package."));
+    if (BUILD_AT_START.test(text))
+      out.push(finding("start-writes", c.file, at(c.text, BUILD_AT_START), "The start command runs a build, which writes files."));
+    else if (WRITE_AT_START.test(text) || REDIRECT.test(text.replace(/\d?>&\d/g, "")))
+      out.push(finding("start-writes", c.file, null, "The start command writes a file outside /tmp."));
+    if (BACKGROUND.test(text.replace(/&&/g, "").replace(/\d?>&\d/g, "").replace(/&>/g, ""))) {
+      out.push(finding("second-process", c.file, null, "The start command runs a process in the background with &."));
+    }
+  }
+  return out;
+}
+var SERVES = /\b(?:listen|serve)\s*\(|Bun\.serve\b|\bapp\.run\s*\(|uvicorn|createServer\s*\(/;
+var LOOPBACK_LITERAL = /(?:\b(?:host|hostname)\s*[:=]\s*["'](?:127\.0\.0\.1|localhost)["']|\blisten\s*\([^)\n]{0,80}["'](?:127\.0\.0\.1|localhost)["'])/;
+var LOOPBACK_FALLBACK = /\bHOST(?:NAME)?\b[^\n]{0,20}(?:\?\?|\|\|)\s*["'](?:127\.0\.0\.1|localhost)["']/;
+var LOOPBACK_FLAG = /--(?:host|hostname|bind)[=\s]+(?:127\.0\.0\.1|localhost)\b/;
+function bindRule(f, sources) {
+  const docker = f.read("Dockerfile") ?? "";
+  const hostSet = /\bHOST(?:NAME)?\s*=?\s*["']?0\.0\.0\.0/.test(docker);
+  for (const rel of sources) {
+    const text = f.read(rel);
+    if (text === null || !SERVES.test(text))
+      continue;
+    if (LOOPBACK_LITERAL.test(text))
+      return [finding("bind-loopback", rel, at(text, LOOPBACK_LITERAL), "The server listens on 127.0.0.1 or localhost.")];
+    if (!hostSet && LOOPBACK_FALLBACK.test(text)) {
+      return [finding("bind-loopback", rel, at(text, LOOPBACK_FALLBACK), "The server falls back to 127.0.0.1 or localhost, and the Dockerfile does not set HOST=0.0.0.0.")];
+    }
+  }
+  for (const c of startCommands(f)) {
+    if (LOOPBACK_FLAG.test(c.text))
+      return [finding("bind-loopback", c.file, at(c.text, LOOPBACK_FLAG), "The start command binds to 127.0.0.1 or localhost.")];
+  }
+  return [];
+}
+var ident = (s) => s.replace(/^[`"[]|[`"\]]$/g, "").toLowerCase();
+function sqlTables(files) {
+  const tables = new Map;
+  for (const { rel, text } of files) {
+    const lines = text.split(`
+`);
+    let current = null;
+    let depth = 0;
+    for (let i = 0;i < lines.length; i++) {
+      const line = lines[i];
+      const create = /^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:[`"\w]+\.)?([`"\w]+)/i.exec(line);
+      if (create !== null) {
+        current = { file: rel, keys: new Set, refs: [] };
+        tables.set(ident(create[1]), current);
+        depth = 0;
+      }
+      if (current === null)
+        continue;
+      const col = /^\s*([`"\w]+)\s+\w+/.exec(line);
+      const name = col === null ? null : ident(col[1]);
+      if (name !== null && /\b(?:PRIMARY\s+KEY|UNIQUE)\b/i.test(line) && !/^\s*(?:CONSTRAINT|PRIMARY|UNIQUE|FOREIGN)\b/i.test(line))
+        current.keys.add(name);
+      const tableKey = /^\s*(?:CONSTRAINT\s+[`"\w]+\s+)?(?:PRIMARY\s+KEY|UNIQUE)\s*\(\s*([`"\w]+)\s*\)/i.exec(line);
+      if (tableKey !== null)
+        current.keys.add(ident(tableKey[1]));
+      const ref = /\bREFERENCES\s+(?:[`"\w]+\.)?([`"\w]+)\s*\(\s*([`"\w]+)\s*\)/i.exec(line);
+      if (ref !== null)
+        current.refs.push({ table: ident(ref[1]), column: ident(ref[2]), deferrable: /\bDEFERRABLE\b/i.test(line) && !/\bNOT\s+DEFERRABLE\b/i.test(line), line: i + 1 });
+      for (const ch of line) {
+        if (ch === "(")
+          depth++;
+        else if (ch === ")")
+          depth--;
+      }
+      if (depth <= 0 && /\)\s*;?\s*$/.test(line) && create === null)
+        current = null;
+    }
+    for (let i = 0;i < lines.length; i++) {
+      const alter = /^\s*ALTER\s+TABLE\s+(?:ONLY\s+)?(?:[`"\w]+\.)?([`"\w]+)[^\n]*?\bREFERENCES\s+(?:[`"\w]+\.)?([`"\w]+)\s*\(\s*([`"\w]+)\s*\)([^\n]*)/i.exec(`${lines[i]} ${lines[i + 1] ?? ""}`);
+      if (alter === null)
+        continue;
+      const t = tables.get(ident(alter[1]));
+      if (t !== undefined && !t.refs.some((r) => r.line === i + 1)) {
+        t.refs.push({ table: ident(alter[2]), column: ident(alter[3]), deferrable: /\bDEFERRABLE\b/i.test(alter[4]) && !/\bNOT\s+DEFERRABLE\b/i.test(alter[4]), line: i + 1 });
+      }
+    }
+  }
+  return tables;
+}
+function drizzleTables(files) {
+  const tables = new Map;
+  for (const { rel, text } of files) {
+    const lines = text.split(`
+`);
+    let current = null;
+    for (let i = 0;i < lines.length; i++) {
+      const line = lines[i];
+      const start = /\b(?:const|let)\s+(\w+)\s*=\s*(?:pg|sqlite|mysql)Table\s*\(/.exec(line);
+      if (start !== null) {
+        current = { file: rel, keys: new Set, refs: [] };
+        tables.set(start[1].toLowerCase(), current);
+      }
+      if (current === null)
+        continue;
+      const col = /^\s*(\w+)\s*:\s*\w+\s*\(/.exec(line);
+      if (col !== null && /\.(?:primaryKey|unique)\s*\(/.test(line))
+        current.keys.add(col[1].toLowerCase());
+      const ref = /\.references\s*\(\s*\(\)\s*(?::\s*\w+\s*)?=>\s*(\w+)\.(\w+)/.exec(line);
+      if (ref !== null)
+        current.refs.push({ table: ref[1].toLowerCase(), column: ref[2].toLowerCase(), deferrable: false, line: i + 1 });
+      if (/^\s*\}\s*(?:,|\))/.test(line) && start === null)
+        current = null;
+    }
+  }
+  return tables;
+}
+function fkFindings(tables) {
+  const out = [];
+  for (const [name, t] of tables) {
+    for (const r of t.refs) {
+      const target = tables.get(r.table);
+      if (target !== undefined && !target.keys.has(r.column)) {
+        out.push(finding("fk-target", t.file, r.line, `${name} points at ${r.table}.${r.column}, which is not a primary key or unique.`));
+      }
+    }
+  }
+  const seen = new Set;
+  const reported = new Set;
+  const walk = (node, path, deferred) => {
+    const t = tables.get(node);
+    if (t === undefined)
+      return;
+    for (const r of t.refs) {
+      if (r.table === node)
+        continue;
+      const i = path.indexOf(r.table);
+      if (i >= 0) {
+        const cycle = [...path.slice(i), r.table];
+        const key = [...cycle.slice(0, -1)].sort().join(",");
+        if (!reported.has(key) && !deferred.slice(i).some(Boolean) && !r.deferrable) {
+          reported.add(key);
+          out.push(finding("fk-target", t.file, r.line, `These tables point at each other with no DEFERRABLE constraint: ${cycle.join(" -> ")}.`));
+        }
+        continue;
+      }
+      if (path.length < 12)
+        walk(r.table, [...path, r.table], [...deferred, r.deferrable]);
+    }
+  };
+  for (const name of tables.keys()) {
+    if (seen.has(name))
+      continue;
+    seen.add(name);
+    walk(name, [name], []);
+  }
+  return out;
+}
+var DIGEST_FROM = /^\s*FROM\s+(?:--platform=\S+\s+)?(\S+)/i;
+function dockerfileFindings(rel, text) {
+  const out = [];
+  const stages = new Set;
+  const lines = text.split(`
+`);
+  let lastUser = null;
+  for (let i = 0;i < lines.length; i++) {
+    const line = lines[i];
+    const from = DIGEST_FROM.exec(line);
+    if (from !== null) {
+      const image = from[1];
+      const alias = /\bAS\s+(\S+)/i.exec(line);
+      if (!stages.has(image.toLowerCase()) && image.toLowerCase() !== "scratch" && !/@sha256:[0-9a-f]{64}\b/.test(image)) {
+        out.push(finding("dockerfile-policy", rel, i + 1, `FROM ${image} has no @sha256 digest.`));
+      }
+      if (alias !== null)
+        stages.add(alias[1].toLowerCase());
+      lastUser = null;
+    }
+    const user = /^\s*USER\s+(\S+)/i.exec(line);
+    if (user !== null)
+      lastUser = user[1];
+  }
+  if (stages.size > 0 || lines.some((l) => DIGEST_FROM.test(l))) {
+    if (lastUser === null)
+      out.push(finding("dockerfile-policy", rel, null, "The final stage sets no USER, so the container runs as root."));
+    else if (!/^\d+(?::\d+)?$/.test(lastUser))
+      out.push(finding("dockerfile-policy", rel, at(text, new RegExp(`^\\s*USER\\s+${lastUser.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i")), `USER ${lastUser} is not a number.`));
+  }
+  return out;
+}
+function probeRule(f, sources) {
+  let healthz = false;
+  let readyz = false;
+  for (const rel of sources) {
+    const text = f.read(rel);
+    if (text === null)
+      continue;
+    if (/["'`]\/healthz["'`]/.test(text))
+      healthz = true;
+    if (/["'`]\/readyz["'`]/.test(text))
+      readyz = true;
+    if (healthz && readyz)
+      break;
+  }
+  const out = [];
+  const missing = [healthz ? null : "/healthz", readyz ? null : "/readyz"].filter((p) => p !== null);
+  if (missing.length > 0)
+    out.push(finding("probe-paths", null, null, `No route for ${missing.join(" and ")} was found in the app's code.`));
+  const verify = f.read(VERIFY_FILE);
+  if (verify !== null) {
+    try {
+      const record = JSON.parse(verify);
+      for (const x of record.failures ?? []) {
+        if (typeof x.route === "string" && /^\/(?:healthz|readyz)\b/.test(x.route)) {
+          out.push(finding("probe-paths", VERIFY_FILE, null, `verify saw ${x.route} fail: ${typeof x.why === "string" ? x.why.slice(0, 160) : "no answer"}.`));
+        }
+      }
+    } catch {}
+  }
+  return out;
+}
+var baseName3 = (p) => p.replace(/\/+$/, "").split("/").pop() ?? "";
+var parentOf = (p) => p.replace(/\/+$/, "").split("/").slice(0, -1).join("/") || "/";
+function appKeyRule(f, io) {
+  const text = f.read(".dkod/migration.json");
+  if (text === null)
+    return [];
+  let record;
+  try {
+    record = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  const out = [];
+  const name = baseName3(io.realpath(f.dir) ?? f.dir).toLowerCase();
+  const appKey = typeof record.appKey === "string" ? record.appKey.toLowerCase() : null;
+  if (appKey !== null && appKey !== "" && name !== appKey && !name.endsWith(`-${appKey}`)) {
+    out.push(finding("two-app-keys", ".dkod/migration.json", null, `The folder is ${name}, but the migration record's app key is ${appKey}.`));
+  }
+  if (typeof record.original === "string" && record.original !== "") {
+    const original = baseName3(record.original);
+    const archive = join12(parentOf(record.original), `${original}-archive`);
+    if (io.realpath(archive) !== null) {
+      out.push(finding("two-app-keys", null, null, `${archive} is there while this migration is still open: an earlier switch left a second copy of ${original}.`, "warn"));
+    }
+  }
+  return out;
+}
+function finding(rule, file, line, why, level = "block") {
+  return { rule, level, file, line, why, fix: PREFLIGHT_FIX[rule] };
+}
+function preflightFindings(dir, io, overrides = {}) {
+  const all = io.walk(dir, SKIP3).slice(0, MAX_FILES2);
+  const readable = (rel) => (io.size?.(join12(dir, rel)) ?? 0) <= MAX_BYTES;
+  const f = { dir, files: all, read: (rel) => readable(rel) ? io.readFile(join12(dir, rel)) : null };
+  const sources = all.filter((p) => SOURCE4.test(p) && !/(?:^|\/)(?:test|tests|__tests__|e2e)\//.test(p) && !/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(p) && !/\.d\.ts$/.test(p));
+  const texts = (paths) => paths.map((rel) => ({ rel, text: f.read(rel) })).filter((x) => x.text !== null);
+  const findings = [];
+  findings.push(...bindRule(f, sources));
+  findings.push(...startRules(f));
+  const tables = new Map([...drizzleTables(texts(sources.filter((p) => /schema|db|model|table/i.test(p)))), ...sqlTables(texts(all.filter((p) => SQL.test(p))))]);
+  findings.push(...fkFindings(tables));
+  for (const rel of all.filter((p) => DB_FILE.test(p))) {
+    const wal = all.includes(`${rel}-wal`);
+    findings.push(finding("sqlite-wal", rel, null, wal ? `${rel} and its -wal file are in the app's folder.` : `${rel} is a SQLite file in the app's folder.`));
+  }
+  const main = f.read("src/web/main.tsx");
+  if (main !== null && isSamplePage(main))
+    findings.push(finding("template-page", "src/web/main.tsx", null, "src/web/main.tsx is still the template's sample page."));
+  for (const rel of all.filter((p) => /(?:^|\/)(?:Dockerfile|Containerfile)(?:\.[\w-]+)?$/.test(p) && !/\.dev$/i.test(p))) {
+    const text = f.read(rel);
+    if (text !== null)
+      findings.push(...dockerfileFindings(rel, text));
+  }
+  findings.push(...probeRule(f, sources));
+  findings.push(...appKeyRule(f, io));
+  const off = PREFLIGHT_RULE_IDS.filter((id) => overrides[id]?.off === true);
+  return {
+    off,
+    findings: findings.filter((x) => !off.includes(x.rule)).map((x) => overrides[x.rule]?.text === undefined ? x : { ...x, fix: overrides[x.rule].text })
+  };
+}
+function preflight(folder, io, args = []) {
+  if (!folder) {
+    io.print("dkod-migrate: preflight needs the dk- app's folder.");
+    return 2;
+  }
+  const dir = folder.startsWith("/") ? folder : join12(io.cwd, folder);
+  if (io.readFile(join12(dir, "package.json")) === null && io.readFile(join12(dir, "Dockerfile")) === null) {
+    io.print(`dkod-migrate: ${dir} has no package.json and no Dockerfile. Run preflight on the dk- app's folder.`);
+    return 2;
+  }
+  const rulesFile = flagValue(args, "--rules");
+  let overrides = {};
+  if (rulesFile !== undefined) {
+    const text = io.readFile(rulesFile.startsWith("/") ? rulesFile : join12(io.cwd, rulesFile));
+    if (text === null) {
+      io.print(`dkod-migrate: ${rulesFile} is not there. Save the answer of dkoder.preflight.rules to it, or run preflight with no --rules.`);
+      return 2;
+    }
+    try {
+      overrides = overridesOf(JSON.parse(text));
+    } catch {
+      io.print(`dkod-migrate: ${rulesFile} is not JSON. Save the answer of dkoder.preflight.rules as it came.`);
+      return 2;
+    }
+  }
+  const { findings, off } = preflightFindings(dir, io, overrides);
+  const record = { ok: !findings.some((x) => x.level === "block"), findings, off, checkedAt: new Date().toISOString() };
+  io.writeFile(join12(dir, PREFLIGHT_FILE), `${JSON.stringify(record, null, 2)}
+`);
+  for (const x of findings) {
+    io.print(`${x.level === "block" ? "BLOCK" : "warn"} ${x.rule}${x.file === null ? "" : ` ${x.file}${x.line === null ? "" : `:${String(x.line)}`}`}: ${x.why} Fix: ${x.fix}`);
+  }
+  io.print(JSON.stringify({ ok: record.ok, blocks: findings.filter((x) => x.level === "block").length, warnings: findings.filter((x) => x.level === "warn").length, file: join12(dir, PREFLIGHT_FILE) }));
+  return record.ok ? 0 : 1;
+}
+
 var ENV_FILE2 = ".dkod-snapshot.env";
 var USAGE = [
   "Usage:",
@@ -4238,7 +4649,8 @@ var USAGE = [
   "  node dkod-migrate.mjs files <the dk- app's folder> [--dir NAME=<folder>]...",
   "  node dkod-migrate.mjs install-files <the dk- app's folder>",
   "  node dkod-migrate.mjs memory <the dk- app's folder> [--seconds N]",
-  "  node dkod-migrate.mjs verify <the dk- app's folder> [--original <folder>]"
+  "  node dkod-migrate.mjs verify <the dk- app's folder> [--original <folder>]",
+  "  node dkod-migrate.mjs preflight <the dk- app's folder> [--rules <file.json>]"
 ].join(`
 `);
 var SOURCE_MAX_AGE_MIN = 10;
@@ -4246,11 +4658,11 @@ var SCRATCH_NAME = /_dkod_migrate(_[A-Za-z0-9_]+)?(_base)?$/;
 var CHECKS = ["name", "age (pg_database file time / pg_stat_database.stats_reset, when readable)"];
 var USE_OWN_STORE = "Snapshot the original's own store: its .env/.env.local URL, its running process (--original-url), or the --db-url the builder gives. Never make a database for the original or run its seed, fixtures, db push or reset to get data.";
 var NEW_APP_ONLY = "The original app has no data files and no local database this computer can copy. The migration is new-app-only: its tests run only on the dk- app. Ask the builder how the original reads its data. If it reads its database from its environment, run snapshot again with --db-url <url> or, with the original running, --original-url http://localhost:<port>. Never write .dkod/snapshot.json by hand.";
-var join12 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+var join13 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var norm = (p) => p.replace(/\/\.\//g, "/").replace(/\/+/g, "/");
-var snapshotPath = (dir) => join12(dir, ".dkod/snapshot.json");
-var recordPath = (dir) => join12(dir, ".dkod/migration.json");
-var SKIP3 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".worktrees"];
+var snapshotPath = (dir) => join13(dir, ".dkod/snapshot.json");
+var recordPath = (dir) => join13(dir, ".dkod/migration.json");
+var SKIP4 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".worktrees"];
 var DATA2 = /\.(?:sqlite|sqlite3|db|db3)$/i;
 var FLAT = /\.(?:csv|json)$/i;
 var NOT_DATA = /(?:^|\/)(?:package(?:-lock)?|composer(?:\.lock)?|tsconfig[^/]*|jsconfig[^/]*|app|vercel|now|firebase|deno|bun|manifest|renovate|[^/]*\.config|\.eslintrc[^/]*|\.prettierrc[^/]*|\.babelrc)\.json$|(?:^|\/)\.dkod\/|(?:^|\/)composer\.lock$|(?:^|\/)(?:tests?|__tests__|specs?|e2e|fixtures?|__fixtures__|__mocks__|mocks?|testdata|test-data)\//i;
@@ -4271,7 +4683,7 @@ function checkSnapshot(dir, io) {
   }
   if (typeof r !== "object" || r === null || typeof r.seal !== "string" || typeof r.nonce !== "string" || sealOf(r, r.nonce) !== r.seal)
     return bad;
-  if (r.mode === "snapshot" && typeof r.scratch === "string" && r.scratch !== "" && io.readFile(join12(r.scratch, SEAL_FILE))?.trim() !== r.seal)
+  if (r.mode === "snapshot" && typeof r.scratch === "string" && r.scratch !== "" && io.readFile(join13(r.scratch, SEAL_FILE))?.trim() !== r.seal)
     return bad;
   return [];
 }
@@ -4370,7 +4782,7 @@ function copiedFile(original, files, value) {
   const raw = isUrl ? value.slice(5) : value;
   if (raw === "" || !isUrl && /^[a-z][a-z0-9+.-]*:/i.test(raw))
     return null;
-  const rel = norm(raw.startsWith("/") ? raw : join12(original, raw)).slice(norm(original).length).replace(/^\//, "");
+  const rel = norm(raw.startsWith("/") ? raw : join13(original, raw)).slice(norm(original).length).replace(/^\//, "");
   if (rel === "")
     return null;
   const copy = files.find((f) => norm(f).endsWith(`/${rel}`));
@@ -4381,7 +4793,7 @@ function relOfValue(original, value) {
   const raw = isUrl ? value.slice(5) : value;
   if (raw === "" || !isUrl && /^[a-z][a-z0-9+.-]*:/i.test(raw))
     return null;
-  const rel = norm(raw.startsWith("/") ? raw : join12(original, raw)).slice(norm(original).length).replace(/^\//, "");
+  const rel = norm(raw.startsWith("/") ? raw : join13(original, raw)).slice(norm(original).length).replace(/^\//, "");
   return rel === "" ? null : rel;
 }
 var ENV_READ = /(?:os\.environ(?:\.get)?\s*[\[(]\s*|os\.getenv\s*\(\s*|process\.env\s*\[\s*)["']([A-Za-z_][A-Za-z0-9_]*)["']|process\.env\.([A-Za-z_][A-Za-z0-9_]*)/;
@@ -4396,7 +4808,7 @@ function flatData(original, rels, named, mapText, io) {
     if (hit === undefined || found.has(hit))
       continue;
     if (/\.json$/i.test(hit)) {
-      const text = io.readFile(join12(original, hit));
+      const text = io.readFile(join13(original, hit));
       if (text === null || !parseJsonRows(text).ok)
         continue;
     }
@@ -4407,7 +4819,7 @@ function flatData(original, rels, named, mapText, io) {
     for (const file of rels) {
       if (!CODE3.test(file))
         continue;
-      const text = io.readFile(join12(original, file));
+      const text = io.readFile(join13(original, file));
       if (text === null || text.length > CODE_CAP)
         continue;
       for (const f of rest) {
@@ -4575,7 +4987,7 @@ async function snapshot(folder, io, args = []) {
     io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder, and no <name>-archive beside it. Do step 1 of the dkod-migrate skill first.");
     return 2;
   }
-  const scratch = io.mkdtemp(join12(io.tmpdir(), "dkod-migrate-"));
+  const scratch = io.mkdtemp(join13(io.tmpdir(), "dkod-migrate-"));
   const id = (scratch.split(/[\\/]/).pop() ?? "run").replace(/^dkod-migrate-/, "").replace(/[^A-Za-z0-9]/g, "_");
   const files = [];
   const bases = [];
@@ -4584,11 +4996,11 @@ async function snapshot(folder, io, args = []) {
   if (flags.originalUrl !== "")
     for (const [k, v] of await processPairs(flags.originalUrl, io))
       named.push([k, v, "process"]);
-  const walked = io.walk(original, SKIP3);
+  const walked = io.walk(original, SKIP4);
   for (const file of envFiles(walked))
-    for (const [k, v] of envPairs(io.readFile(join12(original, file))))
+    for (const [k, v] of envPairs(io.readFile(join13(original, file))))
       named.push([k, v, file]);
-  const flatFound = flatData(original, walked, named.map(([k, v]) => [k, v]), io.readFile(join12(dir, ".dkod/map/app-map.json")), io);
+  const flatFound = flatData(original, walked, named.map(([k, v]) => [k, v]), io.readFile(join13(dir, ".dkod/map/app-map.json")), io);
   const picked = walked.filter((rel) => DATA2.test(rel) || flatFound.has(rel));
   const present = new Set(walked);
   const short = diskShort(picked, present, original, io);
@@ -4599,10 +5011,10 @@ async function snapshot(folder, io, args = []) {
   }
   for (const rel of picked) {
     const flat = flatFound.get(rel);
-    const to = join12(scratch, rel);
+    const to = join13(scratch, rel);
     await copyData(original, rel, to, present, io);
     files.push(to);
-    const base = join12(scratch, `.dkod-base/${rel}`);
+    const base = join13(scratch, `.dkod-base/${rel}`);
     io.copyFile(to, base);
     for (const side of SQLITE_SIDECARS)
       if (present.has(`${rel}${side}`) && io.size?.(`${to}${side}`) != null)
@@ -4711,9 +5123,9 @@ async function snapshot(folder, io, args = []) {
   record.nonce = randomBytes(16).toString("hex");
   record.seal = sealOf(record, record.nonce);
   if (!empty)
-    io.writeFile(join12(scratch, SEAL_FILE), record.seal);
+    io.writeFile(join13(scratch, SEAL_FILE), record.seal);
   if (!empty)
-    io.writeFile(join12(scratch, ENV_FILE2), Object.entries(env).map(([k, v]) => `${k}=${v.includes("'") ? `"${v}"` : `'${v}'`}
+    io.writeFile(join13(scratch, ENV_FILE2), Object.entries(env).map(([k, v]) => `${k}=${v.includes("'") ? `"${v}"` : `'${v}'`}
 `).join(""));
   io.writeFile(snapshotPath(dir), `${JSON.stringify(record, null, 2)}
 `);
@@ -4722,10 +5134,10 @@ async function snapshot(folder, io, args = []) {
 }
 var SQLITE_SIDECARS = ["-wal"];
 async function copyData(original, rel, to, present, io) {
-  io.copyFile(join12(original, rel), to);
+  io.copyFile(join13(original, rel), to);
   if (!DATA2.test(rel) || !present.has(`${rel}-wal`))
     return;
-  io.copyFile(join12(original, `${rel}-wal`), `${to}-wal`);
+  io.copyFile(join13(original, `${rel}-wal`), `${to}-wal`);
   if (!io.hasTool("sqlite3"))
     return;
   const res = await io.run("sqlite3", [to, "PRAGMA journal_mode=DELETE;"], {}, io.cwd).catch(() => null);
@@ -4741,10 +5153,10 @@ function diskShort(picked, present, original, io) {
     return null;
   let need = 0;
   for (const rel of picked) {
-    need += io.size(join12(original, rel)) ?? 0;
+    need += io.size(join13(original, rel)) ?? 0;
     for (const side of SQLITE_SIDECARS)
       if (present.has(`${rel}${side}`))
-        need += io.size(join12(original, `${rel}${side}`)) ?? 0;
+        need += io.size(join13(original, `${rel}${side}`)) ?? 0;
   }
   need = need * 2 + 256 * 1024 * 1024;
   const dir = io.tmpdir();
@@ -4775,7 +5187,7 @@ function runDirRefusal(runDir, dkDir, io) {
     if (o === real || o.startsWith(`${real}/`) || real.startsWith(`${o}/`))
       return `${runDir} is, holds or sits inside ${other}, so nothing was removed. Pass the folder \`mktemp -d\` printed, not an app folder.`;
   }
-  if (io.walk(real, SKIP3).some((f) => f === ".dkod/migration.json" || f.endsWith("/.dkod/migration.json")))
+  if (io.walk(real, SKIP4).some((f) => f === ".dkod/migration.json" || f.endsWith("/.dkod/migration.json")))
     return `${runDir} holds another migration's .dkod/migration.json, so nothing was removed. Pass the folder \`mktemp -d\` printed for this run.`;
   return null;
 }
@@ -4811,13 +5223,13 @@ async function runMigrateCli(argv, io) {
   if (command === "stop-servers" && folder !== undefined)
     return await stopServersCommand(argv.slice(2), io);
   if (command === "install-restart" && folder !== undefined) {
-    const to = join12(folder === "" ? io.cwd : folder, "tests/parity/restart.ts");
+    const to = join13(folder === "" ? io.cwd : folder, "tests/parity/restart.ts");
     io.writeFile(to, PARITY_RESTART_SOURCE);
     io.print(JSON.stringify({ ok: true, file: to }));
     return 0;
   }
   if (command === "install-files" && folder !== undefined) {
-    const to = join12(folder === "" ? io.cwd : folder, "src/dkod-files.ts");
+    const to = join13(folder === "" ? io.cwd : folder, "src/dkod-files.ts");
     io.writeFile(to, DKOD_FILES_SOURCE);
     io.print(JSON.stringify({ ok: true, file: to }));
     return 0;
@@ -4846,6 +5258,8 @@ async function runMigrateCli(argv, io) {
     return await measureMemory(folder, io, argv.slice(2));
   if (command === "verify" && folder !== undefined)
     return await verifyApp(folder, io, argv.slice(2));
+  if (command === "preflight" && folder !== undefined)
+    return preflight(folder, io, argv.slice(2));
   io.print(USAGE);
   return 2;
 }
@@ -5004,8 +5418,8 @@ async function discoverRuntime(baseUrl, mapped, codeRoutes, io) {
   return out;
 }
 
-var join13 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
-var SKIP4 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".dkod", "__pycache__"];
+var join14 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+var SKIP5 = ["node_modules", ".git", ".venv", ".next", "dist", "build", "vendor", ".dkod", "__pycache__"];
 var ASSET_KINDS = ["css", "font", "icon", "image"];
 var TEXT_MAX2 = 200;
 var FULL_MAP = {
@@ -5293,7 +5707,7 @@ function packageDirs(files, needle, io, original) {
   for (const f of files) {
     if (f !== "package.json" && !f.endsWith("/package.json"))
       continue;
-    if (needle.test(io.readFile(join13(original, f)) ?? ""))
+    if (needle.test(io.readFile(join14(original, f)) ?? ""))
       out.push(f.slice(0, f.length - "package.json".length));
   }
   return out;
@@ -5324,7 +5738,7 @@ function fileRoutes(files, io, original) {
   const out = [];
   const add = (path, file, method = "GET") => out.push({ path: normalizeRoute(path), method, file, relative: false });
   const addHandler = (path, file) => {
-    for (const method of handlerMethods(io.readFile(join13(original, file)) ?? ""))
+    for (const method of handlerMethods(io.readFile(join14(original, file)) ?? ""))
       add(path, file, method);
   };
   const next = packageDirs(files, /"next"\s*:/, io, original);
@@ -5369,7 +5783,7 @@ function sourceRoutes(files, io, original) {
     if (IS_TEST.test(f))
       continue;
     if (/(?:^|\/)netlify\.toml$/.test(f)) {
-      const toml = io.readFile(join13(original, f));
+      const toml = io.readFile(join14(original, f));
       for (const m of (toml ?? "").matchAll(/^\s*from\s*=\s*(["'])(\/[^"']*)\1/gm)) {
         if (!SPA_CATCH_ALL.test(m[2]) && !/\s/.test(m[2]))
           out.push({ path: normalizeRoute(m[2]), method: "ANY", file: f, relative: false });
@@ -5378,7 +5792,7 @@ function sourceRoutes(files, io, original) {
     }
     if (!CODE4.test(f) && !PY.test(f))
       continue;
-    const text = io.readFile(join13(original, f));
+    const text = io.readFile(join14(original, f));
     if (text === null)
       continue;
     const add = (path, method = "GET") => {
@@ -5441,7 +5855,7 @@ function sourceRoutes(files, io, original) {
   return out;
 }
 function discoverRoutes(original, io) {
-  const files = io.walk(original, SKIP4);
+  const files = io.walk(original, SKIP5);
   const all = [...fileRoutes(files, io, original), ...sourceRoutes(files, io, original)];
   const seen = new Set;
   return all.filter((r) => {
@@ -5459,17 +5873,17 @@ function discoverTables(original, io) {
       set.add(c);
     out.set(name, set);
   };
-  for (const f of io.walk(original, SKIP4)) {
+  for (const f of io.walk(original, SKIP5)) {
     if (IS_TEST.test(f))
       continue;
     if (/(?:^|\/)data\/.+\.csv$/i.test(f)) {
-      const header = (io.readFile(join13(original, f)) ?? "").split(/\r?\n/, 1)[0] ?? "";
+      const header = (io.readFile(join14(original, f)) ?? "").split(/\r?\n/, 1)[0] ?? "";
       put((f.split("/").pop() ?? f).replace(/\.csv$/i, ""), header.split(",").map((c) => bare(c.trim())).filter((c) => c !== ""));
       continue;
     }
     if (!/\.sql$/i.test(f) && !CODE4.test(f) && !PY.test(f))
       continue;
-    const raw = io.readFile(join13(original, f));
+    const raw = io.readFile(join14(original, f));
     if (raw === null)
       continue;
     const text = raw.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
@@ -5514,12 +5928,12 @@ var ENV_FILE3 = /^(?:.*\.)?env(?:\..+)?$|\.example$/;
 var ENV_SCHEMA = /^env\.[cm]?[jt]s$/;
 function discoverSettings(original, io) {
   const names = new Set;
-  for (const f of io.walk(original, SKIP4)) {
+  for (const f of io.walk(original, SKIP5)) {
     const base = f.split("/").pop();
     if (IS_TEST.test(f) && ENV_FILE3.test(base))
       continue;
     if (ENV_FILE3.test(base) && !CODE4.test(base) && !PY.test(base) && !VUE.test(base)) {
-      for (const line of (io.readFile(join13(original, f)) ?? "").split(/\r?\n/)) {
+      for (const line of (io.readFile(join14(original, f)) ?? "").split(/\r?\n/)) {
         const key = /^\s*(?:export\s+)?([A-Za-z_]\w*)\s*=/.exec(line)?.[1];
         if (key !== undefined)
           names.add(key);
@@ -5528,7 +5942,7 @@ function discoverSettings(original, io) {
     }
     if (IS_TEST.test(f) || !CODE4.test(f) && !PY.test(f) && !VUE.test(f))
       continue;
-    const raw = io.readFile(join13(original, f));
+    const raw = io.readFile(join14(original, f));
     if (raw === null)
       continue;
     const text = codeOf(f, raw);
@@ -5565,17 +5979,17 @@ function colorsInCss(raw) {
 }
 function discoverColors(original, io) {
   const colors = new Set;
-  for (const f of io.walk(original, SKIP4)) {
+  for (const f of io.walk(original, SKIP5)) {
     if (/\.[cm]?[jt]sx?$/.test(f)) {
       if (IS_TEST.test(f))
         continue;
-      for (const c of colorsInCode(io.readFile(join13(original, f)) ?? ""))
+      for (const c of colorsInCode(io.readFile(join14(original, f)) ?? ""))
         colors.add(c);
       continue;
     }
     if (!/\.(?:css|scss|sass|less)$/i.test(f))
       continue;
-    for (const c of colorsInCss(io.readFile(join13(original, f)) ?? ""))
+    for (const c of colorsInCss(io.readFile(join14(original, f)) ?? ""))
       colors.add(c);
   }
   return [...colors].sort();
@@ -5584,10 +5998,10 @@ var KEYWORDS = new Set(["if", "for", "while", "switch", "catch", "constructor", 
 var MARKUP = /\.(?:html?|vue)$/i;
 function discoverFunctions(original, io) {
   const names = new Set;
-  for (const f of io.walk(original, SKIP4)) {
+  for (const f of io.walk(original, SKIP5)) {
     if (IS_TEST.test(f) || !CODE4.test(f) && !PY.test(f) && !VUE.test(f))
       continue;
-    const raw = io.readFile(join13(original, f));
+    const raw = io.readFile(join14(original, f));
     if (raw === null)
       continue;
     const text = codeOf(f, raw);
@@ -5619,10 +6033,10 @@ var SQL_START = /^\s*(?:(?:select|insert|update|delete)\s[\s\S]*\b(?:from|into|s
 var LITERAL = /"""([\s\S]*?)"""|'''([\s\S]*?)'''|`([^`]*)`|"((?:[^"\\\n]|\\.)*)"|'((?:[^'\\\n]|\\.)*)'/g;
 function discoverQueries(original, io) {
   const out = new Set;
-  for (const f of io.walk(original, SKIP4)) {
+  for (const f of io.walk(original, SKIP5)) {
     if (IS_TEST.test(f) || !CODE4.test(f) && !PY.test(f) && !VUE.test(f) && !/\.(?:html?|sql)$/i.test(f))
       continue;
-    const text = io.readFile(join13(original, f));
+    const text = io.readFile(join14(original, f));
     if (text === null)
       continue;
     for (const m of text.matchAll(LITERAL)) {
@@ -5661,10 +6075,10 @@ function fontsIn(text, isStyle, stacks) {
 function scanFonts(original, io) {
   const fonts = new Map;
   const stacks = new Set;
-  for (const f of io.walk(original, SKIP4)) {
+  for (const f of io.walk(original, SKIP5)) {
     if (IS_TEST.test(f) || !STYLE.test(f) && !CODE4.test(f) && !MARKUP.test(f))
       continue;
-    const text = io.readFile(join13(original, f));
+    const text = io.readFile(join14(original, f));
     if (text === null)
       continue;
     for (const name of fontsIn(text, STYLE.test(f), stacks))
@@ -5713,10 +6127,10 @@ function idsIn(text, buttons, tooltips) {
 function discoverButtons(original, io) {
   const buttons = new Set;
   const tooltips = new Set;
-  for (const f of io.walk(original, SKIP4)) {
+  for (const f of io.walk(original, SKIP5)) {
     if (IS_TEST.test(f) || !CODE4.test(f) && !MARKUP.test(f))
       continue;
-    const text = io.readFile(join13(original, f));
+    const text = io.readFile(join14(original, f));
     if (text === null)
       continue;
     idsIn(text, buttons, tooltips);
@@ -5740,13 +6154,13 @@ var SDKS = [
 var sdkName = (pkg) => SDKS.find(([re]) => re.test(pkg))?.[1] ?? null;
 function discoverServices(original, io) {
   const out = new Set;
-  for (const f of io.walk(original, SKIP4)) {
+  for (const f of io.walk(original, SKIP5)) {
     const isPkg = f === "package.json" || f.endsWith("/package.json");
     const py = PY.test(f);
     const plain = HOST_FILE.test(f) || ENV_FILE3.test(f.split("/").pop()) && !CODE4.test(f) && !py;
     if (IS_TEST.test(f) || !isPkg && !plain && !CODE4.test(f) && !py)
       continue;
-    const raw = io.readFile(join13(original, f));
+    const raw = io.readFile(join14(original, f));
     if (raw === null)
       continue;
     if (isPkg) {
@@ -5811,9 +6225,9 @@ function installedServers(map, original, io) {
     [/^(?:mysql2?|mysqlclient|pymysql)$/, "mysql"],
     [/^(?:mongodb|mongoose|pymongo)$/, "mongodb"]
   ];
-  for (const f of io.walk(original, SKIP4)) {
+  for (const f of io.walk(original, SKIP5)) {
     const base = f.split("/").pop();
-    const text = /^package\.json$|^requirements[\w.-]*\.txt$|^pyproject\.toml$/.test(base) ? io.readFile(join13(original, f)) : null;
+    const text = /^package\.json$|^requirements[\w.-]*\.txt$|^pyproject\.toml$/.test(base) ? io.readFile(join14(original, f)) : null;
     if (text === null)
       continue;
     let deps;
@@ -5872,11 +6286,11 @@ function recordsDevOverlay(value, top = true) {
 }
 function devOverlayStates(mapDir, io) {
   const out = [];
-  for (const rel of io.walk(join13(mapDir, "design"), [])) {
+  for (const rel of io.walk(join14(mapDir, "design"), [])) {
     const m = /^pages[/]([^/]+)[/]([^/]+)[.]json$/.exec(rel);
     if (m === null)
       continue;
-    const parsed = readJson(io.readFile(join13(join13(mapDir, "design"), rel)));
+    const parsed = readJson(io.readFile(join14(join14(mapDir, "design"), rel)));
     if (parsed.ok && recordsDevOverlay(parsed.value))
       out.push(`${m[1]}/${m[2]}`);
   }
@@ -5884,11 +6298,11 @@ function devOverlayStates(mapDir, io) {
 }
 function frameStates(mapDir, io) {
   const out = [];
-  for (const rel of io.walk(join13(mapDir, "design"), [])) {
+  for (const rel of io.walk(join14(mapDir, "design"), [])) {
     const m = /^pages[/]([^/]+)[/]([^/]+)[.]json$/.exec(rel);
     if (m === null)
       continue;
-    const parsed = readJson(io.readFile(join13(join13(mapDir, "design"), rel)));
+    const parsed = readJson(io.readFile(join14(join14(mapDir, "design"), rel)));
     const frames = parsed.ok && typeof parsed.value === "object" && parsed.value !== null ? parsed.value.frames : undefined;
     if (Array.isArray(frames) && frames.length > 0 && frames.every((f) => typeof f === "string"))
       out.push(`${m[1]}/${m[2]}`);
@@ -5903,18 +6317,18 @@ async function checkMap(folder, io, args = []) {
   const flag = args.findIndex((a) => a === "--original-url" || a.startsWith("--original-url="));
   const originalUrl = flag < 0 ? "" : args[flag].startsWith("--original-url=") ? args[flag].slice(15) : args[flag + 1] ?? "";
   const dir = folder === "" ? io.cwd : folder;
-  const original = originalOf(io.readFile(join13(dir, ".dkod/migration.json")));
+  const original = originalOf(io.readFile(join14(dir, ".dkod/migration.json")));
   if (original === null) {
     io.print("dkod-migrate: no .dkod/migration.json with an original app in this folder. Do step 1 of the dkod-migrate skill first.");
     return 2;
   }
-  const mapDir = join13(dir, ".dkod/map");
+  const mapDir = join14(dir, ".dkod/map");
   const problems = [];
   const missing = [];
   const noShot = [];
   const counts = { routes: 0, pages: 0, stores: 0, tables: 0, services: 0, settings: 0, queries: 0, functions: 0, design: 0, found_routes: 0, screenshots: 0, assets: 0 };
-  const parsed = readJson(io.readFile(join13(mapDir, "app-map.json")));
-  const designFiles = new Set(io.walk(join13(mapDir, "design"), []));
+  const parsed = readJson(io.readFile(join14(mapDir, "app-map.json")));
+  const designFiles = new Set(io.walk(join14(mapDir, "design"), []));
   let map = null;
   if (!parsed.ok)
     problems.push(`app-map.json: ${parsed.why}`);
@@ -6062,10 +6476,10 @@ async function checkMap(folder, io, args = []) {
   for (const s of devOverlayPages)
     problems.push(`design/pages/${s}.json: the capture shows a framework dev overlay (dev_overlay). Run the original's production build and start (Next.js: next build, then next start), never a dev server, and capture ${s} again`);
   const framed = new Set(frameStates(mapDir, io));
-  for (const f of io.walk(join13(dir, "tests/parity"), ["node_modules"])) {
+  for (const f of io.walk(join14(dir, "tests/parity"), ["node_modules"])) {
     if (!/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(f))
       continue;
-    problems.push(...designProblems(testBlocks(io.readFile(join13(dir, `tests/parity/${f}`)) ?? ""), designFramed(framed)));
+    problems.push(...designProblems(testBlocks(io.readFile(join14(dir, `tests/parity/${f}`)) ?? ""), designFramed(framed)));
   }
   const byImage = new Map;
   for (const page of pages) {
@@ -6074,18 +6488,18 @@ async function checkMap(folder, io, args = []) {
     const rel = `pages/${pageSlug(page.path)}/default.png`;
     if (!designFiles.has(rel))
       continue;
-    const sha = io.sha256([join13(join13(mapDir, "design"), rel)]);
+    const sha = io.sha256([join14(join14(mapDir, "design"), rel)]);
     byImage.set(sha, [...byImage.get(sha) ?? [], page.path]);
   }
   const shotPages = [...byImage.values()].reduce((n, g) => n + g.length, 0);
   const placeholders = [...byImage.values()].filter((g) => g.length >= 3 || g.length === shotPages && shotPages >= 2).flat();
-  const assets = readJson(io.readFile(join13(mapDir, "assets/assets.json")));
+  const assets = readJson(io.readFile(join14(mapDir, "assets/assets.json")));
   if (!assets.ok)
     problems.push(`assets/assets.json: ${assets.why}`);
   else if (!Array.isArray(assets.value))
     problems.push("assets/assets.json: must be a list of {kind, path}");
   else {
-    const originalFiles = new Set(io.walk(original, SKIP4));
+    const originalFiles = new Set(io.walk(original, SKIP5));
     counts.assets = assets.value.length;
     assets.value.forEach((a, i) => {
       if (!isRec7(a))
@@ -6172,7 +6586,7 @@ function walk(dir, skip) {
     for (const name of names) {
       if (skip.includes(name))
         continue;
-      const full = join14(at, name);
+      const full = join15(at, name);
       const next = rel === "" ? name : `${rel}/${name}`;
       let dirEntry;
       try {
@@ -6249,7 +6663,7 @@ var io = {
         return [];
       }
     })
-  ].some((dir) => dir !== "" && existsSync(join14(dir, program))),
+  ].some((dir) => dir !== "" && existsSync(join15(dir, program))),
   print: (line) => process.stdout.write(`${line}
 `),
   run: (cmd, args, env, cwd) => new Promise((resolve) => {
