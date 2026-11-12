@@ -666,6 +666,7 @@ var SKIP = new Set(["node_modules", ".git", ".venv", "venv", "dist", "build", ".
 
 var MAX_MESSAGE_BYTES = 16 << 20;
 var MAX_HANDSHAKE_BYTES = 16 << 10;
+var LOOPBACK = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 
 var MAX_FILE_BYTES = 5 * 1024 ** 3;
 var HOP = new Set(["connection", "keep-alive", "transfer-encoding", "upgrade", "host", "authorization", "content-length"]);
