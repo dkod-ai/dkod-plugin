@@ -2,10 +2,11 @@
 // DKO-1020: the DKOD hook for Cursor. The public plugin's Cursor manifest runs it on the events below.
 // Claude Code does not use it: it has its own mod and backstop.
 //
-// DKOD FIRST. Every chat on a computer with the plugin works through DKOD, and that is enforced, not
-// asked for: the skill alone loads only when the model thinks of it.
-//   sessionStart: the agent gets the DKOD-first steps and the skill's path in its context.
-//   preToolUse / beforeShellExecution: until the chat started a DKOD session, a file write, an edit,
+// DKOD FIRST, for DKOD tasks (DKO-1710): a new app, an app in a DKOD folder, a deploy. That is enforced,
+// not asked for: the skill alone loads only when the model thinks of it. Any other chat is left alone.
+//   sessionStart: the agent gets the DKOD steps, what a DKOD task is, and the skill's path in its context.
+//   beforeSubmitPrompt: a prompt that asks for a DKOD task marks the chat (asked.json), for a day.
+//   preToolUse / beforeShellExecution: in a DKOD task (a marked chat, or a DKOD folder), until the chat started a DKOD session, a file write, an edit,
 //     a delete or a command that changes anything is denied, and the agent is told the DKOD steps.
 //     Reading (files, search, read-only commands) stays free, so the agent can look before it starts.
 //   beforeMCPExecution: dkoder.session.start marks the chat as a DKOD chat (for 24 hours), and
@@ -65,11 +66,15 @@ const STEPS = [
   "If a DKOD tool says it needs sign-in, tell the user: " + SIGNIN,
 ].join(" ");
 
+// DKO-1710: DKOD acts only on a DKOD task. "Any code request" sent every chat (a script, another repo, a
+// question) through DKOD: a session, the policy, the templates and the 42 KB skill, about 4x the tokens.
+const SCOPE = "A DKOD task is: building a new app, changing an app in a DKOD folder (a dk- folder, or one with .dkod/ or dkod.yaml), or a request to deploy, ship, push to prod or migrate an app, or about DKOD or the org's policy.";
+
 const FIRST_CONTEXT = [
-  "DKOD FIRST. This computer builds software through the company's DKOD. Any request to build, create, change, fix, run or ship code",
-  "starts with a DKOD session, before you plan, ask questions, make a folder or write a file:",
+  "DKOD: this computer builds apps through the company's DKOD.", SCOPE,
+  "A DKOD task starts with a DKOD session, before you plan, ask questions, make a folder or write a file:",
   STEPS,
-  "Until this chat has a DKOD session, Dkoder refuses file writes and commands that change anything.",
+  "Anything else (a question, a script, a file in another repo) is not a DKOD task: do it as usual, with no DKOD tools and without the dkod skill.",
 ].join(" ");
 
 const SIGNALS_STATE = join(STATE_DIR, "signals.json");
@@ -196,6 +201,42 @@ function noteChat(conversationId, field) {
 }
 
 const isDkodChat = (conversationId) => Boolean(conversationId && readState()[conversationId]);
+
+// DKO-1710: the chats whose prompt asked for a DKOD task (beforeSubmitPrompt), for a day.
+const ASKED = join(STATE_DIR, "asked.json");
+const DKOD_PROMPT = /\b(?:dkod|dkoder|deploy\w*|ship|push(?:ed)? to prod\w*|production|migrat\w*|new (?:app|service|website|site)|(?:build|create|make|start|scaffold)\b[^.?!\n]{0,40}\b(?:app|application|service|website|site|api|backend|frontend))\b/i;
+
+function readAsked() {
+  try {
+    const now = Date.now();
+    return Object.fromEntries(Object.entries(JSON.parse(readFileSync(ASKED, "utf8"))).filter(([, at]) => now - Number(at) < DAY));
+  } catch {
+    return {};
+  }
+}
+
+function noteAsked(conversationId) {
+  if (!conversationId) return;
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    writeFileSync(ASKED, JSON.stringify({ ...readAsked(), [conversationId]: Date.now() }));
+  } catch { /* no state: the folder still counts */ }
+}
+
+/** A DKOD app folder: the workspace or a folder above it is a dk- folder, has .dkod/ or dkod.yaml, or is an app being migrated. */
+function dkodFolder(dir) {
+  if (!dir) return false;
+  if (migrationAt(dir) !== null) return true;
+  const home = norm(homedir());
+  for (let folder = norm(dir); folder !== "" && folder !== home; folder = folder.slice(0, Math.max(folder.lastIndexOf("/"), 0))) {
+    if (/^dk-/.test(folder.slice(folder.lastIndexOf("/") + 1))) return true;
+    if (["dkod.yaml", "dkod.yml", ".dkod"].some((name) => existsSync(join("/", folder, name)))) return true;
+  }
+  return false;
+}
+
+/** DKO-1710: the session gate applies only to a DKOD task: the chat asked for one, or it works in a DKOD folder. */
+const dkodTask = (conversationId, input) => Boolean(conversationId && readAsked()[conversationId]) || dkodFolder(workDir(input));
 const gateOff = () => existsSync(join(STATE_DIR, "off"));
 
 /**
@@ -1093,11 +1134,16 @@ try {
 const event = input.hook_event_name ?? "";
 const chat = input.conversation_id ?? null;
 
+if (event === "beforeSubmitPrompt") {
+  if (DKOD_PROMPT.test(String(input.prompt ?? ""))) noteAsked(chat);
+  out({ continue: true });
+}
+
 if (event === "sessionStart") out({ additional_context: signalsDue() ? `${FIRST_CONTEXT} ${SIGNALS_SETUP}` : FIRST_CONTEXT });
 
 if (event === "preToolUse") {
   const tool = String(input.tool_name ?? "");
-  if (!isDkodChat(chat) && WRITES.test(tool) && gateOn(input)) {
+  if (!isDkodChat(chat) && WRITES.test(tool) && gateOn(input) && dkodTask(chat, input)) {
     out({ permission: "deny", user_message: "DKOD: start a DKOD session first. The agent is told how.", agent_message: FIRST_DENY });
   }
   {
@@ -1179,7 +1225,7 @@ if (event === "preToolUse") {
     if (original !== null && !readOnly(command) && touchesOriginal(join(found.folder, ".dkod"), dir, command, join(found.folder, ".dkod", "map"))) {
       out({ permission: "deny", user_message: "DKOD: the original app is read only while a migration is open.", agent_message: recordDeny() });
     }
-    if (!isDkodChat(chat) && !readOnly(command) && gateOn(input)) out({ permission: "deny", user_message: "DKOD: start a DKOD session first. The agent is told how.", agent_message: FIRST_DENY });
+    if (!isDkodChat(chat) && !readOnly(command) && gateOn(input) && dkodTask(chat, input)) out({ permission: "deny", user_message: "DKOD: start a DKOD session first. The agent is told how.", agent_message: FIRST_DENY });
   }
   out({});
 }
@@ -1352,7 +1398,7 @@ if (event === "beforeShellExecution" || (event === "" && "command" in input)) {
     if (gitSetup(command)) out({ permission: "deny", user_message: "DKOD blocked git setup for this app: DKOD makes the repository itself.", agent_message: NO_GIT });
     out({});
   }
-  if (event !== "" && !readOnly(command) && gateOn(input)) {
+  if (event !== "" && !readOnly(command) && gateOn(input) && dkodTask(chat, input)) {
     out({ permission: "deny", user_message: "DKOD: start a DKOD session first. The agent is told how.", agent_message: FIRST_DENY });
   }
   out({});

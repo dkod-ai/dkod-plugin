@@ -1,7 +1,7 @@
 {
   "name": "dkod",
   "displayName": "DKOD",
-  "version": "0.17.185",
+  "version": "0.17.186",
   "description": "Build and deploy apps through your company's DKOD: policy, templates, Deploy questions and Deliver.",
   "author": {
     "name": "DKOD"
@@ -29,6 +29,11 @@
     "version": 1,
     "hooks": {
       "sessionStart": [
+        {
+          "command": "node \"${CURSOR_PLUGIN_ROOT:-.}/hooks/cursor-guard.mjs\""
+        }
+      ],
+      "beforeSubmitPrompt": [
         {
           "command": "node \"${CURSOR_PLUGIN_ROOT:-.}/hooks/cursor-guard.mjs\""
         }

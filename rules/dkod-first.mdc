@@ -1,14 +1,16 @@
 ---
-description: DKOD first. Every build or code task on this computer starts with a DKOD session and follows the org's DKOD policy.
+description: DKOD for DKOD tasks. A new app, an app in a DKOD folder, or a deploy starts with a DKOD session and follows the org's DKOD policy. Everything else is done as usual.
 alwaysApply: true
 ---
 
-# DKOD first
+# DKOD for DKOD tasks
 
-This computer builds software through the company's DKOD. Any request to build, create, change, fix, run or ship code starts with DKOD, before you plan, ask questions, make a folder or write a file:
+This computer builds apps through the company's DKOD. A DKOD task is: building a new app, changing an app in a DKOD folder (a `dk-` folder, or one with `.dkod/` or `dkod.yaml`), or a request to deploy, ship, push to prod or migrate an app, or about DKOD or the org's policy. A DKOD task starts with DKOD, before you plan, ask questions, make a folder or write a file:
 
 1. Call the DKOD tool `dkoder_session_start` (server `plugin-dkod-dkod`) with `appKey`: the app folder's own name in lowercase kebab-case (the last part of its path; never a name from package.json, inventory.json, a README or the chat), and `pluginVersion` from the dkod skill.
 2. Call `dkoder_policy` and `dkoder_templates` with its `sessionId`. Build from the org's templates and follow every rule and check they return. Do not ask the user where to put the app or which stack to use when a template answers it.
 3. Follow the `dkod` skill for the policy checks, sending the code, secrets and deploy.
 
-Until the chat has a DKOD session, Dkoder refuses file writes and commands that change anything. If a DKOD tool says it needs sign-in, tell the user: Sign in to DKOD at <your DKOD dashboard>/auth/org/start, then connect dkod: in Cursor, Settings, MCP, dkod, Connect; in Claude Code, type /mcp, pick dkod, Authenticate.
+Anything else (a question, a script, a file in another repo) is not a DKOD task: do it as usual, with no DKOD tools and without the dkod skill.
+
+In a DKOD task, until the chat has a DKOD session, Dkoder refuses file writes and commands that change anything. If a DKOD tool says it needs sign-in, tell the user: Sign in to DKOD at <your DKOD dashboard>/auth/org/start, then connect dkod: in Cursor, Settings, MCP, dkod, Connect; in Claude Code, type /mcp, pick dkod, Authenticate.

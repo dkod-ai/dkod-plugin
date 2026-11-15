@@ -2346,10 +2346,16 @@ var CATALOG = {
     summary: "At least one file matches one of the given paths.",
     paths: ["**"],
     exclude: [],
-    params: [{ name: "any_of", kind: "strings", hint: "Paths or globs, for example CODEOWNERS or .github/CODEOWNERS." }],
-    validate: (p) => listProblems(p, "any_of", { required: true }),
+    params: [
+      { name: "any_of", kind: "strings", hint: "Paths or globs, for example CODEOWNERS or .github/CODEOWNERS." },
+      { name: "when_any", kind: "strings", hint: "Optional. Only check an app that has one of these files, for example **/package.json." }
+    ],
+    validate: (p) => [...listProblems(p, "any_of", { required: true }), ...listProblems(p, "when_any")],
     runTree(files, params) {
       const want = stringList(params, "any_of") ?? [];
+      const when = stringList(params, "when_any");
+      if (when && when.length > 0 && !files.some((f) => matchAny(when, f.path)))
+        return [];
       if (files.some((f) => matchAny(want, f.path)))
         return [];
       return [{ path: null, line: null, detail: `none of ${want.join(", ")} exists` }];
