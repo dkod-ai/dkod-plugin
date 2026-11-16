@@ -672,6 +672,8 @@ var MAX_FILE_BYTES = 5 * 1024 ** 3;
 var HOP = new Set(["connection", "keep-alive", "transfer-encoding", "upgrade", "host", "authorization", "content-length"]);
 var PART_BYTES = 8 << 20;
 
+var HEAVY_TABLE_BYTES = 100 * 1024 * 1024;
+
 var WAIT_LIMIT_MS = 10 * 60000;
 var GATEWAY_LOAD_BUDGET_MS = 2 * 60000;
 var PENDING_CAP = 1 << 20;
@@ -682,7 +684,7 @@ var USAGE = [
   "  node dkod-db.mjs files --from <folder> [--prefix media/] [--dir <app folder>] [--jobs 32]   (while `up` runs)",
   "  node dkod-db.mjs down [--dir <app folder>] [--all]",
   "  node dkod-db.mjs migrate [--dir <app folder>] [--port 6543]",
-  "  node dkod-db.mjs import --app <app key> --from <local postgres URL | snapshot> [--dir <app folder>] [--port 6543]",
+  "  node dkod-db.mjs import --app <app key> --from <local postgres URL | snapshot> [--dir <app folder>] [--port 6543] [--tables <name,name> | --no-data]",
   "  node dkod-db.mjs detect [--dir <app folder>]"
 ].join(`
 `);

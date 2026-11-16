@@ -1820,7 +1820,7 @@ async function render2(args, io) {
       continue;
     }
     const path = join2(dir, file.path);
-    if (!force && io.readFile(path) !== null) {
+    if ((!force || isMigrationFile(file.path)) && io.readFile(path) !== null) {
       skipped.push(file.path);
       continue;
     }
@@ -1843,7 +1843,8 @@ async function render2(args, io) {
   }));
   return 0;
 }
-var isAppFolderFile = (path) => isTemplateInfraPath(path) || path === ".gitignore" || /^drizzle\.config\.[cm]?[jt]s$/.test(path) || path === "alembic.ini" || path.startsWith("migrations/");
+var isAppFolderFile = (path) => isTemplateInfraPath(path) || path === ".gitignore" || isMigrationFile(path);
+var isMigrationFile = (path) => /^drizzle\.config\.[cm]?[jt]s$/.test(path) || path === "alembic.ini" || path.startsWith("migrations/");
 function snapshotHasDatabase(snapshot) {
   if (!isRec2(snapshot) || snapshot.mode !== "snapshot")
     return false;
