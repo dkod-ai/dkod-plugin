@@ -1178,7 +1178,7 @@ var FLAGS = {
   down: ["dir"],
   migrate: ["dir", "port"],
   explain: [],
-  import: ["app", "from", "dir", "port"],
+  import: ["app", "from", "dir", "port", "tables"],
   detect: ["dir"]
 };
 var BOOLEAN_FLAGS = { up: ["detach"], down: ["all"] };
@@ -1207,7 +1207,7 @@ var USAGE = [
   "  node dkod-db.mjs files --from <folder> [--prefix media/] [--dir <app folder>] [--jobs 32]   (while `up` runs)",
   "  node dkod-db.mjs down [--dir <app folder>] [--all]",
   "  node dkod-db.mjs migrate [--dir <app folder>] [--port 6543]",
-  "  node dkod-db.mjs import --app <app key> --from <local postgres URL | snapshot> [--dir <app folder>] [--port 6543]",
+  "  node dkod-db.mjs import --app <app key> --from <local postgres URL | snapshot> [--dir <app folder>] [--port 6543] [--tables <name,name>]",
   "  node dkod-db.mjs detect [--dir <app folder>]"
 ].join(`
 `);
@@ -2645,6 +2645,16 @@ async function runImport(flags, io, cwd) {
   if (mapped.length === 0) {
     say("The migration map has no tables to import (.dkod/map/app-map.json).");
     return 2;
+  }
+  const only = flags.get("tables");
+  if (only !== undefined) {
+    const want = only.split(",").map((n) => n.trim()).filter((n) => n !== "");
+    const unknown = want.filter((n) => !mapped.includes(n));
+    if (want.length === 0 || unknown.length > 0) {
+      say(`--tables takes the original's table names with commas between them${unknown.length > 0 ? `; it does not have: ${unknown.join(", ")}` : ""}. Its tables: ${mapped.join(", ")}.`);
+      return 2;
+    }
+    mapped = mapped.filter((n) => want.includes(n));
   }
   const colsQuery = (names) => `SELECT c.table_name, c.column_name FROM information_schema.columns c JOIN information_schema.tables t ON t.table_schema=c.table_schema AND t.table_name=c.table_name AND t.table_type='BASE TABLE' WHERE c.table_schema='public' AND c.is_generated='NEVER' AND c.table_name IN (${names.map(quoteLit).join(",")}) ORDER BY c.table_name, c.ordinal_position`;
   const readCols = (stdout) => {
