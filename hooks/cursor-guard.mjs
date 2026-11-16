@@ -142,6 +142,8 @@ const KEEP_GOING =
 
 /** Stops in a row the stop hook sends an open migration on; the manifest's loop_limit is the same number. */
 const KEEP_LIMIT = 3;
+/** Stops in a row it still sends on when the agent worked since the last nudge; the manifest's loop_limit is this number. */
+const KEEP_CAP = 20;
 
 const ASK_FIRST = [
   "DKOD: you asked the builder a question just before this call, so Dkoder held it back once.",
@@ -1234,11 +1236,13 @@ if (event === "preToolUse") {
 // policy check writes one, and counting it asked for the checks again and again (365Scores gBall).
 const scratchPath = (p) => /(?:^|\/)\.dkod\//.test(p) || /^(?:\/private)?\/var\/folders\//.test(p) || (process.env.TMPDIR && p.startsWith(process.env.TMPDIR));
 if (event === "afterFileEdit") {
+  noteChat(chat, "workedAt");
   if (!scratchPath(String(input.file_path ?? ""))) noteChat(chat, "editedAt");
   out({});
 }
 
 if (event === "afterShellExecution") {
+  noteChat(chat, "workedAt");
   if (/dkod-policy\.mjs["']?\s+check\b/.test(String(input.command ?? ""))) noteChat(chat, "checkedAt");
   out({});
 }
@@ -1260,7 +1264,13 @@ if (event === "stop") {
     // 2026-11-02: the agent asked, the builder skipped, and the agent went on or stopped without asking again.
     if (loops === 0 && facts.askedThisTurn && /\bskip/i.test(facts.lastText) && !asksBuilder(facts.lastText)) out({ followup_message: ASK_AGAIN });
     // With no dkod tools (signed out), the migration cannot go on, so no nudge.
-    if (loops < KEEP_LIMIT && migrationAt(root) !== null && !asksBuilder(facts.lastText) && dkodToolsHere(input.transcript_path) !== false) out({ followup_message: KEEP_GOING });
+    // 2026-11-16 (gBall): a long run used up the 3 nudges and the agent stopped mid-migration. A stop after real
+    // work (a command, a tool, an edit since the last nudge) is nudged again, up to KEEP_CAP in a row.
+    const worked = (rec.workedAt ?? 0) > (rec.nudgedAt ?? 0);
+    if ((loops < KEEP_LIMIT || (worked && loops < KEEP_CAP)) && migrationAt(root) !== null && !asksBuilder(facts.lastText) && dkodToolsHere(input.transcript_path) !== false) {
+      noteChat(chat, "nudgedAt");
+      out({ followup_message: KEEP_GOING });
+    }
     // The agent passed over the setup that sessionStart asked for. Ask once in this chat, and never over a question to the builder.
     if (loops === 0 && !rec.signalsAskedAt && !asksBuilder(facts.lastText) && signalsDue()) {
       noteChat(chat, "signalsAskedAt");
@@ -1306,6 +1316,7 @@ function savePolicy(result) {
 }
 
 if (event === "afterMCPExecution") {
+  noteChat(chat, "workedAt");
   const tool = String(input.tool_name ?? "").replace(/_/g, ".");
   const result = String(input.result_json ?? "");
   // DKO-1549: keep the answer of dkoder.policy, so `dkod-policy.mjs check --saved` reads it. The agent never
