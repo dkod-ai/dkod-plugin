@@ -4899,11 +4899,9 @@ async function copyDatabase(value, scratch, id, io, schemaOnly = false) {
   const source = databaseOf(url);
   const name = scratchName(source, id);
   const { host, port, user, env } = connection(url);
-  const tools = ["pg_dump", "psql"];
   if (url.protocol.startsWith("postgres")) {
-    for (const tool of tools)
-      if (!io.hasTool(tool))
-        return null;
+    if (!io.hasTool("psql"))
+      return null;
     const dump = `${scratch}/${name}.sql`;
     const ok = async (cmd, args) => {
       const res = await io.run(cmd, args, env, io.cwd);
@@ -4911,9 +4909,10 @@ async function copyDatabase(value, scratch, id, io, schemaOnly = false) {
         throw new Error(NO_PASSWORD);
       return res.status === 0;
     };
-    if (!await ok("pg_dump", ["-w", "--dbname", withDatabase(value, source), "--file", dump, ...schemaOnly ? ["--schema-only"] : []]))
+    const dumped = io.hasTool("pg_dump") && await ok("pg_dump", ["-w", "--dbname", withDatabase(value, source), "--file", dump, ...schemaOnly ? ["--schema-only"] : []]);
+    if (!dumped && !await ok("psql", ["-w", "--dbname", withDatabase(value, source), "-tAc", "SELECT 1"]))
       return null;
-    return { name: source, url: withDatabase(value, source), base: { name: source, url: withDatabase(value, source) }, read_only: true, dump };
+    return { name: source, url: withDatabase(value, source), base: { name: source, url: withDatabase(value, source) }, read_only: true, ...dumped ? { dump } : {} };
   }
   for (const tool of ["mysqldump", "mysql"])
     if (!io.hasTool(tool))
