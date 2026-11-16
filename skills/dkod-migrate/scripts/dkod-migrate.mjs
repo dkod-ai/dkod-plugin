@@ -210,6 +210,36 @@ async function readColumns(url, names, env, run, cwd = ".") {
   }
   return out;
 }
+var LIGHT_SKIP_TABLES = /^(?:_prisma_migrations|__drizzle_migrations|schema_migrations|knex_migrations(?:_lock)?|kysely_migration(?:_lock)?|alembic_version|flyway_schema_history|django_migrations)$/;
+var HEAVY_TABLE_BYTES = 100 * 1024 * 1024;
+async function tableSizes(url, env, run, cwd = ".") {
+  const sql = "SELECT c.relname, CASE WHEN c.reltuples < 0 THEN '' ELSE c.reltuples::bigint::text END, pg_total_relation_size(c.oid), coalesce((SELECT string_agg(DISTINCT p.relname, ',') FROM pg_constraint k JOIN pg_class p ON p.oid=k.confrelid JOIN pg_namespace pn ON pn.oid=p.relnamespace WHERE k.contype='f' AND k.conrelid=c.oid AND p.oid<>c.oid AND pn.nspname='public'), '') FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p') ORDER BY c.relname";
+  const res = await run("psql", [...PSQL, "--dbname", url, "-c", sql], env, cwd);
+  if (res.status !== 0)
+    return null;
+  const out = [];
+  for (const l of res.stdout.split(`
+`)) {
+    const p = l.split("\t");
+    if (p.length !== 4 || !p[0] || !/^\d+$/.test(p[2]) || LIGHT_SKIP_TABLES.test(p[0]))
+      continue;
+    out.push({ name: p[0], rows: /^\d+$/.test(p[1]) ? Number(p[1]) : null, bytes: Number(p[2]), parents: p[3] === "" ? [] : p[3].split(",") });
+  }
+  return out;
+}
+function dataSuggest(tables) {
+  const heavy = new Set(tables.filter((t) => t.bytes >= HEAVY_TABLE_BYTES).map((t) => t.name));
+  const out = new Set(heavy);
+  for (let grew = true;grew; ) {
+    grew = false;
+    for (const t of tables)
+      if (!out.has(t.name) && t.parents.some((p) => out.has(p))) {
+        out.add(t.name);
+        grew = true;
+      }
+  }
+  return { heavy: [...heavy], small: tables.filter((t) => !out.has(t.name)).map((t) => t.name), blocked: tables.filter((t) => out.has(t.name) && !heavy.has(t.name)).map((t) => t.name) };
+}
 async function tallies(url, tables, env, run, cwd = ".") {
   if (tables.length === 0)
     return {};
@@ -3195,7 +3225,7 @@ function importMissing(dir, io, dataInDev = false) {
   const rec = json3(io.readFile(join7(dir, ".dkod/snapshot.json")));
   if (!isRec5(rec))
     return [".dkod/snapshot.json: missing. Run `dkod-migrate.mjs snapshot` first."];
-  if (rec.mode !== "snapshot" || rec.imported === true)
+  if (rec.mode !== "snapshot" || rec.imported === true || rec.data_choice === "none")
     return [];
   const databases = Array.isArray(rec.databases) ? rec.databases : [];
   const bases = Array.isArray(rec.bases) ? rec.bases : [];
@@ -3203,7 +3233,7 @@ function importMissing(dir, io, dataInDev = false) {
   const tool = ["drizzle.config.ts", "drizzle.config.js", "drizzle.config.mjs", "alembic.ini"].some((f) => io.readFile(join7(dir, f)) !== null);
   if (flatOnly && !tool)
     return [];
-  return ["the original's data is not in Dev yet: run `dkod-db.mjs import --app <key> --from snapshot --dir <folder>` after db:migrate."];
+  return ["the original's data is not in Dev yet: run `dkod-db.mjs import --app <key> --from snapshot --dir <folder>` after db:migrate (add `--no-data` when the builder chose to bring no data)."];
 }
 async function checkBuild(folder, reportFile, io, opts = {}) {
   const dir = folder === "" ? io.cwd : folder;
@@ -4861,7 +4891,7 @@ function flatData(original, rels, named, mapText, io) {
   }
   return found;
 }
-async function copyDatabase(value, scratch, id, io) {
+async function copyDatabase(value, scratch, id, io, schemaOnly = false) {
   const url = localDatabase(value);
   if (url === null)
     return null;
@@ -4880,7 +4910,7 @@ async function copyDatabase(value, scratch, id, io) {
         throw new Error(NO_PASSWORD);
       return res.status === 0;
     };
-    if (!await ok("pg_dump", ["-w", "--dbname", withDatabase(value, source), "--file", dump]))
+    if (!await ok("pg_dump", ["-w", "--dbname", withDatabase(value, source), "--file", dump, ...schemaOnly ? ["--schema-only"] : []]))
       return null;
     return { name: source, url: withDatabase(value, source), base: { name: source, url: withDatabase(value, source) }, read_only: true, dump };
   }
@@ -4902,6 +4932,9 @@ async function copyDatabase(value, scratch, id, io) {
 var PRINT_CAP = 50;
 function printable(record) {
   const long = record.files.length > PRINT_CAP || (record.bases?.length ?? 0) > PRINT_CAP;
+  const manyTables = (record.data_tables?.length ?? 0) > PRINT_CAP;
+  if (manyTables)
+    record = { ...record, data_tables: [...record.data_tables].sort((a, b) => b.bytes - a.bytes).slice(0, PRINT_CAP), ...{ data_tables_total: record.data_tables.length } };
   if (!long)
     return record;
   return {
@@ -5035,6 +5068,7 @@ async function snapshot(folder, io, args = []) {
   let noPassword = false;
   let refused = null;
   const seenKeys = new Set;
+  let dataTables;
   const pair = async (key, value, how) => {
     if (key in env || seenKeys.has(key))
       return;
@@ -5054,9 +5088,12 @@ async function snapshot(folder, io, args = []) {
       if (refused !== null)
         return;
     }
+    const pgSource = localDatabase(value);
+    const sizes = pgSource !== null && pgSource.protocol.startsWith("postgres") && io.hasTool("psql") ? await tableSizes(withDatabase(value, databaseOf(pgSource)), connection(pgSource).env, io.run, io.cwd).catch(() => null) : null;
+    const heavy = sizes !== null && dataSuggest(sizes).heavy.length > 0;
     let db;
     try {
-      db = await copyDatabase(value, scratch, id, io);
+      db = await copyDatabase(value, scratch, id, io, heavy);
     } catch (e) {
       if (e instanceof Error && e.message === NO_PASSWORD) {
         noPassword = true;
@@ -5074,7 +5111,9 @@ async function snapshot(folder, io, args = []) {
     if (source.protocol.startsWith("postgres")) {
       const env2 = connection(source).env;
       const from = db.base?.url ?? db.url;
-      const cols = await readColumns(from, null, env2, io.run, io.cwd);
+      if (sizes !== null && sizes.length > 0)
+        dataTables ??= sizes;
+      const cols = heavy ? null : await readColumns(from, null, env2, io.run, io.cwd);
       const got = cols === null ? null : await tallies(from, [...cols].map(([name, c]) => ({ name, cols: c })), env2, io.run, io.cwd);
       if (got !== null)
         Object.assign(db, { tables: got });
@@ -5123,7 +5162,8 @@ async function snapshot(folder, io, args = []) {
     env: empty ? {} : env,
     ...databases[0]?.source ? { source: databases[0].source } : files.length > 0 ? { source: { how: "file", file: files[0] } } : {},
     ...empty ? {} : { checks: CHECKS },
-    ...empty ? { message: NEW_APP_ONLY } : {}
+    ...empty ? { message: NEW_APP_ONLY } : {},
+    ...dataTables !== undefined ? { data_tables: dataTables, suggest: dataSuggest(dataTables) } : {}
   };
   await removeSnapshot(dir, io);
   record.nonce = randomBytes(16).toString("hex");

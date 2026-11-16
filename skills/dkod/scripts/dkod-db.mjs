@@ -1103,6 +1103,8 @@ function readMapTables(text) {
   return names;
 }
 var PSQL = ["-w", "-X", "-q", "-At", "-F", "\t", "-v", "ON_ERROR_STOP=1"];
+var LIGHT_SKIP_TABLES = /^(?:_prisma_migrations|__drizzle_migrations|schema_migrations|knex_migrations(?:_lock)?|kysely_migration(?:_lock)?|alembic_version|flyway_schema_history|django_migrations)$/;
+var HEAVY_TABLE_BYTES = 100 * 1024 * 1024;
 async function tallies(url, tables, env, run, cwd = ".") {
   if (tables.length === 0)
     return {};
@@ -1181,7 +1183,7 @@ var FLAGS = {
   import: ["app", "from", "dir", "port", "tables"],
   detect: ["dir"]
 };
-var BOOLEAN_FLAGS = { up: ["detach"], down: ["all"] };
+var BOOLEAN_FLAGS = { up: ["detach"], down: ["all"], import: ["no-data"] };
 function parseArgs(argv) {
   const [command, ...rest] = argv;
   if (!command || !(command in FLAGS))
@@ -1207,7 +1209,7 @@ var USAGE = [
   "  node dkod-db.mjs files --from <folder> [--prefix media/] [--dir <app folder>] [--jobs 32]   (while `up` runs)",
   "  node dkod-db.mjs down [--dir <app folder>] [--all]",
   "  node dkod-db.mjs migrate [--dir <app folder>] [--port 6543]",
-  "  node dkod-db.mjs import --app <app key> --from <local postgres URL | snapshot> [--dir <app folder>] [--port 6543] [--tables <name,name>]",
+  "  node dkod-db.mjs import --app <app key> --from <local postgres URL | snapshot> [--dir <app folder>] [--port 6543] [--tables <name,name> | --no-data]",
   "  node dkod-db.mjs detect [--dir <app folder>]"
 ].join(`
 `);
@@ -2441,7 +2443,20 @@ END $$;
   io.print(JSON.stringify({ ok: true, app, tables: report, already_present: [], imported: true, skipped_tables: skipped, dropped_columns: droppedColumns }));
   return 0;
 }
-var LIGHT_SKIP_TABLES = /^(?:_prisma_migrations|__drizzle_migrations|schema_migrations|knex_migrations(?:_lock)?|kysely_migration(?:_lock)?|alembic_version|flyway_schema_history|django_migrations)$/;
+var MISSING_TABLES_STEP = "Add them to the app's migrations and run db:migrate, then run this again. When the app makes its own tables at start, start it once on Dev instead.";
+function finishNoData(io, snapshotFile, app, devUrl, missing, say) {
+  let record = null;
+  try {
+    record = JSON.parse(io.readFile(snapshotFile) ?? "null");
+  } catch {}
+  if (record && record.mode === "snapshot")
+    io.writeFile(snapshotFile, `${JSON.stringify({ ...record, data_choice: "none", dev_url: devUrl }, null, 2)}
+`);
+  if (missing.length > 0)
+    say(`warning: these tables of the original are not in the Dev database: ${missing.join(", ")}. ${MISSING_TABLES_STEP}`);
+  io.print(JSON.stringify({ ok: true, app, imported: false, data: "none", missing_tables: missing }));
+  return 0;
+}
 function originalOfRecord(text) {
   try {
     const o = JSON.parse(text ?? "null")?.original;
@@ -2478,6 +2493,11 @@ async function runImport(flags, io, cwd) {
     return 2;
   }
   const snapshotFile = join3(dir, ".dkod/snapshot.json");
+  const noData = flags.has("no-data");
+  if (noData && flags.has("tables")) {
+    say("Give --tables or --no-data, not both.");
+    return 2;
+  }
   let sourceRaw = from;
   let snapshotMode = false;
   let sqliteBases = null;
@@ -2612,6 +2632,12 @@ async function runImport(flags, io, cwd) {
     return 1;
   };
   if (sqliteBases !== null) {
+    if (noData)
+      return finishNoData(io, snapshotFile, app, devUrl, [], say);
+    if (flags.has("tables")) {
+      say("--tables works for a Postgres original only. This original keeps its data in files: import all of it (no --tables), or none of it (--no-data).");
+      return 2;
+    }
     if (light && sqliteBases.length > 0 && flatBases.length > 0) {
       say(`warning: these files were not imported, the app's data is in its SQLite file: ${flatBases.map((b) => b.rel).join(", ")}.`);
       flatBases = [];
@@ -2642,19 +2668,20 @@ async function runImport(flags, io, cwd) {
     mapped = all.stdout.split(`
 `).map((l) => l.trim()).filter((l) => l !== "" && !LIGHT_SKIP_TABLES.test(l));
   }
+  if (mapped.length === 0 && noData)
+    return finishNoData(io, snapshotFile, app, devUrl, [], say);
   if (mapped.length === 0) {
     say("The migration map has no tables to import (.dkod/map/app-map.json).");
     return 2;
   }
   const only = flags.get("tables");
-  if (only !== undefined) {
-    const want = only.split(",").map((n) => n.trim()).filter((n) => n !== "");
+  const want = only === undefined ? null : only.split(",").map((n) => n.trim()).filter((n) => n !== "");
+  if (want !== null) {
     const unknown = want.filter((n) => !mapped.includes(n));
     if (want.length === 0 || unknown.length > 0) {
       say(`--tables takes the original's table names with commas between them${unknown.length > 0 ? `; it does not have: ${unknown.join(", ")}` : ""}. Its tables: ${mapped.join(", ")}.`);
       return 2;
     }
-    mapped = mapped.filter((n) => want.includes(n));
   }
   const colsQuery = (names) => `SELECT c.table_name, c.column_name FROM information_schema.columns c JOIN information_schema.tables t ON t.table_schema=c.table_schema AND t.table_name=c.table_name AND t.table_type='BASE TABLE' WHERE c.table_schema='public' AND c.is_generated='NEVER' AND c.table_name IN (${names.map(quoteLit).join(",")}) ORDER BY c.table_name, c.ordinal_position`;
   const readCols = (stdout) => {
@@ -2694,8 +2721,15 @@ async function runImport(flags, io, cwd) {
   if (devCols.status !== 0)
     return failed("Could not read the Dev database's tables.", devCols.stderr);
   const devCols2 = readCols(devCols.stdout);
+  const missing = present.filter((n) => !devCols2.has(n) && (noData || want !== null && !want.includes(n)));
+  if (noData)
+    return finishNoData(io, snapshotFile, app, devUrl, missing, say);
+  if (missing.length > 0)
+    say(`warning: these tables of the original are not in the Dev database, and get no rows: ${missing.join(", ")}. ${MISSING_TABLES_STEP}`);
   const tables = [];
   for (const name of present) {
+    if (want !== null && !want.includes(name))
+      continue;
     const have = devCols2.get(name);
     if (!have) {
       say(`Table ${name} is not in the Dev database. Run the app's db:migrate first.`);
@@ -2808,6 +2842,21 @@ END $$;
       say("Dev was rolled back: nothing was imported.");
     else
       say("The row counts and hashes could not be read or do not match. Dev may hold rows.");
+    if (devRun.status !== 0 && want !== null) {
+      const all = new Set(want);
+      const cut = [];
+      for (let grew = true;grew; ) {
+        grew = false;
+        for (const e of edges)
+          if (all.has(e.child) && !all.has(e.parent) && present.includes(e.parent)) {
+            all.add(e.parent);
+            cut.push(`${e.child} -> ${e.parent}`);
+            grew = true;
+          }
+      }
+      if (cut.length > 0)
+        say(`These chosen tables have rows that point at tables that were not chosen (${cut.join(", ")}). Run the import again with --tables ${[...all].join(",")}`);
+    }
     for (const l of safeErrors(devRun.stderr))
       io.print(l);
     io.print(JSON.stringify({ ok: false, app, tables: report, already_present: alreadyPresent, imported: false }));
@@ -2818,7 +2867,7 @@ END $$;
     importedTables[t.name] = { cols: t.cols, rows: report[i].dev.rows, md5: report[i].dev.md5 };
   });
   await addRowHashes(importedTables, frozenData.suite_writes, devUrl, devEnv, io.run, dir);
-  const marks = { imported: true, imported_tables: importedTables, dev_url: devUrl };
+  const marks = { imported: true, data_choice: want === null ? "all" : "tables", imported_tables: importedTables, dev_url: devUrl };
   let record = null;
   try {
     record = JSON.parse(io.readFile(snapshotFile) ?? "null");
