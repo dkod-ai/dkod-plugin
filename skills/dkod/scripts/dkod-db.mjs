@@ -1183,7 +1183,7 @@ var FLAGS = {
   import: ["app", "from", "dir", "port", "tables"],
   detect: ["dir"]
 };
-var BOOLEAN_FLAGS = { up: ["detach"], down: ["all"], import: ["no-data"] };
+var BOOLEAN_FLAGS = { up: ["detach"], down: ["all"], import: ["no-data", "clear-links"] };
 function parseArgs(argv) {
   const [command, ...rest] = argv;
   if (!command || !(command in FLAGS))
@@ -1209,7 +1209,7 @@ var USAGE = [
   "  node dkod-db.mjs files --from <folder> [--prefix media/] [--dir <app folder>] [--jobs 32]   (while `up` runs)",
   "  node dkod-db.mjs down [--dir <app folder>] [--all]",
   "  node dkod-db.mjs migrate [--dir <app folder>] [--port 6543]",
-  "  node dkod-db.mjs import --app <app key> --from <local postgres URL | snapshot> [--dir <app folder>] [--port 6543] [--tables <name,name> | --no-data]",
+  "  node dkod-db.mjs import --app <app key> --from <local postgres URL | snapshot> [--dir <app folder>] [--port 6543] [--tables <name,name> [--clear-links] | --no-data]",
   "  node dkod-db.mjs detect [--dir <app folder>]"
 ].join(`
 `);
@@ -2498,6 +2498,11 @@ async function runImport(flags, io, cwd) {
     say("Give --tables or --no-data, not both.");
     return 2;
   }
+  const clearLinks = flags.has("clear-links");
+  if (clearLinks && !flags.has("tables")) {
+    say("--clear-links works with --tables only: it empties the links from the chosen tables to the tables left behind.");
+    return 2;
+  }
   let sourceRaw = from;
   let snapshotMode = false;
   let sqliteBases = null;
@@ -2754,11 +2759,39 @@ async function runImport(flags, io, cwd) {
     return failed("Could not read the original's foreign keys.", edgesRes.stderr);
   const edges = edgesRes.stdout.split(`
 `).map((l) => l.split("\t")).filter((p) => p.length === 2).map(([child, parent]) => ({ child, parent }));
+  const cleared = {};
+  if (clearLinks) {
+    const fkRes = await psql(sourceUrl, srcEnv, ["-c", "SELECT cl.relname, pl.relname, string_agg(a.attname, ',' ORDER BY a.attnum), bool_and(NOT a.attnotnull) FROM pg_constraint k JOIN pg_class cl ON cl.oid=k.conrelid JOIN pg_namespace n ON n.oid=cl.relnamespace JOIN pg_class pl ON pl.oid=k.confrelid JOIN pg_namespace pn ON pn.oid=pl.relnamespace JOIN pg_attribute a ON a.attrelid=k.conrelid AND a.attnum = ANY(k.conkey) WHERE k.contype='f' AND n.nspname='public' AND pn.nspname='public' GROUP BY k.oid, cl.relname, pl.relname"]);
+    if (fkRes.status !== 0)
+      return failed("Could not read the original's foreign keys.", fkRes.stderr);
+    const needed = [];
+    for (const [child, parent, cols, nullable] of fkRes.stdout.split(`
+`).map((l) => l.split("\t")).filter((p) => p.length === 4)) {
+      const t = tables.find((x) => x.name === child);
+      if (!t || want.includes(parent))
+        continue;
+      const own = cols.split(",").filter((c) => t.cols.includes(c));
+      if (own.length === 0)
+        continue;
+      if (nullable !== "t") {
+        needed.push(`${child}.${own.join(",")} -> ${parent}`);
+        continue;
+      }
+      cleared[child] = [...new Set([...cleared[child] ?? [], ...own])];
+    }
+    if (needed.length > 0) {
+      say(`These links may not be empty, so --clear-links cannot clear them: ${needed.join(", ")}. Add those parent tables to --tables, or leave the child tables out.`);
+      return 2;
+    }
+    for (const [n, c] of Object.entries(cleared))
+      say(`--clear-links: table ${n} is imported with these links empty: ${c.join(", ")}.`);
+  }
   const ordered = copyPlan(tables.map((t) => t.name), edges);
   const byName = new Map(tables.map((t) => [t.name, t]));
   const inOrder = ordered.order.map((n) => byName.get(n));
+  const sourceSelect = (t) => t.cols.map((c) => cleared[t.name]?.includes(c) ? `NULL AS ${quoteIdent(c)}` : quoteIdent(c)).join(", ");
   const srcHash = await psql(sourceUrl, srcEnv, ["-f", "-"], `${PG_SETTINGS}
-${inOrder.map(hashSql).join(`
+${inOrder.map((t) => hashSql(t).replace(`(SELECT ${t.cols.map(quoteIdent).join(", ")} FROM`, `(SELECT ${sourceSelect(t)} FROM`)).join(`
 `)}
 `);
   if (srcHash.status !== 0)
@@ -2809,7 +2842,7 @@ ${inOrder.map(hashSql).join(`
   script += holdTriggers(toCopy.map((t) => t.name));
   for (const t of toCopy) {
     const cols = t.cols.map(quoteIdent).join(", ");
-    const data = await psql(sourceUrl, srcEnv, ["-c", PG_SETTINGS, "-c", `COPY (SELECT ${cols} FROM public.${quoteIdent(t.name)}) TO STDOUT`]);
+    const data = await psql(sourceUrl, srcEnv, ["-c", PG_SETTINGS, "-c", `COPY (SELECT ${sourceSelect(t)} FROM public.${quoteIdent(t.name)}) TO STDOUT`]);
     if (data.status !== 0)
       return failed(`Could not read table ${t.name} from the original.`, data.stderr);
     script += `COPY public.${quoteIdent(t.name)} (${cols}) FROM STDIN;
@@ -2855,7 +2888,7 @@ END $$;
           }
       }
       if (cut.length > 0)
-        say(`These chosen tables have rows that point at tables that were not chosen (${cut.join(", ")}). Run the import again with --tables ${[...all].join(",")}`);
+        say(`These chosen tables have rows that point at tables that were not chosen (${cut.join(", ")}). Run the import again with --tables ${[...all].join(",")}, or keep them out and run again with --tables ${want.join(",")} --clear-links: the links to them are imported empty.`);
     }
     for (const l of safeErrors(devRun.stderr))
       io.print(l);
@@ -2867,7 +2900,7 @@ END $$;
     importedTables[t.name] = { cols: t.cols, rows: report[i].dev.rows, md5: report[i].dev.md5 };
   });
   await addRowHashes(importedTables, frozenData.suite_writes, devUrl, devEnv, io.run, dir);
-  const marks = { imported: true, data_choice: want === null ? "all" : "tables", imported_tables: importedTables, dev_url: devUrl };
+  const marks = { imported: true, data_choice: want === null ? "all" : "tables", imported_tables: importedTables, dev_url: devUrl, ...clearLinks ? { cleared_links: cleared } : {} };
   let record = null;
   try {
     record = JSON.parse(io.readFile(snapshotFile) ?? "null");
@@ -2881,7 +2914,7 @@ END $$;
     io.writeFile(snapshotFile, `${JSON.stringify({ ...base, ...marks, nonce, seal: sealOf(base, nonce) }, null, 2)}
 `);
   }
-  io.print(JSON.stringify({ ok: true, app, tables: report, already_present: alreadyPresent, imported: true, skipped_tables: skippedTables, dropped_columns: droppedColumns }));
+  io.print(JSON.stringify({ ok: true, app, tables: report, already_present: alreadyPresent, imported: true, skipped_tables: skippedTables, dropped_columns: droppedColumns, ...clearLinks ? { cleared_links: cleared } : {} }));
   return 0;
 }
 function statePaths(io, dir) {
