@@ -2377,12 +2377,18 @@ var CATALOG = {
       const re = compileSafe(String(params.pattern), typeof params.flags === "string" ? params.flags : "");
       if (re === null)
         return [];
-      const hits = [];
+      let first = 0;
+      let count = 0;
       const ls = lines(file.text);
       for (let i = 0;i < ls.length; i++)
-        if (re.test(ls[i]))
-          hits.push({ path: file.path, line: i + 1, detail: "a forbidden pattern matches here" });
-      return hits;
+        if (re.test(ls[i])) {
+          count += 1;
+          first ||= i + 1;
+        }
+      if (count === 0)
+        return [];
+      const detail = count === 1 ? "a forbidden pattern matches here" : `a forbidden pattern matches here and on ${(count - 1).toLocaleString("en-US")} more line${count === 2 ? "" : "s"}`;
+      return [{ path: file.path, line: first, detail }];
     }
   },
   "content.require": {
@@ -2921,6 +2927,7 @@ var IDENTIFIER_PART = "(?:[a-z]+(?:[0-9]+[a-z]*)?|[0-9]+[a-z]*)";
 var CAMEL_PART = "[a-z]+[0-9]*(?:[A-Z][a-z]+[0-9]*)*";
 var DOTTED_CAMEL_KEY = new RegExp(`^${CAMEL_PART}(?:\\.${CAMEL_PART})+$`);
 var IDENTIFIER_VALUE = new RegExp(`^${IDENTIFIER_PART}(?:[._/-]${IDENTIFIER_PART})*$`);
+var COLON_KEY = new RegExp(`^${IDENTIFIER_PART}(?:[._/:-]${IDENTIFIER_PART})*$`);
 function looksLikeSecretLiteral(value, kind) {
   const password = kind === "password";
   if (value.length < (password ? 8 : 16) || /\s/.test(value))
@@ -2931,7 +2938,11 @@ function looksLikeSecretLiteral(value, kind) {
     return !DEFAULT_PASSWORD.test(value);
   if (/^[A-Z][A-Z0-9_]+$/.test(value))
     return false;
+  if (/\\[pPdDwWsSbB]|\(\?[:<=!]/.test(value))
+    return false;
   if (kind === "any_key" && DOTTED_CAMEL_KEY.test(value))
+    return false;
+  if (kind === "any_key" && COLON_KEY.test(value) && !/pass|pwd|secret|token/i.test(value))
     return false;
   if (IDENTIFIER_VALUE.test(value))
     return false;

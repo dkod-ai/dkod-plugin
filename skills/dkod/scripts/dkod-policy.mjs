@@ -653,12 +653,18 @@ var CATALOG = {
       const re = compileSafe(String(params.pattern), typeof params.flags === "string" ? params.flags : "");
       if (re === null)
         return [];
-      const hits = [];
+      let first = 0;
+      let count = 0;
       const ls = lines(file.text);
       for (let i = 0;i < ls.length; i++)
-        if (re.test(ls[i]))
-          hits.push({ path: file.path, line: i + 1, detail: "a forbidden pattern matches here" });
-      return hits;
+        if (re.test(ls[i])) {
+          count += 1;
+          first ||= i + 1;
+        }
+      if (count === 0)
+        return [];
+      const detail = count === 1 ? "a forbidden pattern matches here" : `a forbidden pattern matches here and on ${(count - 1).toLocaleString("en-US")} more line${count === 2 ? "" : "s"}`;
+      return [{ path: file.path, line: first, detail }];
     }
   },
   "content.require": {
