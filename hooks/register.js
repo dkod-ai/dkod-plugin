@@ -421,6 +421,8 @@ function pushAction(cmd, dir, rest, opaque, out) {
   let force = false;
   let remote = null;
   let sawRemote = false;
+  const refspecs = [];
+  let every = false;
   for (let j = 0;j < rest.length; j += 1) {
     const w = rest[j];
     if (w === "--")
@@ -446,6 +448,8 @@ function pushAction(cmd, dir, rest, opaque, out) {
     }
     if (w.startsWith("--receive-pack") || w.startsWith("--exec"))
       opaque = opaque ?? "a custom receive-pack";
+    if (w === "--all" || w === "--branches" || w === "--mirror")
+      every = true;
     if (/^-[A-Za-z]+$/.test(w)) {
       if (w.includes("f") || w.includes("d"))
         force = true;
@@ -465,8 +469,9 @@ function pushAction(cmd, dir, rest, opaque, out) {
     }
     if (w.startsWith("+") || w.startsWith(":"))
       force = true;
+    refspecs.push(w);
   }
-  out.push({ kind: "push", cmd, dir, remote, force, opaque });
+  out.push({ kind: "push", cmd, dir, remote, force, opaque, refspecs, every });
 }
 var remoteKey = (dir, name) => `${dir.replace(/^\.\/?/, "").replace(/\/+$/, "")}\x00${name}`;
 var CLONE_VALUE = new Set(["-b", "--branch", "-o", "--origin", "--depth", "-c", "--config", "--reference", "--reference-if-able", "--template", "-u", "--upload-pack", "--separate-git-dir", "--filter", "-j", "--jobs", "--shallow-since", "--shallow-exclude", "--bundle-uri"]);
@@ -560,7 +565,7 @@ function gitActions(cmd, depth, made = new Map) {
   }
   if (sub === "send-pack") {
     const remote = rest.find((w) => !w.startsWith("-")) ?? null;
-    out.push({ kind: "push", cmd, dir, remote, force: rest.includes("--force"), opaque });
+    out.push({ kind: "push", cmd, dir, remote, force: rest.includes("--force"), opaque, every: true });
     return out;
   }
   if (sub === "commit") {
@@ -3659,7 +3664,7 @@ function classifyRepo(repo, config) {
     return "outside";
   if ((guard?.direct_push_allowed ?? []).some((r) => lower2(r) === key))
     return "allowed";
-  return "protected";
+  return config.shipBy === "pr" ? "branch" : "protected";
 }
 function ruleLayer(rule) {
   return rule === "blocked-command" || rule === "guardrails" || rule === "policy" ? "guard" : "floor";
@@ -3754,6 +3759,29 @@ function sqlWriteRefusal() {
   };
 }
 var DELIVER = "App code ships through Deliver (the dkoder.deliver tool), never a direct push or merge.";
+var PULL_REQUEST = "Push your own branch and open a pull request (gh pr create). A person merges it.";
+var MAIN_BRANCHES = new Set(["main", "master"]);
+function pushedBranches(refspecs, current) {
+  const out = [];
+  for (const spec of refspecs.length === 0 ? ["HEAD"] : refspecs) {
+    const s = spec.replace(/^\+/, "");
+    const colon = s.lastIndexOf(":");
+    let dst = colon < 0 ? s : s.slice(colon + 1);
+    if (dst === "")
+      dst = s.slice(0, colon);
+    if (dst.startsWith("refs/tags/"))
+      continue;
+    if (dst.includes("*"))
+      return null;
+    if (dst === "HEAD" || dst === "@") {
+      if (current === null)
+        return null;
+      dst = current;
+    }
+    out.push(dst.replace(/^refs\/heads\//, ""));
+  }
+  return out;
+}
 function governanceMessage(repo) {
   return `${repo} is your org's governance repo. It changes only through the DKOD dashboard, by an org admin. Dkoder does not push, merge or write to it.`;
 }
@@ -3769,7 +3797,7 @@ function describe(a) {
   return a.cmd.argv.slice(0, 2).join(" ");
 }
 function worst(repos, config) {
-  const order = ["protected", "governance", "allowed", "outside"];
+  const order = ["protected", "governance", "branch", "allowed", "outside"];
   let best = { cls: "outside", repo: null };
   for (const r of repos) {
     const cls = classifyRepo(r, config);
@@ -3796,6 +3824,7 @@ function matchesBlocked(argv, command) {
 }
 async function decideBash(cmds, config, resolver, seen = []) {
   const guard = effectiveGuard(config);
+  const way = config.shipBy === "pr" ? PULL_REQUEST : DELIVER;
   const judged = (action, repo, org) => {
     seen.push({ action, repo, org });
     return true;
@@ -3842,27 +3871,41 @@ async function decideBash(cmds, config, resolver, seen = []) {
     if (a.kind === "push") {
       if (a.opaque !== null && config.owners.length > 0) {
         judged("push", null, true);
-        return { rule: "deliver-only", message: `Dkoder cannot tell where this push goes (${a.opaque}). Run a plain git push, or ship with Deliver. ${DELIVER}` };
+        return { rule: "deliver-only", message: `Dkoder cannot tell where this push goes (${a.opaque}). Run a plain git push. ${way}` };
       }
       const targets = await resolver.pushTargets(a.dir, a.remote);
       const lineUrls = (a.also ?? []).map(repoFromRemoteUrl);
       const also = lineUrls.filter((r) => r !== null);
       if (a.lineRemote === true && config.owners.length > 0 && (targets === null && also.length === 0 || also.length < lineUrls.length)) {
         judged("push", null, true);
-        return { rule: "deliver-only", message: `Dkoder cannot tell where this push goes: an earlier command in the same line makes the remote. Run the push as its own command, or ship with Deliver. ${DELIVER}` };
+        return { rule: "deliver-only", message: `Dkoder cannot tell where this push goes: an earlier command in the same line makes the remote. Run the push as its own command. ${way}` };
       }
       const repos = [...targets ?? await resolver.repoRemotes(a.dir), ...also];
       const { cls, repo } = worst(repos, config);
       judged("push", repo, cls !== "outside" || targets === null);
       if (targets === null && also.length === 0 && cls !== "outside") {
-        return { rule: "deliver-only", ...repo !== null ? { repo } : {}, message: `Dkoder could not tell which repo this push goes to, and this folder has an org remote. ${DELIVER}` };
+        return { rule: "deliver-only", ...repo !== null ? { repo } : {}, message: `Dkoder could not tell which repo this push goes to, and this folder has an org remote. ${way}` };
       }
       if (cls === "governance")
         return { rule: "deliver-only", repo, message: governanceMessage(repo) };
       if (cls === "protected") {
         if (a.force)
-          return { rule: "no-force-push", repo, message: `Force push to ${repo} is not allowed. ${DELIVER}` };
-        return { rule: "deliver-only", repo, message: `git push to ${repo} is not allowed. ${DELIVER}` };
+          return { rule: "no-force-push", repo, message: `Force push to ${repo} is not allowed. ${way}` };
+        return { rule: "deliver-only", repo, message: `git push to ${repo} is not allowed. ${way}` };
+      }
+      if (cls === "branch") {
+        if (a.force)
+          return { rule: "no-force-push", repo, message: `Force push to ${repo} is not allowed. ${PULL_REQUEST}` };
+        if (a.every === true)
+          return { rule: "pull-request-only", repo, message: `A push of every branch to ${repo} is not allowed. Push one branch by name. ${PULL_REQUEST}` };
+        const needsHead = (a.refspecs ?? []).length === 0 || (a.refspecs ?? []).some((s) => /(?:^|:)\+?(?:HEAD|@)$/.test(s));
+        const current = needsHead && resolver.currentBranch !== undefined ? await resolver.currentBranch(a.dir) : null;
+        const branches = pushedBranches(a.refspecs ?? [], current);
+        if (branches === null)
+          return { rule: "pull-request-only", repo, message: `Dkoder could not tell which branch this push writes on ${repo}. Name the branch: git push origin <branch>. ${PULL_REQUEST}` };
+        const main = branches.find((b) => MAIN_BRANCHES.has(b.toLowerCase()));
+        if (main !== undefined)
+          return { rule: "pull-request-only", repo, message: `git push to ${main} on ${repo} is not allowed. ${PULL_REQUEST}` };
       }
       continue;
     }
@@ -3871,7 +3914,7 @@ async function decideBash(cmds, config, resolver, seen = []) {
         continue;
       judged(a.kind, null, true);
       const what = a.kind === "api-write" ? "GitHub API write" : describe(a);
-      return { rule: "deliver-only", message: `Dkoder could not tell which repo this ${what} reaches, so it did not run. ${DELIVER}` };
+      return { rule: "deliver-only", message: `Dkoder could not tell which repo this ${what} reaches, so it did not run. ${way}` };
     }
     const repos = a.repo !== null ? [a.repo] : await resolver.repoRemotes(a.dir);
     const { cls, repo } = worst(repos, config);
@@ -3879,7 +3922,9 @@ async function decideBash(cmds, config, resolver, seen = []) {
     if (cls === "governance")
       return { rule: "deliver-only", repo, message: governanceMessage(repo) };
     if (cls === "protected")
-      return { rule: "deliver-only", repo, message: `${describe(a)} on ${repo} is not allowed. ${DELIVER}` };
+      return { rule: "deliver-only", repo, message: `${describe(a)} on ${repo} is not allowed. ${way}` };
+    if (cls === "branch")
+      return { rule: "pull-request-only", repo, message: `${describe(a)} on ${repo} is not allowed. ${PULL_REQUEST}` };
   }
   return null;
 }
@@ -4231,7 +4276,8 @@ function configFrom(v) {
     guard: typeof o.guard === "object" && o.guard !== null ? o.guard : null,
     ...typeof o.policyText === "string" ? { policyText: o.policyText } : {},
     ...pack !== null && pack.rules.length > 0 ? { policyPack: pack } : {},
-    ...typeof o.governanceSha === "string" && /^[0-9a-f]{40}$/.test(o.governanceSha) ? { governanceSha: o.governanceSha } : {}
+    ...typeof o.governanceSha === "string" && /^[0-9a-f]{40}$/.test(o.governanceSha) ? { governanceSha: o.governanceSha } : {},
+    ...o.shipBy === "pr" ? { shipBy: "pr" } : {}
   };
 }
 function mergeConfig(base, live, trusted = true) {
@@ -4241,7 +4287,7 @@ function mergeConfig(base, live, trusted = true) {
     const guard = live.guard === null ? null : { ...live.guard };
     if (guard !== null)
       delete guard.direct_push_allowed;
-    live = { ...live, governanceRepo: null, guard };
+    live = { ...live, governanceRepo: null, guard, shipBy: undefined };
   }
   const union = (a, b) => [...new Set([...a, ...b].map((s) => s.toLowerCase()))];
   return {
@@ -4252,14 +4298,15 @@ function mergeConfig(base, live, trusted = true) {
     guard: live.guard ?? base.guard,
     ...live.policyText ?? base.policyText ? { policyText: live.policyText ?? base.policyText } : {},
     ...live.policyPack ?? base.policyPack ? { policyPack: live.policyPack ?? base.policyPack } : {},
-    ...live.governanceSha ?? base.governanceSha ? { governanceSha: live.governanceSha ?? base.governanceSha } : {}
+    ...live.governanceSha ?? base.governanceSha ? { governanceSha: live.governanceSha ?? base.governanceSha } : {},
+    ...(trusted ? live.shipBy : base.shipBy) === "pr" ? { shipBy: "pr" } : {}
   };
 }
 function rulesText(config) {
   const lines = [
     "# Dkoder (DKOD's floor, the same for every organization)",
     "Dkoder checks every command and file write.",
-    "- App code ships through Deliver (the dkoder.deliver tool of the DKOD MCP server). Never git push, gh pr merge or write through the GitHub API to an app repo of the organization.",
+    config.shipBy === "pr" ? "- Code reaches the organization's repos by pull request: push your own branch, then open a PR with gh pr create. Never push to main or master, never force push, and never merge (gh pr merge) or write to main through the GitHub API. A person merges." : "- App code ships through Deliver (the dkoder.deliver tool of the DKOD MCP server). Never git push, gh pr merge or write through the GitHub API to an app repo of the organization.",
     "- Never write a secret value into a file, and never commit one. Put the NAME of a secret in the file and resolve it at run time.",
     "- Never skip git hooks (--no-verify, core.hooksPath) and never force push to an organization repo.",
     "- When Dkoder or Guard refuses a call, tell the person why and take the DKOD path instead. Do not try another way around it."
@@ -4359,6 +4406,10 @@ function createGuard(initial) {
       } catch {
         return;
       }
+    },
+    async currentBranch(dir) {
+      const out = await git(io, await absolute(io, dir), ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+      return out === null || out.trim() === "" ? null : out.trim();
     },
     async repoRemotes(dir) {
       const out = await git(io, await absolute(io, dir), ["remote", "-v"]);
