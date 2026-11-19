@@ -2789,7 +2789,6 @@ function safeRepoPath(p) {
 
 var REMOVED_SECRET = "DKOD_REMOVED_SECRET";
 var ASSIGNMENT_RE = /^[\s\-*]*(?:(?:export|ENV|ARG|const|let|var|readonly|private|public|static|final)\s+)*["']?([A-Za-z_][A-Za-z0-9_.-]*)["']?[ \t]*(?::[ \t]*[A-Za-z_][A-Za-z0-9_<>[\]|]*[ \t]*)?[:=](.*)$/;
-var SECRET_KEY_RE = /^(.*_)?(secret|password|passwd|token|api_key|apikey|private_key)$/i;
 function normaliseKey(key) {
   return key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/[.-]/g, "_").toLowerCase();
 }
@@ -2815,23 +2814,7 @@ function looksLikeReference(value) {
     return true;
   return false;
 }
-var EXAMPLE_ENV_FILE_RE = /(?:^|\/)(?:\.env(?:\.[A-Za-z0-9_-]+)?\.(?:example|sample|template|dist)|(?:example|sample|template)\.env)$/i;
-var OBVIOUS_PLACEHOLDER_RE = /^(?:your[_-][A-Za-z0-9_-]*|change[_-]?me|replace[_-]?me|placeholder|todo|x{3,}|\.{3}|…)$/i;
-function isExampleEnvPlaceholder(path, value) {
-  if (!EXAMPLE_ENV_FILE_RE.test(path))
-    return false;
-  const v = value.trim().replace(/^["']/, "").replace(/["']$/, "").trim();
-  return OBVIOUS_PLACEHOLDER_RE.test(v);
-}
 var CODE_FILE_RE = /\.(?:[cm]?[jt]sx?|py|go|java|kt|kts|rb|rs|cs|php|swift|scala|dart)$/;
-function looksLikeCodeExpression(path, value) {
-  if (isConfigFile(path) || !CODE_FILE_RE.test(basename(path)))
-    return false;
-  const v = value.trim().replace(/[,;]$/, "").trim();
-  if (!v.includes("(") && !v.includes(".") && !/^(?:await|new)[ \t]/.test(v))
-    return false;
-  return /^(?:await[ \t]+|new[ \t]+)?[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)*[ \t]*(?:[!?]?\(.*)?$/.test(v);
-}
 function nameWords(name) {
   return name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/([A-Z])([A-Z][a-z])/g, "$1_$2").toLowerCase().split(/[_.-]/).filter((w) => w !== "");
 }
@@ -2930,6 +2913,8 @@ function notSecretShape(value) {
     return true;
   if (value.includes("://"))
     return true;
+  if (/^[a-z0-9-]+(?:\.[a-z0-9-]+)+\/[\w.-]+$/.test(value))
+    return true;
   if (/\d\.\d/.test(value) || /sha256:/i.test(value))
     return true;
   if (/\$\{|\$\(|\{\{|process\.env|os\.environ|import\.meta\.env|%/.test(value))
@@ -2939,6 +2924,7 @@ function notSecretShape(value) {
 var IDENTIFIER_PART = "(?:[a-z]+(?:[0-9]+[a-z]*)?|[0-9]+[a-z]*)";
 var CAMEL_PART = "[a-z]+[0-9]*(?:[A-Z][a-z]+[0-9]*)*";
 var DOTTED_CAMEL_KEY = new RegExp(`^${CAMEL_PART}(?:\\.${CAMEL_PART})+$`);
+var CAMEL_KEY = new RegExp(`^${CAMEL_PART}$`);
 var IDENTIFIER_VALUE = new RegExp(`^${IDENTIFIER_PART}(?:[._/-]${IDENTIFIER_PART})*$`);
 var COLON_KEY = new RegExp(`^${IDENTIFIER_PART}(?:[._/:-]${IDENTIFIER_PART})*$`);
 function looksLikeSecretLiteral(value, kind) {
@@ -2948,14 +2934,16 @@ function looksLikeSecretLiteral(value, kind) {
   if (notSecretShape(value))
     return false;
   if (password)
-    return !DEFAULT_PASSWORD.test(value);
+    return !DEFAULT_PASSWORD.test(value) && !/^\p{Lu}\p{Ll}+$/u.test(value) && !(/^[\p{L}\p{M}-]+$/u.test(value) && /[^\x00-\x7F]/.test(value));
   if (/^[A-Z][A-Z0-9_]+$/.test(value))
     return false;
   if (/\\[pPdDwWsSbB]|\(\?[:<=!]/.test(value))
     return false;
   if (kind === "any_key" && DOTTED_CAMEL_KEY.test(value))
     return false;
-  if (kind === "any_key" && COLON_KEY.test(value) && !/pass|pwd|secret|token/i.test(value))
+  if (kind === "any_key" && CAMEL_KEY.test(value))
+    return false;
+  if (kind === "any_key" && COLON_KEY.test(value.replace(/:$/, "")) && !/pass|pwd|secret|token/i.test(value))
     return false;
   if (IDENTIFIER_VALUE.test(value))
     return false;
@@ -3046,7 +3034,8 @@ function pemHits(content) {
     const endMarker = `-----END ${m[1] ?? ""}${PEM_LABEL}${m[2] ?? ""}-----`;
     const endAt = content.indexOf(endMarker, after);
     if (endAt >= 0) {
-      out.push({ start, end: endAt + endMarker.length });
+      if ((content.slice(after, endAt).match(/[A-Za-z0-9+/]/g)?.length ?? 0) >= 32)
+        out.push({ start, end: endAt + endMarker.length });
       PEM_BEGIN_RE.lastIndex = endAt + endMarker.length;
       continue;
     }
@@ -3137,7 +3126,7 @@ function detectSecrets(path, content) {
     }
   }
   const config = isConfigFile(path);
-  const tierB = !isTestOrDocPath(path);
+  const tierB = !isTestOrDocPath(path) && !SEALED_SECRET_RE.test(content);
   for (let i = 0;i < lines.length; i += 1) {
     const line = lines[i].slice(0, ASSIGNMENT_LINE_CAP).replace(/\r$/, "");
     const isComment = /^\s*(#|\/\/|\/\*|\*)/.test(line);
@@ -3183,6 +3172,66 @@ function detectSecrets(path, content) {
   }
   return out;
 }
+function isExampleEnvFile(path) {
+  const base = basename(path);
+  return (base.startsWith(".env") || base.endsWith(".env")) && (ENV_SAFE_SUFFIX.test(base) || /^(example|sample|template)\.env$/.test(base));
+}
+var SEALED_SECRET_RE = /^kind:[ \t]*SealedSecret[ \t]*$/m;
+var TYPE_WORD_RE = /^(?:string|str|number|int|integer|boolean|bool)$/i;
+function namedSecretLiterals(path, content) {
+  if (SEALED_SECRET_RE.test(content))
+    return [];
+  const relaxed = isTestOrDocPath(path) || isExampleEnvFile(path);
+  const bare = isConfigFile(path) || !CODE_FILE_RE.test(basename(path));
+  const out = [];
+  const lines = content.split(`
+`);
+  for (let i = 0;i < lines.length; i += 1) {
+    const line = lines[i].slice(0, ASSIGNMENT_LINE_CAP).replace(/\r$/, "");
+    if (/^\s*(#|\/\/|\/\*|\*)/.test(line))
+      continue;
+    const m = ASSIGNMENT_RE.exec(line);
+    if (!m)
+      continue;
+    const kind = secretNameKind(m[1]);
+    if (kind === null || kind === "any_key")
+      continue;
+    const rhs = m[2].trim();
+    if (looksLikeReference(rhs))
+      continue;
+    if (bare && rhs.replace(/^["']/, "").startsWith("$"))
+      continue;
+    let literal = literalOf(rhs, bare);
+    if (!literal && !bare) {
+      const after = /(?:^|[^=!<>])=[ \t]*(["'`].*)$/.exec(rhs);
+      if (after)
+        literal = literalOf(after[1], false);
+    }
+    if (!literal)
+      continue;
+    const v = literal.value.trim();
+    if (v === "" || looksLikeReference(v) || isFakeValue(v) || TIER_B_PLACEHOLDER.test(v) || TYPE_WORD_RE.test(v) || v.includes("://"))
+      continue;
+    if (relaxed) {
+      if (v.length >= 16 && !/[\s()]/.test(v) && !notSecretShape(v) && !IDENTIFIER_VALUE.test(v) && looksRandom(v))
+        out.push({ line: i + 1, name: m[1] });
+      continue;
+    }
+    if (/^[A-Z][A-Z0-9_]+$/.test(v) || kind === "password" && DEFAULT_PASSWORD.test(v))
+      continue;
+    const squash = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const envStyle = bare && line.charAt(line.length - m[2].length - 1) === "=";
+    if (/\s/.test(v) || squash(v) === squash(m[1]) || squash(v) === nameWords(m[1]).at(-1))
+      continue;
+    if (!envStyle && (/^\p{Lu}?\p{Ll}+$/u.test(v) || /[^\x00-\x7F]/.test(v)))
+      continue;
+    if (!envStyle && kind !== "password" && IDENTIFIER_VALUE.test(v))
+      continue;
+    out.push({ line: i + 1, name: m[1] });
+  }
+  return out;
+}
+var ENV_SAFE_SUFFIX = /\.(example|sample|template|dist|defaults)$/;
 
 function checkPathSafety(file) {
   if (!safeRepoPath(file.path)) {
@@ -3194,45 +3243,20 @@ function checkPathSafety(file) {
   return [];
 }
 function checkSecrets(file) {
-  const out = [];
-  const lines = file.content.split(`
-`);
-  for (let i = 0;i < lines.length; i += 1) {
-    const line = lines[i].replace(/\r$/, "");
-    if (/^\s*(#|\/\/)/.test(line))
-      continue;
-    const match = ASSIGNMENT_RE.exec(line);
-    if (!match)
-      continue;
-    const key = normaliseKey(match[1]);
-    if (key.endsWith("_ref") || key.endsWith("_name") || key.endsWith("_path"))
-      continue;
-    if (!SECRET_KEY_RE.test(key))
-      continue;
-    if (looksLikeReference(match[2]) || isExampleEnvPlaceholder(file.path, match[2]))
-      continue;
-    if (!/^\s*\*/.test(line) && looksLikeCodeExpression(file.path, match[2]))
-      continue;
-    out.push({
-      rule: "no-plaintext-secrets",
-      path: file.path,
-      line: i + 1,
-      message: `${file.path} line ${String(i + 1)} sets ${match[1]} to a literal value. Put the NAME of a secret there and resolve it at run time; this file is committed to git and anything written in it stays in the history forever.`
-    });
-  }
-  const flagged = new Set(out.map((f) => f.line));
+  const byLine = new Map;
+  for (const hit of namedSecretLiterals(file.path, file.content))
+    byLine.set(hit.line, `sets ${hit.name} to a literal value`);
   for (const hit of detectSecrets(file.path, file.content)) {
-    if (flagged.has(hit.line))
+    if (byLine.has(hit.line))
       continue;
-    flagged.add(hit.line);
-    out.push({
-      rule: "no-plaintext-secrets",
-      path: file.path,
-      line: hit.line,
-      message: `${file.path} line ${String(hit.line)} carries what looks like a secret (${hit.rule}). Put the NAME of a secret there and resolve it at run time; this file is committed to git and anything written in it stays in the history forever.`
-    });
+    byLine.set(hit.line, hit.rule === "secret_assignment" && hit.name !== null ? `sets ${hit.name} to a literal value` : `carries what looks like a secret (${hit.rule})`);
   }
-  return out;
+  return [...byLine.entries()].sort(([a], [b]) => a - b).map(([line, what]) => ({
+    rule: "no-plaintext-secrets",
+    path: file.path,
+    line,
+    message: `${file.path} line ${String(line)} ${what}. Put the NAME of a secret there and resolve it at run time; this file is committed to git and anything written in it stays in the history forever.`
+  }));
 }
 function isContainerFile(path) {
   const base = path.split("/").pop() ?? path;
