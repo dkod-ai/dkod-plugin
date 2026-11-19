@@ -2927,6 +2927,8 @@ var DOTTED_CAMEL_KEY = new RegExp(`^${CAMEL_PART}(?:\\.${CAMEL_PART})+$`);
 var CAMEL_KEY = new RegExp(`^${CAMEL_PART}$`);
 var IDENTIFIER_VALUE = new RegExp(`^${IDENTIFIER_PART}(?:[._/-]${IDENTIFIER_PART})*$`);
 var COLON_KEY = new RegExp(`^${IDENTIFIER_PART}(?:[._/:-]${IDENTIFIER_PART})*$`);
+var WORD_PART = "[A-Za-z][a-z]+(?:[A-Z][a-z]+)*[0-9]*";
+var WORDS_KEY = new RegExp(`^${WORD_PART}(?:[._/:-]${WORD_PART})*$`);
 function looksLikeSecretLiteral(value, kind) {
   const password = kind === "password";
   if (value.length < (password ? 8 : 16) || /\s/.test(value))
@@ -2944,6 +2946,8 @@ function looksLikeSecretLiteral(value, kind) {
   if (kind === "any_key" && CAMEL_KEY.test(value))
     return false;
   if (kind === "any_key" && COLON_KEY.test(value.replace(/:$/, "")) && !/pass|pwd|secret|token/i.test(value))
+    return false;
+  if (kind === "any_key" && WORDS_KEY.test(value) && !/pass|pwd|secret|token/i.test(value))
     return false;
   if (IDENTIFIER_VALUE.test(value))
     return false;
