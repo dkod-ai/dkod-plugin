@@ -2815,6 +2815,14 @@ function looksLikeReference(value) {
     return true;
   return false;
 }
+var EXAMPLE_ENV_FILE_RE = /(?:^|\/)(?:\.env(?:\.[A-Za-z0-9_-]+)?\.(?:example|sample|template|dist)|(?:example|sample|template)\.env)$/i;
+var OBVIOUS_PLACEHOLDER_RE = /^(?:your[_-][A-Za-z0-9_-]*|change[_-]?me|replace[_-]?me|placeholder|todo|x{3,}|\.{3}|…)$/i;
+function isExampleEnvPlaceholder(path, value) {
+  if (!EXAMPLE_ENV_FILE_RE.test(path))
+    return false;
+  const v = value.trim().replace(/^["']/, "").replace(/["']$/, "").trim();
+  return OBVIOUS_PLACEHOLDER_RE.test(v);
+}
 var CODE_FILE_RE = /\.(?:[cm]?[jt]sx?|py|go|java|kt|kts|rb|rs|cs|php|swift|scala|dart)$/;
 function looksLikeCodeExpression(path, value) {
   if (isConfigFile(path) || !CODE_FILE_RE.test(basename(path)))
@@ -3201,7 +3209,7 @@ function checkSecrets(file) {
       continue;
     if (!SECRET_KEY_RE.test(key))
       continue;
-    if (looksLikeReference(match[2]))
+    if (looksLikeReference(match[2]) || isExampleEnvPlaceholder(file.path, match[2]))
       continue;
     if (!/^\s*\*/.test(line) && looksLikeCodeExpression(file.path, match[2]))
       continue;
