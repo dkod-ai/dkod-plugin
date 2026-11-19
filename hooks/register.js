@@ -2986,6 +2986,8 @@ var VALUE_PATTERNS = [
   { rule: "registry_auth", re: /:_(?:authToken|auth|password)[ \t]*=[ \t]*"?([^\s"#;]+)/dg, group: 1 },
   { rule: "db_url_password", re: /:\/\/[^\s:@/'"`]+:([^\s@/'"`]+)@/dg, group: 1 }
 ];
+var TEST_PATH_RE = /(^|\/)(test|tests|__tests__|spec|specs|fixtures?|testdata)\/|\.(test|spec)\.[a-z]+$|_test\.(go|py|rs)$/i;
+var FAKE_HOST_RE = /^(?:localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|\[::1\]|(?:[a-z0-9-]+\.)*(?:example\.(?:com|net|org)|example|test|invalid|localhost))(?=[:/?#\s'"`]|$)/i;
 var AWS_SECRET_RE = /(?<![A-Za-z0-9/+=])[A-Za-z0-9/+=]{40}(?![A-Za-z0-9/+=])/g;
 var AWS_PAIR_WINDOW = 400;
 var awsSecretShaped = (v) => /^[A-Za-z0-9/+=]{40}$/.test(v) && /[a-z]/.test(v) && /[A-Z]/.test(v) && /[0-9/+]/.test(v);
@@ -3080,6 +3082,7 @@ function detectSecrets(path, content) {
   const nameAt = (offset) => nameOnLine(lineOf(starts, offset) - 1);
   for (const span of pemHits(content))
     raw.push({ rule: "private_key", name: nameAt(span.start), ...span });
+  const testFile = TEST_PATH_RE.test(path);
   const awsIds = [];
   for (const p of VALUE_PATTERNS) {
     p.re.lastIndex = 0;
@@ -3090,6 +3093,8 @@ function detectSecrets(path, content) {
       if (p.accept && !p.accept(value))
         continue;
       if (p.rule === "db_url_password" && value.length < 6)
+        continue;
+      if (p.rule === "db_url_password" && testFile && FAKE_HOST_RE.test(content.slice(m.index + m[0].length, m.index + m[0].length + 256)))
         continue;
       if ((p.rule === "db_url_password" || p.rule === "registry_auth") && (looksLikeReference(value) || /%s|\{\{|^\$/.test(value) || /^(password|pass|secret|changeme)$/i.test(value)))
         continue;
