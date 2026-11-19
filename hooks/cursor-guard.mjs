@@ -1321,7 +1321,8 @@ if (event === "afterMCPExecution") {
   const result = String(input.result_json ?? "");
   // DKO-1549: keep the answer of dkoder.policy, so `dkod-policy.mjs check --saved` reads it. The agent never
   // copies that JSON into a shell command: a quote in it broke the command and Guard refused it.
-  if (tool === "dkoder.policy") savePolicy(result);
+  // session.start with include: ["policy"] carries the same answer in its `policy` field.
+  if (tool === "dkoder.policy" || tool === "dkoder.session.start") savePolicy(result);
   // The mark from before the call is taken back when the call did not open a session.
   if (tool === "dkoder.session.start" && chat && (/"isError"\s*:\s*true/.test(result) || !/\\?"id\\?"\s*:/.test(result))) {
     const all = readState();
