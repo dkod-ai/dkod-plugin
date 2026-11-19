@@ -94,6 +94,16 @@ if [ -r "$conf" ]; then
   [ -n "$trusted" ] && governance=$(tr '\n' ' ' < "$conf" | sed -n 's/.*"governanceRepo"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z')
 fi
 
+# DKO-1855: an org that ships by pull request ("shipBy":"pr") may push one named branch. Only the
+# trusted dkoder.json opens it, never the home copy. Its gitops and app repos stay closed, as in the mod.
+ship_pr=""
+fixed=""
+if [ -n "$trusted" ] && [ -r "$conf" ] && tr '\n' ' ' < "$conf" | grep -Eq '(^|[^\\])"shipBy"[[:space:]]*:[[:space:]]*"pr"[[:space:]]*[,}]'; then
+  ship_pr=1
+  fixed=$(tr '\n' ' ' < "$conf" | sed -n 's/.*[^\\]"appRepos"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' | tr -d '" ' | tr ',' ' ' | tr 'A-Z' 'a-z')
+  fixed="$fixed $(tr '\n' ' ' < "$conf" | sed -n 's/.*[^\\]"gitopsRepo"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z')"
+fi
+
 # macOS ships /usr/bin/git as a stub: with no Apple developer tools, running it opens Apple's
 # install window. git counts only when it is real (src/dev-tools.ts makes the same check).
 real_git=
@@ -146,9 +156,56 @@ in_scope() {
   return 1
 }
 
+# DKO-1855: is the whole command one push of one named branch that is not main or master? Only
+# `git push [-u|--set-upstream] <remote> <branch | src:branch>`, nothing else on the line: no force,
+# no +refspec, no delete, no wildcard, no --all/--mirror/--tags, no HEAD without a named target, and
+# none of the folder's remotes is a gitops or app repo.
+branch_push() {
+  c=$(printf '%s' "$input" | tr '\n' ' ' | sed -En 's/.*"command"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)".*/\1/p' | head -n 1)
+  printf '%s' "$c" | grep -Eq '^[[:space:]]*git[[:space:]]+push([[:space:]]+(-u|--set-upstream))*[[:space:]]+[A-Za-z0-9_][A-Za-z0-9._-]*[[:space:]]+[A-Za-z0-9._/:-]+[[:space:]]*$' || return 1
+  # The charset above has no glob or quote characters, so plain word splitting is safe.
+  set -f; set -- $c; set +f
+  while [ $# -gt 2 ]; do shift; done
+  remote=$1 spec=$2
+  git_is_real || return 1
+  # A tag pushed by name can start a release: the source must be HEAD or a local branch that no tag shares.
+  is_branch() { git -C "${cwd:-.}" show-ref --verify --quiet "refs/heads/$1" && ! git -C "${cwd:-.}" show-ref --verify --quiet "refs/tags/$1"; }
+  case "$spec" in
+    -*|:*|*:*:*|*:) return 1 ;;
+    *:*)
+      src=${spec%%:*}
+      dst=${spec#*:}
+      case "$src" in
+        HEAD) ;;
+        refs/heads/*) is_branch "${src#refs/heads/}" || return 1 ;;
+        refs/*) return 1 ;;
+        *) is_branch "$src" || return 1 ;;
+      esac
+      ;;
+    *)
+      dst=$spec
+      [ "$spec" = HEAD ] && return 1
+      is_branch "${spec#refs/heads/}" || return 1
+      case "$spec" in refs/heads/*) ;; refs/*) return 1 ;; esac
+      # With no :dst, the repo's own remote.<name>.push could map the branch elsewhere.
+      [ -n "$(git -C "${cwd:-.}" config --get-all "remote.$remote.push" 2>/dev/null)" ] && return 1
+      ;;
+  esac
+  dst=${dst#refs/heads/}
+  case "$dst" in
+    refs/*|heads/*|tags/*|remotes/*|HEAD|/*|.*|-*|*/|*.|*.lock|*..*|*//*) return 1 ;;
+  esac
+  case "$(printf '%s' "$dst" | tr 'A-Z' 'a-z')" in main|master) return 1 ;; esac
+  for r in $(remotes "${cwd:-.}"); do
+    for f in $fixed; do [ "$r" = "$f" ] && return 1; done
+  done
+  return 0
+}
+
 case "$tool" in
   Bash)
     cmd=$(field command)
+    if [ -n "$ship_pr" ] && branch_push; then exit 0; fi
     if printf '%s' "$cmd" | grep -Eq '(^|[;&|( ]|\\n)git( +-[cC] +[^ ]+| +--[a-z-]+(=[^ ]+)?)* +push( |$)' ||
        printf '%s' "$cmd" | grep -Eq '(^|[;&|( ]|\\n)gh( +(-R|--repo) +[^ ]+| +--repo=[^ ]+)? +pr +merge( |$)'; then
       # An explicit org URL in the command, or else the folder's own remotes.
