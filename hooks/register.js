@@ -3801,6 +3801,10 @@ function sqlWriteRefusal() {
 }
 var DELIVER = "App code ships through Deliver (the dkoder.deliver tool), never a direct push or merge.";
 var PULL_REQUEST = "Push your own branch and open a pull request (gh pr create). A person merges it.";
+var PULL_REQUEST_BOT_MERGES = "Push your own branch and open a pull request (gh pr create). Merge it with gh pr merge when the person asks, never with --admin.";
+function botsMerge(config) {
+  return config.shipBy === "pr" && config.mergeBy === "bot";
+}
 var MAIN_BRANCHES = new Set(["main", "master"]);
 function pushedBranches(refspecs, current) {
   const out = [];
@@ -3865,7 +3869,8 @@ function matchesBlocked(argv, command) {
 }
 async function decideBash(cmds, config, resolver, seen = []) {
   const guard = effectiveGuard(config);
-  const way = config.shipBy === "pr" ? PULL_REQUEST : DELIVER;
+  const pr = botsMerge(config) ? PULL_REQUEST_BOT_MERGES : PULL_REQUEST;
+  const way = config.shipBy === "pr" ? pr : DELIVER;
   const judged = (action, repo, org) => {
     seen.push({ action, repo, org });
     return true;
@@ -3936,17 +3941,17 @@ async function decideBash(cmds, config, resolver, seen = []) {
       }
       if (cls === "branch") {
         if (a.force)
-          return { rule: "no-force-push", repo, message: `Force push to ${repo} is not allowed. ${PULL_REQUEST}` };
+          return { rule: "no-force-push", repo, message: `Force push to ${repo} is not allowed. ${pr}` };
         if (a.every === true)
-          return { rule: "pull-request-only", repo, message: `A push of every branch to ${repo} is not allowed. Push one branch by name. ${PULL_REQUEST}` };
+          return { rule: "pull-request-only", repo, message: `A push of every branch to ${repo} is not allowed. Push one branch by name. ${pr}` };
         const needsHead = (a.refspecs ?? []).length === 0 || (a.refspecs ?? []).some((s) => /(?:^|:)\+?(?:HEAD|@)$/.test(s));
         const current = needsHead && resolver.currentBranch !== undefined ? await resolver.currentBranch(a.dir) : null;
         const branches = pushedBranches(a.refspecs ?? [], current);
         if (branches === null)
-          return { rule: "pull-request-only", repo, message: `Dkoder could not tell which branch this push writes on ${repo}. Name the branch: git push origin <branch>. ${PULL_REQUEST}` };
+          return { rule: "pull-request-only", repo, message: `Dkoder could not tell which branch this push writes on ${repo}. Name the branch: git push origin <branch>. ${pr}` };
         const main = branches.find((b) => MAIN_BRANCHES.has(b.toLowerCase()));
         if (main !== undefined)
-          return { rule: "pull-request-only", repo, message: `git push to ${main} on ${repo} is not allowed. ${PULL_REQUEST}` };
+          return { rule: "pull-request-only", repo, message: `git push to ${main} on ${repo} is not allowed. ${pr}` };
       }
       continue;
     }
@@ -3964,8 +3969,14 @@ async function decideBash(cmds, config, resolver, seen = []) {
       return { rule: "deliver-only", repo, message: governanceMessage(repo) };
     if (cls === "protected")
       return { rule: "deliver-only", repo, message: `${describe(a)} on ${repo} is not allowed. ${way}` };
-    if (cls === "branch")
-      return { rule: "pull-request-only", repo, message: `${describe(a)} on ${repo} is not allowed. ${PULL_REQUEST}` };
+    if (cls === "branch") {
+      if (a.kind === "merge" && botsMerge(config)) {
+        if (!a.cmd.argv.some((w) => /^--admin(?:=|$)/.test(w) || /[$`]/.test(w)))
+          continue;
+        return { rule: "pull-request-only", repo, message: `gh pr merge with --admin, or a word Dkoder cannot read, on ${repo} is not allowed: --admin skips the repo's required checks. Merge with plain words, without --admin, once the checks pass.` };
+      }
+      return { rule: "pull-request-only", repo, message: `${describe(a)} on ${repo} is not allowed. ${pr}` };
+    }
   }
   return null;
 }
@@ -4318,7 +4329,8 @@ function configFrom(v) {
     ...typeof o.policyText === "string" ? { policyText: o.policyText } : {},
     ...pack !== null && pack.rules.length > 0 ? { policyPack: pack } : {},
     ...typeof o.governanceSha === "string" && /^[0-9a-f]{40}$/.test(o.governanceSha) ? { governanceSha: o.governanceSha } : {},
-    ...o.shipBy === "pr" ? { shipBy: "pr" } : {}
+    ...o.shipBy === "pr" ? { shipBy: "pr" } : {},
+    ...o.shipBy === "pr" && o.mergeBy === "bot" ? { mergeBy: "bot" } : {}
   };
 }
 function mergeConfig(base, live, trusted = true) {
@@ -4328,7 +4340,7 @@ function mergeConfig(base, live, trusted = true) {
     const guard = live.guard === null ? null : { ...live.guard };
     if (guard !== null)
       delete guard.direct_push_allowed;
-    live = { ...live, governanceRepo: null, guard, shipBy: undefined };
+    live = { ...live, governanceRepo: null, guard, shipBy: undefined, mergeBy: undefined };
   }
   const union = (a, b) => [...new Set([...a, ...b].map((s) => s.toLowerCase()))];
   return {
@@ -4340,14 +4352,15 @@ function mergeConfig(base, live, trusted = true) {
     ...live.policyText ?? base.policyText ? { policyText: live.policyText ?? base.policyText } : {},
     ...live.policyPack ?? base.policyPack ? { policyPack: live.policyPack ?? base.policyPack } : {},
     ...live.governanceSha ?? base.governanceSha ? { governanceSha: live.governanceSha ?? base.governanceSha } : {},
-    ...(trusted ? live.shipBy : base.shipBy) === "pr" ? { shipBy: "pr" } : {}
+    ...(trusted ? live.shipBy : base.shipBy) === "pr" ? { shipBy: "pr" } : {},
+    ...(trusted ? live : base).shipBy === "pr" && (trusted ? live : base).mergeBy === "bot" ? { mergeBy: "bot" } : {}
   };
 }
 function rulesText(config) {
   const lines = [
     "# Dkoder (DKOD's floor, the same for every organization)",
     "Dkoder checks every command and file write.",
-    config.shipBy === "pr" ? "- Code reaches the organization's repos by pull request: push your own branch, then open a PR with gh pr create. Never push to main or master, never force push, and never merge (gh pr merge) or write to main through the GitHub API. A person merges." : "- App code ships through Deliver (the dkoder.deliver tool of the DKOD MCP server). Never git push, gh pr merge or write through the GitHub API to an app repo of the organization.",
+    botsMerge(config) ? "- Code reaches the organization's repos by pull request: push your own branch, then open a PR with gh pr create. Never push to main or master, never force push, and never write to main through the GitHub API. When the person asks you to merge a pull request, merge it with gh pr merge (never --admin, so the repo's required checks still apply)." : config.shipBy === "pr" ? "- Code reaches the organization's repos by pull request: push your own branch, then open a PR with gh pr create. Never push to main or master, never force push, and never merge (gh pr merge) or write to main through the GitHub API. A person merges." : "- App code ships through Deliver (the dkoder.deliver tool of the DKOD MCP server). Never git push, gh pr merge or write through the GitHub API to an app repo of the organization.",
     "- Never write a secret value into a file, and never commit one. Put the NAME of a secret in the file and resolve it at run time.",
     "- Never skip git hooks (--no-verify, core.hooksPath) and never force push to an organization repo.",
     "- When Dkoder or Guard refuses a call, tell the person why and take the DKOD path instead. Do not try another way around it."

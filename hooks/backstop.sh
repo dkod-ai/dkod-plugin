@@ -97,11 +97,14 @@ fi
 # DKO-1855: an org that ships by pull request ("shipBy":"pr") may push one named branch. Only the
 # trusted dkoder.json opens it, never the home copy. Its gitops and app repos stay closed, as in the mod.
 ship_pr=""
+bots_merge=""
 fixed=""
 if [ -n "$trusted" ] && [ -r "$conf" ] && tr '\n' ' ' < "$conf" | grep -Eq '(^|[^\\])"shipBy"[[:space:]]*:[[:space:]]*"pr"[[:space:]]*[,}]'; then
   ship_pr=1
   fixed=$(tr '\n' ' ' < "$conf" | sed -n 's/.*[^\\]"appRepos"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' | tr -d '" ' | tr ',' ' ' | tr 'A-Z' 'a-z')
   fixed="$fixed $(tr '\n' ' ' < "$conf" | sed -n 's/.*[^\\]"gitopsRepo"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z')"
+  # The org's bots may merge their pull requests ("mergeBy":"bot"), only with shipBy pr and the trusted file.
+  tr '\n' ' ' < "$conf" | grep -Eq '(^|[^\\])"mergeBy"[[:space:]]*:[[:space:]]*"bot"[[:space:]]*[,}]' && bots_merge=1
 fi
 
 # macOS ships /usr/bin/git as a stub: with no Apple developer tools, running it opens Apple's
@@ -202,10 +205,24 @@ branch_push() {
   return 0
 }
 
+# Is the whole command one plain `gh pr merge <number>` with only a merge method and --delete-branch, in a
+# folder whose remotes are no gitops, app or governance repo? No --admin, no -R, no URL, nothing else on the line.
+plain_merge() {
+  c=$(printf '%s' "$input" | tr '\n' ' ' | sed -En 's/.*"command"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)".*/\1/p' | head -n 1)
+  printf '%s' "$c" | grep -Eq '^[[:space:]]*gh[[:space:]]+pr[[:space:]]+merge[[:space:]]+[0-9]+([[:space:]]+(--squash|--merge|--rebase|-s|-m|-r|--delete-branch|-d|--auto))*[[:space:]]*$' || return 1
+  git_is_real || return 1
+  for r in $(remotes "${cwd:-.}"); do
+    [ "$r" = "$governance" ] && return 1
+    for f in $fixed; do [ "$r" = "$f" ] && return 1; done
+  done
+  return 0
+}
+
 case "$tool" in
   Bash)
     cmd=$(field command)
     if [ -n "$ship_pr" ] && branch_push; then exit 0; fi
+    if [ -n "$ship_pr" ] && [ -n "$bots_merge" ] && plain_merge; then exit 0; fi
     if printf '%s' "$cmd" | grep -Eq '(^|[;&|( ]|\\n)git( +-[cC] +[^ ]+| +--[a-z-]+(=[^ ]+)?)* +push( |$)' ||
        printf '%s' "$cmd" | grep -Eq '(^|[;&|( ]|\\n)gh( +(-R|--repo) +[^ ]+| +--repo=[^ ]+)? +pr +merge( |$)'; then
       # An explicit org URL in the command, or else the folder's own remotes.
