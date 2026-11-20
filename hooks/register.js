@@ -3801,7 +3801,7 @@ function sqlWriteRefusal() {
 }
 var DELIVER = "App code ships through Deliver (the dkoder.deliver tool), never a direct push or merge.";
 var PULL_REQUEST = "Push your own branch and open a pull request (gh pr create). A person merges it.";
-var PULL_REQUEST_BOT_MERGES = "Push your own branch and open a pull request (gh pr create). Merge it with gh pr merge when the person asks, never with --admin.";
+var PULL_REQUEST_BOT_MERGES = "Push your own branch and open a pull request (gh pr create). Merge it with gh pr merge when the person asks. Run gh pr checks first; use --admin only when every check is green.";
 function botsMerge(config) {
   return config.shipBy === "pr" && config.mergeBy === "bot";
 }
@@ -3971,9 +3971,9 @@ async function decideBash(cmds, config, resolver, seen = []) {
       return { rule: "deliver-only", repo, message: `${describe(a)} on ${repo} is not allowed. ${way}` };
     if (cls === "branch") {
       if (a.kind === "merge" && botsMerge(config)) {
-        if (!a.cmd.argv.some((w) => /^--admin(?:=|$)/.test(w) || /[$`]/.test(w)))
+        if (!a.cmd.argv.some((w) => /[$`]/.test(w)))
           continue;
-        return { rule: "pull-request-only", repo, message: `gh pr merge with --admin, or a word Dkoder cannot read, on ${repo} is not allowed: --admin skips the repo's required checks. Merge with plain words, without --admin, once the checks pass.` };
+        return { rule: "pull-request-only", repo, message: `gh pr merge with a word Dkoder cannot read on ${repo} is not allowed. Merge with plain words, once the checks pass.` };
       }
       return { rule: "pull-request-only", repo, message: `${describe(a)} on ${repo} is not allowed. ${pr}` };
     }
@@ -4360,7 +4360,7 @@ function rulesText(config) {
   const lines = [
     "# Dkoder (DKOD's floor, the same for every organization)",
     "Dkoder checks every command and file write.",
-    botsMerge(config) ? "- Code reaches the organization's repos by pull request: push your own branch, then open a PR with gh pr create. Never push to main or master, never force push, and never write to main through the GitHub API. When the person asks you to merge a pull request, merge it with gh pr merge (never --admin, so the repo's required checks still apply)." : config.shipBy === "pr" ? "- Code reaches the organization's repos by pull request: push your own branch, then open a PR with gh pr create. Never push to main or master, never force push, and never merge (gh pr merge) or write to main through the GitHub API. A person merges." : "- App code ships through Deliver (the dkoder.deliver tool of the DKOD MCP server). Never git push, gh pr merge or write through the GitHub API to an app repo of the organization.",
+    botsMerge(config) ? "- Code reaches the organization's repos by pull request: push your own branch, then open a PR with gh pr create. Never push to main or master, never force push, and never write to main through the GitHub API. When the person asks you to merge a pull request, merge it with gh pr merge. Run gh pr checks first, and use --admin only when every check is green (it skips reviews; the repo's required checks still apply)." : config.shipBy === "pr" ? "- Code reaches the organization's repos by pull request: push your own branch, then open a PR with gh pr create. Never push to main or master, never force push, and never merge (gh pr merge) or write to main through the GitHub API. A person merges." : "- App code ships through Deliver (the dkoder.deliver tool of the DKOD MCP server). Never git push, gh pr merge or write through the GitHub API to an app repo of the organization.",
     "- Never write a secret value into a file, and never commit one. Put the NAME of a secret in the file and resolve it at run time.",
     "- Never skip git hooks (--no-verify, core.hooksPath) and never force push to an organization repo.",
     "- When Dkoder or Guard refuses a call, tell the person why and take the DKOD path instead. Do not try another way around it."

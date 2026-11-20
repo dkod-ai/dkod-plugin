@@ -206,10 +206,10 @@ branch_push() {
 }
 
 # Is the whole command one plain `gh pr merge <number>` with only a merge method and --delete-branch, in a
-# folder whose remotes are no gitops, app or governance repo? No --admin, no -R, no URL, nothing else on the line.
+# folder whose remotes are no gitops, app or governance repo? --admin is allowed; no -R, no URL, nothing else on the line.
 plain_merge() {
   c=$(printf '%s' "$input" | tr '\n' ' ' | sed -En 's/.*"command"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)".*/\1/p' | head -n 1)
-  printf '%s' "$c" | grep -Eq '^[[:space:]]*gh[[:space:]]+pr[[:space:]]+merge[[:space:]]+[0-9]+([[:space:]]+(--squash|--merge|--rebase|-s|-m|-r|--delete-branch|-d|--auto))*[[:space:]]*$' || return 1
+  printf '%s' "$c" | grep -Eq '^[[:space:]]*gh[[:space:]]+pr[[:space:]]+merge[[:space:]]+[0-9]+([[:space:]]+(--squash|--merge|--rebase|-s|-m|-r|--delete-branch|-d|--auto|--admin))*[[:space:]]*$' || return 1
   git_is_real || return 1
   for r in $(remotes "${cwd:-.}"); do
     [ "$r" = "$governance" ] && return 1
