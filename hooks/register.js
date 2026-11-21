@@ -4330,7 +4330,8 @@ function configFrom(v) {
     ...pack !== null && pack.rules.length > 0 ? { policyPack: pack } : {},
     ...typeof o.governanceSha === "string" && /^[0-9a-f]{40}$/.test(o.governanceSha) ? { governanceSha: o.governanceSha } : {},
     ...o.shipBy === "pr" ? { shipBy: "pr" } : {},
-    ...o.shipBy === "pr" && o.mergeBy === "bot" ? { mergeBy: "bot" } : {}
+    ...o.shipBy === "pr" && o.mergeBy === "bot" ? { mergeBy: "bot" } : {},
+    ...o.dkoder === "off" ? { dkoder: "off" } : {}
   };
 }
 function mergeConfig(base, live, trusted = true) {
@@ -4340,7 +4341,7 @@ function mergeConfig(base, live, trusted = true) {
     const guard = live.guard === null ? null : { ...live.guard };
     if (guard !== null)
       delete guard.direct_push_allowed;
-    live = { ...live, governanceRepo: null, guard, shipBy: undefined, mergeBy: undefined };
+    live = { ...live, governanceRepo: null, guard, shipBy: undefined, mergeBy: undefined, dkoder: undefined };
   }
   const union = (a, b) => [...new Set([...a, ...b].map((s) => s.toLowerCase()))];
   return {
@@ -4353,9 +4354,12 @@ function mergeConfig(base, live, trusted = true) {
     ...live.policyPack ?? base.policyPack ? { policyPack: live.policyPack ?? base.policyPack } : {},
     ...live.governanceSha ?? base.governanceSha ? { governanceSha: live.governanceSha ?? base.governanceSha } : {},
     ...(trusted ? live.shipBy : base.shipBy) === "pr" ? { shipBy: "pr" } : {},
-    ...(trusted ? live : base).shipBy === "pr" && (trusted ? live : base).mergeBy === "bot" ? { mergeBy: "bot" } : {}
+    ...(trusted ? live : base).shipBy === "pr" && (trusted ? live : base).mergeBy === "bot" ? { mergeBy: "bot" } : {},
+    ...(trusted ? live : base).dkoder === "off" ? { dkoder: "off" } : {}
   };
 }
+var DKODER_OFF = `# Dkoder
+Your organization is outside Dkoder: it checks no command, file write or push here. Follow the repo's own rules.`;
 function rulesText(config) {
   const lines = [
     "# Dkoder (DKOD's floor, the same for every organization)",
@@ -4531,10 +4535,12 @@ function createGuard(initial) {
     if (live === null && !file.token && io.mcpConfig) {
       try {
         const answer = await io.mcpConfig();
-        if (typeof answer === "object" && answer !== null && answer.enabled === true) {
+        const a = answer;
+        if (typeof a === "object" && a !== null && (a.enabled === true || a.dkoder === "off")) {
           live = configFrom(answer);
           await io.keepConfig(live);
-          await io.keepHookConfig?.({ owners: live.owners, appRepos: live.appRepos })?.catch(() => {
+          const off = live.dkoder === "off";
+          await io.keepHookConfig?.({ owners: off ? [] : live.owners, appRepos: off ? [] : live.appRepos })?.catch(() => {
             return;
           });
         }
@@ -4788,12 +4794,17 @@ Do not try another way to run it. Tell the person why, and offer the allowed way
     const orgRepo = remotes.find((r) => classifyRepo(r, cfg) !== "outside");
     send(io, { kind: "session", repo: orgRepo ?? null });
     const guardOn = cfg.owners.length > 0 ? "on, Guard on" : "on";
-    io.status(protectedRepo !== undefined ? `Dkoder: ${guardOn} · ${protectedRepo.split("/")[1]}, Deliver required` : `Dkoder: ${guardOn}`);
+    if (cfg.dkoder === "off")
+      io.status("Dkoder: off for your organization");
+    else
+      io.status(protectedRepo !== undefined ? `Dkoder: ${guardOn} · ${protectedRepo.split("/")[1]}, Deliver required` : `Dkoder: ${guardOn}`);
   };
   const promptNote = async (io, text) => {
     if (!asksDirectShip(text))
       return null;
     const cfg = await load(io);
+    if (cfg.dkoder === "off")
+      return null;
     const remotes = await resolver(io).repoRemotes(await io.cwd());
     const named = [...cfg.appRepos, ...cfg.gitopsRepo !== null ? [cfg.gitopsRepo] : []].filter((r) => text.toLowerCase().includes(r.toLowerCase()));
     const repo = [...remotes, ...named].find((r) => classifyRepo(r, cfg) === "protected");
@@ -4807,7 +4818,10 @@ Do not try another way to run it. Tell the person why, and offer the allowed way
     ].join(`
 `);
   };
-  const promptSection = async (io) => ({ id: "dkod", text: rulesText(await load(io)), scope: "session" });
+  const promptSection = async (io) => {
+    const cfg = await load(io);
+    return { id: "dkod", text: cfg.dkoder === "off" ? DKODER_OFF : rulesText(cfg), scope: "session" };
+  };
   const failClosed = async (tool, check) => {
     try {
       return await check();
@@ -4815,7 +4829,7 @@ Do not try another way to run it. Tell the person why, and offer the allowed way
       return { deny: `Dkoder could not check this ${tool} call (${err instanceof Error ? err.message.slice(0, 120) : "unknown error"}), so it did not run. Try again; if it keeps failing, tell your DKOD admin.` };
     }
   };
-  const bash = (io, command) => failClosed("Bash", () => bashCheck(io, command));
+  const bash = (io, command) => failClosed("Bash", async () => (await load(io)).dkoder === "off" ? null : bashCheck(io, command));
   const bashCheck = async (io, command) => {
     const cfg = await load(io);
     const cmds = parseCommands(command);
@@ -4858,6 +4872,8 @@ Do not try another way to run it. Tell the person why, and offer the allowed way
     return null;
   };
   const write = (io, e) => failClosed(e.tool, async () => {
+    if ((await load(io)).dkoder === "off")
+      return null;
     const seen = [];
     const found = await checkWrite(io, e, seen);
     const repo = seen[0]?.repo ?? undefined;
