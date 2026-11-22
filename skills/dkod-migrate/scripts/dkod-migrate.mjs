@@ -775,6 +775,8 @@ var DRIVER_ENGINE = {
   sqlite3: "sqlite",
   "better-sqlite3": "sqlite",
   "@libsql/client": "sqlite",
+  "bun:sqlite": "sqlite",
+  "node:sqlite": "sqlite",
   mysql: "mysql",
   mysql2: "mysql",
   mariadb: "mysql",
@@ -793,13 +795,41 @@ var LOCKFILE_BY_MANAGER = {
 };
 var ALL_LOCKFILES = [...new Set(Object.values(LOCKFILE_BY_MANAGER).flat())];
 var FILE_DATABASE = /\.(?:db|sqlite)$/;
+var JS_SOURCE = "*.{ts,tsx,js,jsx,mjs,cjs,mts,cts}";
+var NOT_APP_SOURCE = [...TESTS, "**/dist/**", "**/build/**", "**/.next/**", "**/out/**", "**/coverage/**", "*.d.ts"];
+var IMPORT_SPEC = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)["']([^"'\s]+)["']/g;
+function databaseImports(text) {
+  const out = [];
+  lines(text).forEach((l, i) => {
+    for (const m of l.matchAll(IMPORT_SPEC)) {
+      const spec = m[1];
+      const root = spec.split("/").slice(0, spec.startsWith("@") ? 2 : 1).join("/");
+      const engine = DRIVER_ENGINE[spec] ?? DRIVER_ENGINE[root];
+      if (engine !== undefined)
+        out.push({ line: i + 1, module: spec, engine });
+    }
+  });
+  return out;
+}
+function isAppSource(path) {
+  return matchAny([JS_SOURCE], path) && !matchAny(NOT_APP_SOURCE, path);
+}
 function stackFiles(dir) {
-  return [`${dir}/package.json`, `${dir}/{${ALL_LOCKFILES.join(",")}}`, `${dir}/*.db`, `${dir}/*.sqlite`];
+  return [`${dir}/package.json`, `${dir}/{${ALL_LOCKFILES.join(",")}}`, `${dir}/*.db`, `${dir}/*.sqlite`, `${dir}/${JS_SOURCE}`];
 }
 function stackGlobs(folderPrefix) {
   return stackFiles(`**/${folderPrefix}*/**`);
 }
 var STACK_FOLDER_PATHS = stackFiles("**");
+function migrationStackParams(m) {
+  return {
+    folder_prefix: m.folderPrefix,
+    paths: stackGlobs(m.folderPrefix),
+    deny_dependencies: m.denyDependencies.slice(0, MAX_LIST_ENTRIES),
+    database_engine: m.databaseEngine,
+    package_manager: m.packageManager
+  };
+}
 function textProblem(params, key) {
   const v = params[key];
   return typeof v === "string" && v.length > 0 && v.length <= 200 ? [] : [`"${key}" must be a short string`];
@@ -1217,7 +1247,7 @@ var CATALOG = {
     folderPaths: STACK_FOLDER_PATHS,
     pathsFor: (params) => stackGlobs(typeof params.folder_prefix === "string" && params.folder_prefix !== "" ? params.folder_prefix : DEFAULT_FOLDER_PREFIX),
     byName: true,
-    textPaths: ["**/package.json"],
+    textPaths: ["**/package.json", `**/${JS_SOURCE}`],
     exclude: [],
     params: [
       { name: "folder_prefix", kind: "string", hint: "The prefix of a migration app folder, from migration.yaml." },
@@ -1241,6 +1271,11 @@ var CATALOG = {
         return [{ path: file.path, line: null, detail: `${base} belongs to a package manager other than ${manager}` }];
       if (FILE_DATABASE.test(base))
         return [{ path: file.path, line: null, detail: `${base} is a file database; the stack uses ${engine}` }];
+      if (matchAny([JS_SOURCE], file.path)) {
+        if (!isAppSource(file.path) || stack === "")
+          return [];
+        return databaseImports(file.text).filter((d) => d.engine !== stack).map((d) => ({ path: file.path, line: d.line, detail: `${base} imports ${d.module}, a ${d.engine} driver; the stack uses ${engine}` }));
+      }
       if (base !== "package.json")
         return [];
       let doc;
@@ -4262,7 +4297,128 @@ async function verifyApp(folder, io, args = []) {
   record.ok = record.failures.length === 0;
   return finish2(dir, record, io);
 }
-
+var MIGRATION_STACK_DEFAULTS = {
+  folderPrefix: "dk-",
+  denyDependencies: ["express", "sqlite3", "better-sqlite3", "mongoose", "mysql2", "prisma", "npm"],
+  packageManager: "bun",
+  databaseEngine: "postgres"
+};
+function check(use, params = {}, extra = {}) {
+  return { use, with: params, message: extra.message ?? null, level: extra.level ?? null };
+}
+var has = (h, ...words) => words.some((w) => {
+  let at = h.indexOf(w);
+  while (at !== -1) {
+    if (at === 0 || !/[a-z0-9]/.test(h[at - 1]))
+      return true;
+    at = h.indexOf(w, at + 1);
+  }
+  return false;
+});
+var RECOGNISERS = [
+  {
+    id: "pinned-base-images",
+    label: "Base images pinned by digest",
+    test: (h) => has(h, "digest") && has(h, "from", "base image"),
+    checks: [check("dockerfile.from_digest", { exclude: ["Dockerfile.dev"] }, { message: "Pin the base image by digest: FROM image:tag@sha256:<digest>" })]
+  },
+  {
+    id: "no-moving-tags",
+    label: "No moving image tags",
+    test: (h) => has(h, "tag") && has(h, "latest", "floating", "moves", "moving"),
+    checks: [
+      check("image.no_moving_tag", { tags: ["latest", "main", "master", "stable", "edge", "nightly"], exclude: ["docker-compose*.y*ml", "compose*.y*ml", "Dockerfile.dev"] }, { message: "Use a fixed image version or a digest, never a tag that moves" })
+    ]
+  },
+  {
+    id: "non-root",
+    label: "Non-root containers",
+    test: (h) => has(h, "non-root", "nonroot", "runasnonroot", "as root"),
+    checks: [
+      check("dockerfile.numeric_user", { exclude: ["Dockerfile.dev"] }, { message: "Run the image as a numeric non-root user: USER 10001" }),
+      check("k8s.security_context", {}, { message: "Run as non-root, drop ALL capabilities, read-only root filesystem, no privileged mode" })
+    ]
+  },
+  {
+    id: "probes",
+    label: "Health probes",
+    test: (h) => has(h, "probe", "liveness", "readiness"),
+    checks: [check("k8s.probes", { require: ["readinessProbe", "livenessProbe", "startupProbe"] }, { message: "Long-running workloads need readiness, liveness and startup probes" })]
+  },
+  {
+    id: "resources",
+    label: "Resource requests and limits",
+    test: (h) => has(h, "requests") && has(h, "memory") || has(h, "resource limit", "memory limit"),
+    checks: [check("k8s.resources", {}, { message: "Declare requests.cpu, requests.memory and limits.memory" })]
+  },
+  {
+    id: "rbac",
+    label: "Least-privilege RBAC",
+    test: (h) => has(h, "rbac", "wildcard", "cluster-admin", "least privilege", "least-privilege"),
+    checks: [check("k8s.rbac_no_wildcards", {}, { message: 'Name each permission; no "*" and no cluster-admin' })]
+  },
+  {
+    id: "secrets",
+    label: "No secret values in code",
+    test: (h) => has(h, "secret value", "plaintext secret", "plain text secret", "hardcoded secret", "hard-coded secret", "secret in code"),
+    checks: [check("secrets.none", {}, { message: "Never write a secret value; read it by name at run time" })]
+  },
+  {
+    id: "tls",
+    label: "TLS with verification",
+    test: (h) => has(h, "tls", "https", "certificate verification"),
+    checks: [check("tls.no_insecure", {}, { message: "Use TLS with certificate checks on; plain HTTP only to loopback" })]
+  },
+  {
+    id: "structured-logs",
+    label: "Structured JSON logs",
+    test: (h) => has(h, "log") && has(h, "json"),
+    checks: [
+      check("content.forbid", { pattern: "\\bconsole\\.(?:log|info|debug)\\(", paths: ["*.{ts,tsx,js,jsx,mjs,cjs}"], exclude: ["**/test/**", "**/tests/**", "*.test.*", "*.spec.*", "**/scripts/**"] }, { message: "Log through the JSON logger, not console.log", level: "warn" })
+    ]
+  },
+  {
+    id: "semver",
+    label: "Semantic versions",
+    test: (h) => has(h, "major.minor.patch", "semver", "semantic version"),
+    checks: [check("version.semver", {}, { message: "Version every artifact as MAJOR.MINOR.PATCH" })]
+  },
+  {
+    id: "conventional-commits",
+    label: "Conventional commits",
+    test: (h) => has(h, "commit") && has(h, "conventional", "type(scope)"),
+    checks: [check("commit.conventional", { types: ["feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert"] }, { message: "Write the commit subject as type(scope): summary" })]
+  },
+  {
+    id: "owner",
+    label: "Every service has an owner",
+    test: (h) => has(h, "owner", "owning team", "ownership"),
+    checks: [check("k8s.labels", { required: ["app.dkod.ai/owner"] }, { message: "Every deployed workload names its owner", level: "warn" })]
+  },
+  {
+    id: "package-manager",
+    label: "bun is the only package manager",
+    test: (h) => has(h, "bun") && has(h, "npm", "yarn", "pnpm", "package manager", "package step"),
+    checks: [
+      check("content.forbid", { pattern: "\\S", paths: ["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml"] }, { message: "Use bun: delete this lockfile; bun keeps bun.lock" }),
+      check("content.forbid", {
+        pattern: "^[^#]*(?:^|[\\s;&|(\"'`=])(?:npm|npx|yarn|pnpm)(?:\\s|$)",
+        paths: ["Dockerfile*", "*.Dockerfile", "Containerfile*", ".github/workflows/*.y*ml", ".gitlab-ci.y*ml", "package.json", "Makefile", "*.sh"]
+      }, { message: "Use bun, bunx and bun run here, not npm, npx, yarn or pnpm" }),
+      check("content.forbid", { pattern: "^\\s*FROM.*[\\s/]node[:@]", flags: "i", paths: ["Dockerfile*", "*.Dockerfile", "Containerfile*"] }, { message: "Build from the official oven/bun image, not node" })
+    ]
+  },
+  {
+    id: "migration-stack",
+    label: "A dk- app uses only the stack in migration.yaml",
+    test: (h) => has(h, "dk-") && has(h, "stack", "migration.yaml"),
+    checks: [
+      check("migration.stack", migrationStackParams(MIGRATION_STACK_DEFAULTS), {
+        message: "Use only the stack in migration.yaml: no denied dependency, the stack's database and package manager, no file database"
+      })
+    ]
+  }
+];
 var join12 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var PREFLIGHT_FILE = ".dkod/preflight.json";
 var PREFLIGHT_RULE_IDS = [
@@ -4621,6 +4777,10 @@ function preflightFindings(dir, io, overrides = {}) {
   for (const rel of all.filter((p) => DB_FILE.test(p))) {
     const wal = all.includes(`${rel}-wal`);
     findings.push(finding("sqlite-wal", rel, null, wal ? `${rel} and its -wal file are in the app's folder.` : `${rel} is a SQLite file in the app's folder.`));
+  }
+  for (const { rel, text } of texts(all.filter(isAppSource))) {
+    for (const d of databaseImports(text).filter((x) => x.engine === "sqlite"))
+      findings.push(finding("sqlite-wal", rel, d.line, `${rel} imports ${d.module}, a SQLite file database.`));
   }
   const main = f.read("src/web/main.tsx");
   if (main !== null && isSamplePage(main))

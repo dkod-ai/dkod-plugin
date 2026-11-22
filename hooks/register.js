@@ -2067,6 +2067,8 @@ var DRIVER_ENGINE = {
   sqlite3: "sqlite",
   "better-sqlite3": "sqlite",
   "@libsql/client": "sqlite",
+  "bun:sqlite": "sqlite",
+  "node:sqlite": "sqlite",
   mysql: "mysql",
   mysql2: "mysql",
   mariadb: "mysql",
@@ -2085,8 +2087,27 @@ var LOCKFILE_BY_MANAGER = {
 };
 var ALL_LOCKFILES = [...new Set(Object.values(LOCKFILE_BY_MANAGER).flat())];
 var FILE_DATABASE = /\.(?:db|sqlite)$/;
+var JS_SOURCE = "*.{ts,tsx,js,jsx,mjs,cjs,mts,cts}";
+var NOT_APP_SOURCE = [...TESTS, "**/dist/**", "**/build/**", "**/.next/**", "**/out/**", "**/coverage/**", "*.d.ts"];
+var IMPORT_SPEC = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)["']([^"'\s]+)["']/g;
+function databaseImports(text) {
+  const out = [];
+  lines(text).forEach((l, i) => {
+    for (const m of l.matchAll(IMPORT_SPEC)) {
+      const spec = m[1];
+      const root = spec.split("/").slice(0, spec.startsWith("@") ? 2 : 1).join("/");
+      const engine = DRIVER_ENGINE[spec] ?? DRIVER_ENGINE[root];
+      if (engine !== undefined)
+        out.push({ line: i + 1, module: spec, engine });
+    }
+  });
+  return out;
+}
+function isAppSource(path) {
+  return matchAny([JS_SOURCE], path) && !matchAny(NOT_APP_SOURCE, path);
+}
 function stackFiles(dir) {
-  return [`${dir}/package.json`, `${dir}/{${ALL_LOCKFILES.join(",")}}`, `${dir}/*.db`, `${dir}/*.sqlite`];
+  return [`${dir}/package.json`, `${dir}/{${ALL_LOCKFILES.join(",")}}`, `${dir}/*.db`, `${dir}/*.sqlite`, `${dir}/${JS_SOURCE}`];
 }
 function stackGlobs(folderPrefix) {
   return stackFiles(`**/${folderPrefix}*/**`);
@@ -2509,7 +2530,7 @@ var CATALOG = {
     folderPaths: STACK_FOLDER_PATHS,
     pathsFor: (params) => stackGlobs(typeof params.folder_prefix === "string" && params.folder_prefix !== "" ? params.folder_prefix : DEFAULT_FOLDER_PREFIX),
     byName: true,
-    textPaths: ["**/package.json"],
+    textPaths: ["**/package.json", `**/${JS_SOURCE}`],
     exclude: [],
     params: [
       { name: "folder_prefix", kind: "string", hint: "The prefix of a migration app folder, from migration.yaml." },
@@ -2533,6 +2554,11 @@ var CATALOG = {
         return [{ path: file.path, line: null, detail: `${base} belongs to a package manager other than ${manager}` }];
       if (FILE_DATABASE.test(base))
         return [{ path: file.path, line: null, detail: `${base} is a file database; the stack uses ${engine}` }];
+      if (matchAny([JS_SOURCE], file.path)) {
+        if (!isAppSource(file.path) || stack === "")
+          return [];
+        return databaseImports(file.text).filter((d) => d.engine !== stack).map((d) => ({ path: file.path, line: d.line, detail: `${base} imports ${d.module}, a ${d.engine} driver; the stack uses ${engine}` }));
+      }
       if (base !== "package.json")
         return [];
       let doc;
