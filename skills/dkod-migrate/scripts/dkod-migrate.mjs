@@ -2475,6 +2475,17 @@ function staticOutputDir(dir, io) {
       return name;
   return null;
 }
+function nginxConf(conf) {
+  const spaFallback = /\btry_files\b[^;]*\s\/index\.html\s*;/.test(conf);
+  const block = /location\s+(?:=\s*)?\/healthz\s*\{((?:[^}"']|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')*)\}/.exec(conf)?.[1];
+  const ret = block === undefined ? null : /\breturn\s+200\s+(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|([^;\s]+))\s*;/.exec(block);
+  if (block === undefined || ret === null)
+    return { healthz: null, spaFallback };
+  const body = (ret[1] ?? ret[2] ?? ret[3] ?? "").replace(/\\n/g, `
+`).replace(/\\(["'\\])/g, "$1");
+  const type = /add_header\s+Content-Type\s+["']?([^"';\s]+)/i.exec(block)?.[1] ?? /\bdefault_type\s+["']?([^"';\s]+)/.exec(block)?.[1] ?? "text/plain";
+  return { healthz: { body, type }, spaFallback };
+}
 var STATIC_SERVER = `const { createServer } = require("node:http");
 const { readFile } = require("node:fs/promises");
 const { join, normalize, extname } = require("node:path");
@@ -2482,12 +2493,12 @@ const root = process.env.STATIC_DIR || "dist";
 const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".txt": "text/plain", ".xml": "application/xml", ".woff2": "font/woff2" };
 createServer(async (req, res) => {
   const path = decodeURIComponent(new URL(req.url, "http://x").pathname);
-  if (path === "/healthz") { res.writeHead(200, { "content-type": "text/plain" }); res.end("ok"); return; }
+  if (path === "/healthz" && process.env.HEALTHZ_BODY !== undefined) { res.writeHead(200, { "content-type": process.env.HEALTHZ_TYPE || "text/plain" }); res.end(process.env.HEALTHZ_BODY); return; }
   const file = normalize(join(root, path));
   let body = null;
   try { body = await readFile(file); } catch {}
   if (body === null) { try { body = await readFile(join(root, path, "index.html")); } catch {} }
-  if (body === null) { try { body = await readFile(join(root, "index.html")); } catch {} }
+  if (body === null && process.env.SPA_FALLBACK === "1") { try { body = await readFile(join(root, "index.html")); } catch {} }
   if (body === null) { res.writeHead(404); res.end(); return; }
   res.writeHead(200, { "content-type": types[extname(file)] || "application/octet-stream" });
   res.end(body);
@@ -2522,8 +2533,13 @@ function startCommand(dir, io, override) {
     return { stack: "bun", cmd: "bun", args: ["run", "start"], label: "bun run start" };
   if (staticApp(dir, io)) {
     const out = staticOutputDir(dir, io);
-    if (out !== null)
-      return { stack: "static", cmd: "bun", args: ["-e", STATIC_SERVER], label: "static (nginx)", env: { STATIC_DIR: out } };
+    if (out !== null) {
+      const conf = nginxConf(io.readFile(join3(dir, "nginx.conf")) ?? "");
+      const env = { STATIC_DIR: out, SPA_FALLBACK: conf.spaFallback ? "1" : "0" };
+      if (conf.healthz !== null)
+        Object.assign(env, { HEALTHZ_BODY: conf.healthz.body, HEALTHZ_TYPE: conf.healthz.type });
+      return { stack: "static", cmd: "bun", args: ["-e", STATIC_SERVER], label: "static (nginx)", env };
+    }
   }
   const pyproject = io.readFile(join3(dir, "pyproject.toml")) !== null;
   if (!pyproject && io.readFile(join3(dir, "requirements.txt")) === null)
@@ -4493,6 +4509,14 @@ async function filesCommand(folder, io, args = []) {
   return report.ok ? 0 : 1;
 }
 
+var isJson = (text) => {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+};
 var join11 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var VERIFY_FILE = ".dkod/verify.json";
 var MAX_ROUTES = 60;
@@ -4676,11 +4700,24 @@ async function verifyApp(folder, io, args = []) {
       }
     };
     await check(routes);
-    if (start.stack === "static" && routes.includes("/healthz")) {
-      const hz = await getBody(app.base, "/healthz", io);
-      const body = (hz?.text ?? "").trim();
-      if (hz === null || body === "" || body === up.home.html.trim() || /^<!doctype html/i.test(body) || /^<html[\s>]/i.test(body)) {
-        record.failures.push({ route: "/healthz", why: "answered the SPA fallback (index.html), not its own body: the health endpoint is masked by the wildcard" });
+    if (start.stack === "static") {
+      const conf = nginxConf(io.readFile(join11(dir, "nginx.conf")) ?? "");
+      if (routes.includes("/healthz")) {
+        const hz = await getBody(app.base, "/healthz", io);
+        const body = (hz?.text ?? "").trim();
+        if (hz === null || body === "" || body === up.home.html.trim() || /^<!doctype html/i.test(body) || /^<html[\s>]/i.test(body)) {
+          record.failures.push({ route: "/healthz", why: "answered the SPA fallback (index.html), not its own body: the health endpoint is masked by the wildcard" });
+        } else if (conf.healthz !== null && /json/i.test(conf.healthz.type) && !isJson(body)) {
+          record.failures.push({ route: "/healthz", why: `nginx.conf says /healthz is ${conf.healthz.type}, but its body is not JSON: ${JSON.stringify(body.slice(0, 80))}` });
+        }
+      }
+      if (conf.spaFallback) {
+        const nope = `/__dkod_nope_${Date.now().toString(36)}`;
+        const [fb, shell] = [await getBody(app.base, nope, io), await getBody(app.base, "/", io)];
+        record.results.push({ route: nope, status: fb === null ? null : fb.status });
+        if (fb === null || fb.status !== 200 || fb.text.trim() !== (shell?.text ?? "").trim()) {
+          record.failures.push({ route: nope, why: `the SPA fallback did not answer 200 with the app shell (index.html): ${fb === null ? "no answer" : `answered ${String(fb.status)}`}` });
+        }
       }
     }
     const assets = [...new Set([...pagePaths(up.home.html), ...fileUrls(dir, io)])].filter((p) => !routes.includes(p));
