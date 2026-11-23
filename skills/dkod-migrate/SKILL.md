@@ -43,7 +43,7 @@ The goal is simple: the app runs on DKOD, with its data. Copy the app's code int
 Run `node <migrate> snapshot <folder>`. It finds the original's data: the data URL in its `.env.local` or `.env` (also in the app's own subfolder, such as `gBall/.env.local`), single-file stores and data files. It only reads them. It prints one JSON line.
 
 - `"mode":"snapshot"`: go on. When the original has a database server, the answer may also have `data_tables` (each table: `name`, `rows` as the database's own estimate or `null`, `bytes`, and `parents`: the tables its rows point at) and `suggest`: `heavy` (the tables of 100 MB or more), `small` (the tables whose rows can come along without the heavy ones) and `blocked` (small tables whose rows point at a heavy table, so they stay empty with it). Keep them for step 4.4. With a heavy table, the snapshot reads no row, so it is fast on a database of any size.
-- `"mode":"new-app-only"`: it found no data. Run `node <scripts>/dkod-db.mjs detect --dir <the original's folder>`. When detect says `uses_database: true`, ask the builder for the original's data URL, then run snapshot again with `--db-url <url>`. Otherwise go on: the app has no data to bring.
+- `"mode":"new-app-only"`: it found no data. Run `node <scripts>/dkod-db.mjs detect --dir <the original's folder>`. When detect says `uses_database: true`, ask the builder for the original's data URL, then run snapshot again with `--db-url <url>`. Otherwise go on: the app has no data to bring. With `"needs_database":false` (no tables and no runtime data store, such as a static app), the app needs no database: skip step 4. When the answer has `build_inputs`, those JSON files are only imported by the code at build time: tell the builder they were classed as build inputs, and copy them with the code.
 - Exit 1: show the builder the sentence it printed, and wait for the answer.
 
 ### 3. Make the dk- app
@@ -58,7 +58,7 @@ Run `node <migrate> snapshot <folder>`. It finds the original's data: the data U
 
 ### 4. Bring the data into Dev
 
-Skip this step when the snapshot said `new-app-only` and the app keeps no data.
+Skip this step when the snapshot said `new-app-only` and the app keeps no data, or said `"needs_database":false`: `dkod-db.mjs import` then says `no database needed, skipping import` and asks for no Dev database.
 
 1. When nothing says the app keeps data (the snapshot said `new-app-only`, or `dkod-db.mjs detect` on the folder says `uses_database: false`), ask the person whether it does. When it does not, skip this step and deploy with `no_database: true`: never make a database for it. When the app keeps data (or the person says it does), call `dkoder.devdb.status` with the original's app key (never the `dk-` key). Call `dkoder.devdb.make` with `confirm: true` when it says `missing`.
 2. Run `node <scripts>/dkod-db.mjs up --app <original key> --org <org_id> --dir <folder> --detach` (`org_id` from `dkoder.devdb.status`). It writes `DATABASE_URL` into `<folder>/.env.local`. When it asks for a code, do what the dkod skill's "Dev database" section says.

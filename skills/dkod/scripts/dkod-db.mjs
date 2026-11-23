@@ -201,7 +201,7 @@ function detectDatabase(root, io) {
 
 import { createHash } from "node:crypto";
 function sealOf(r, nonce) {
-  const body = { mode: r.mode, scratch: r.scratch, files: r.files, databases: (r.databases ?? []).map((d) => ({ name: d.name, url: d.url, tables: d.tables ?? null, ...d.source === undefined ? {} : { source: d.source } })), env: r.env, message: r.message ?? null, ...r.bases === undefined ? {} : { bases: r.bases }, ...r.source === undefined ? {} : { source: r.source }, ...r.checks === undefined ? {} : { checks: r.checks } };
+  const body = { mode: r.mode, scratch: r.scratch, files: r.files, databases: (r.databases ?? []).map((d) => ({ name: d.name, url: d.url, tables: d.tables ?? null, ...d.source === undefined ? {} : { source: d.source } })), env: r.env, message: r.message ?? null, ...r.bases === undefined ? {} : { bases: r.bases }, ...r.source === undefined ? {} : { source: r.source }, ...r.checks === undefined ? {} : { checks: r.checks }, ...r.needs_database === undefined ? {} : { needs_database: r.needs_database } };
   return createHash("sha256").update(JSON.stringify(body)).update(nonce).digest("hex");
 }
 
@@ -2622,6 +2622,14 @@ async function runImport(flags, io, cwd) {
     if (!pg) {
       const bases = Array.isArray(r?.bases) ? r.bases.filter((b) => typeof b?.base === "string" && typeof b.rel === "string" && typeof b.sha256 === "string") : [];
       const hasSqlite = bases.length > 0 || Array.isArray(r?.files) && r.files.some((f) => typeof f === "string" && /\.(?:sqlite|sqlite3|db|db3)$/i.test(f));
+      const noStore = r !== null && r.mode === "new-app-only" && r.needs_database === false;
+      if (!hasSqlite && noStore) {
+        say("no database needed, skipping import: the snapshot found no tables and no runtime data store.");
+        io.print(JSON.stringify({ ok: true, app, imported: false, data: "none", needs_database: false }));
+        return 0;
+      }
+      if (!hasSqlite && noData)
+        return finishNoData(io, snapshotFile, app, "", [], say);
       if (!hasSqlite) {
         say(`The snapshot has no Postgres scratch database. ${IMPORT_LOCAL_ONLY}`);
         return 2;

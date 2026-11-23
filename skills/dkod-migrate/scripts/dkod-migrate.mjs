@@ -98,7 +98,7 @@ import { randomBytes } from "node:crypto";
 import { createHash } from "node:crypto";
 var SEAL_FILE = ".dkod-snapshot-seal";
 function sealOf(r, nonce) {
-  const body = { mode: r.mode, scratch: r.scratch, files: r.files, databases: (r.databases ?? []).map((d) => ({ name: d.name, url: d.url, tables: d.tables ?? null, ...d.source === undefined ? {} : { source: d.source } })), env: r.env, message: r.message ?? null, ...r.bases === undefined ? {} : { bases: r.bases }, ...r.source === undefined ? {} : { source: r.source }, ...r.checks === undefined ? {} : { checks: r.checks } };
+  const body = { mode: r.mode, scratch: r.scratch, files: r.files, databases: (r.databases ?? []).map((d) => ({ name: d.name, url: d.url, tables: d.tables ?? null, ...d.source === undefined ? {} : { source: d.source } })), env: r.env, message: r.message ?? null, ...r.bases === undefined ? {} : { bases: r.bases }, ...r.source === undefined ? {} : { source: r.source }, ...r.checks === undefined ? {} : { checks: r.checks }, ...r.needs_database === undefined ? {} : { needs_database: r.needs_database } };
   return createHash("sha256").update(JSON.stringify(body)).update(nonce).digest("hex");
 }
 
@@ -5192,6 +5192,7 @@ var SCRATCH_NAME = /_dkod_migrate(_[A-Za-z0-9_]+)?(_base)?$/;
 var CHECKS = ["name", "age (pg_database file time / pg_stat_database.stats_reset, when readable)"];
 var USE_OWN_STORE = "Snapshot the original's own store: its .env/.env.local URL, its running process (--original-url), or the --db-url the builder gives. Never make a database for the original or run its seed, fixtures, db push or reset to get data.";
 var NEW_APP_ONLY = "The original app has no data files and no local database this computer can copy. The migration is new-app-only: its tests run only on the dk- app. Ask the builder how the original reads its data. If it reads its database from its environment, run snapshot again with --db-url <url> or, with the original running, --original-url http://localhost:<port>. Never write .dkod/snapshot.json by hand.";
+var NO_DATABASE = "No database URL was found either. When the builder says the app keeps no data (a static app), and unless `dkod-db.mjs detect` says `uses_database: true`, it needs no database: skip step 4 (dkod-db.mjs import skips too). A JSON file in build_inputs is only imported by the code at build time: copy it with the code.";
 var join13 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var norm = (p) => p.replace(/\/\.\//g, "/").replace(/\/+/g, "/");
 var snapshotPath = (dir) => join13(dir, ".dkod/snapshot.json");
@@ -5389,6 +5390,32 @@ function flatData(original, rels, named, mapText, io) {
   }
   return found;
 }
+function buildInputs(original, rels, candidates, io) {
+  const imported = new Set;
+  const other = new Set;
+  for (const file of rels) {
+    if (!CODE3.test(file))
+      continue;
+    const text = io.readFile(join13(original, file));
+    if (text === null || text.length > CODE_CAP)
+      continue;
+    for (const f of candidates) {
+      const name = f.split("/").pop();
+      for (const line of text.split(`
+`)) {
+        if (!line.includes(name))
+          continue;
+        if (staticImport(name).test(line))
+          imported.add(f);
+        else
+          other.add(f);
+      }
+    }
+  }
+  return new Set([...imported].filter((f) => !other.has(f)));
+}
+var staticImport = (name) => new RegExp(`^\\s*(?:import|export)\\s[^;]*?\\bfrom\\s*["'](?:[^"']*/)?${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`);
+var DB_VALUE = /^(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?):\/\//i;
 async function copyDatabase(value, scratch, id, io, schemaOnly = false) {
   const url = localDatabase(value);
   if (url === null)
@@ -5537,6 +5564,10 @@ async function snapshot(folder, io, args = []) {
     for (const [k, v] of envPairs(io.readFile(join13(original, file))))
       named.push([k, v, file]);
   const flatFound = flatData(original, walked, named.map(([k, v]) => [k, v]), io.readFile(join13(dir, ".dkod/map/app-map.json")), io);
+  const guessed = [...flatFound].filter(([f, how]) => /\.json$/i.test(f) && (how.how === "code" || how.how === "data-folder")).map(([f]) => f);
+  const inputs = guessed.length === 0 ? [] : [...buildInputs(original, walked, guessed, io)].sort();
+  for (const f of inputs)
+    flatFound.delete(f);
   const picked = walked.filter((rel) => DATA2.test(rel) || flatFound.has(rel));
   const present = new Set(walked);
   const short = diskShort(picked, present, original, io);
@@ -5648,6 +5679,7 @@ async function snapshot(folder, io, args = []) {
   const empty = files.length === 0 && databases.length === 0;
   if (empty)
     io.rm(scratch, { recursive: true, force: true });
+  const noDatabase = empty && !named.some(([k, v]) => k === "DATABASE_URL" || DB_VALUE.test(v));
   const record = {
     ok: true,
     mode: empty ? "new-app-only" : "snapshot",
@@ -5659,7 +5691,9 @@ async function snapshot(folder, io, args = []) {
     env: empty ? {} : env,
     ...databases[0]?.source ? { source: databases[0].source } : files.length > 0 ? { source: { how: "file", file: files[0] } } : {},
     ...empty ? {} : { checks: CHECKS },
-    ...empty ? { message: NEW_APP_ONLY } : {},
+    ...empty ? { message: noDatabase ? `${NEW_APP_ONLY} ${NO_DATABASE}` : NEW_APP_ONLY } : {},
+    ...noDatabase ? { needs_database: false } : {},
+    ...inputs.length > 0 ? { build_inputs: inputs } : {},
     ...dataTables !== undefined ? { data_tables: dataTables, suggest: dataSuggest(dataTables) } : {}
   };
   await removeSnapshot(dir, io);
