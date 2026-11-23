@@ -1231,6 +1231,23 @@ async function checkFromArch(dockerfileText, fetchFn, path = "Dockerfile", timeo
 var POLICY_CHECK_TOOL = "policy_check";
 var POLICY_CHECK_TOOL_FULL = `mcp__dkod__${POLICY_CHECK_TOOL}`;
 var MAX_FOLDER_FILES = 5000;
+var PRUNE_DIRS = [
+  "node_modules",
+  ".git",
+  "vendor",
+  ".next",
+  ".turbo",
+  ".cache",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".pytest_cache"
+];
+var isPrunedDir = (name) => PRUNE_DIRS.includes(name) || name.endsWith(".egg-info");
+var isPrunedUnder = (path) => path.split("/").slice(0, -1).some(isPrunedDir);
+var prunedNames = () => [...PRUNE_DIRS, "*.egg-info"];
 var MAX_READ_BYTES = 64 * 1024 * 1024;
 var MAX_SHOWN = 50;
 var DOCKERFILE = /(^|\/)Dockerfile(\.[^/]+)?$/;
@@ -1277,11 +1294,19 @@ async function checkFolder(pack, dir, io) {
   if (!pack || pack.rules.length === 0) {
     return { ok: true, folder: dir, files: 0, skipped: 0, checked: 0, blocked: false, findings: [], summary: "", next: "Your organization's rules have no checks yet. Nothing to fix." };
   }
-  const listed = await io.list(dir).catch(() => null);
-  if (listed === null)
+  const raw = await io.list(dir).catch(() => null);
+  if (raw === null)
     return refuse("cannot_list", "Dkoder could not list the files of that folder. Check the path, then try again.");
-  if (listed.length > MAX_FOLDER_FILES)
-    return refuse("too_many_files", `That folder has more than ${String(MAX_FOLDER_FILES)} files. Run the check on the app's own folder.`);
+  const listed = raw.filter((path) => !isPrunedUnder(path));
+  if (listed.length > MAX_FOLDER_FILES) {
+    const counts = new Map;
+    for (const path of listed) {
+      const top = path.includes("/") ? path.split("/")[0] : "(files loose in the folder)";
+      counts.set(top, (counts.get(top) ?? 0) + 1);
+    }
+    const biggest = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([folder, count]) => `${folder} (${String(count)} files)`);
+    return refuse("too_many_files", `That folder has more than ${String(MAX_FOLDER_FILES)} files, even with ${prunedNames().join(", ")} skipped. Most files: ${biggest.join(", ")}. Move what is not the app's own code out of the folder, or run the check on a folder that holds only the app, then run it again.`);
+  }
   const base = dir.replace(/[\\/]+$/, "").replace(/[\\/]\.$/, "");
   const folder = base.split(/[\\/]/).pop() ?? "";
   const wanted = pathsToRead(pack, listed, { stage: "build", folder, folderPath: base });
@@ -1337,10 +1362,14 @@ async function checkFolder(pack, dir, io) {
 async function listWithShell(run, dir) {
   const git = await run(["git", "-C", dir, "ls-files", "-co", "--exclude-standard", "-z"], { timeoutMs: 20000 }).catch(() => null);
   if (git !== null && git.exitCode === 0)
-    return git.stdout.split("\x00").filter(Boolean);
-  const find = await run(["find", ".", "(", "-name", "node_modules", "-o", "-name", ".git", "-o", "-name", "vendor", ")", "-prune", "-o", "-type", "f", "-print0"], { cwd: dir, timeoutMs: 20000 }).catch(() => null);
+    return git.stdout.split("\x00").filter(Boolean).filter((path) => !isPrunedUnder(path));
+  const prune = [];
+  for (const name of prunedNames())
+    prune.push("-name", name, "-o");
+  prune.pop();
+  const find = await run(["find", ".", "(", ...prune, ")", "-prune", "-o", "-type", "f", "-print0"], { cwd: dir, timeoutMs: 20000 }).catch(() => null);
   if (find !== null && find.exitCode === 0)
-    return find.stdout.split("\x00").filter(Boolean).map((p) => p.replace(/^\.\//, ""));
+    return find.stdout.split("\x00").filter(Boolean).map((p) => p.replace(/^\.\//, "")).filter((path) => !isPrunedUnder(path));
   return null;
 }
 
@@ -1383,7 +1412,6 @@ async function runPolicyCli(argv, io) {
   return result.ok ? 0 : 1;
 }
 
-var SKIP = new Set(["node_modules", ".git", "vendor", ".next", ".venv", "__pycache__", ".turbo", ".cache"]);
 function walk(dir) {
   const out = [];
   const visit = (rel) => {
@@ -1392,7 +1420,7 @@ function walk(dir) {
         return;
       const path = rel === "" ? e.name : `${rel}/${e.name}`;
       if (e.isDirectory()) {
-        if (!SKIP.has(e.name))
+        if (!isPrunedDir(e.name))
           visit(path);
       } else if (e.isFile())
         out.push(path);
