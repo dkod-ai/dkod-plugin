@@ -3,7 +3,7 @@ import { createHash as createHash5, randomUUID } from "node:crypto";
 import { spawn as spawn2 } from "node:child_process";
 import { chmodSync, closeSync as closeSync2, existsSync, mkdirSync, openSync as openSync2, readdirSync as readdirSync2, readFileSync as readFileSync2, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join as join4, resolve } from "node:path";
+import { dirname, join as join5, resolve } from "node:path";
 
 import { createHash as createHash4, randomBytes as randomBytes2 } from "node:crypto";
 import net2 from "node:net";
@@ -205,11 +205,35 @@ function sealOf(r, nonce) {
   return createHash("sha256").update(JSON.stringify(body)).update(nonce).digest("hex");
 }
 
+import { isAbsolute, join as join2 } from "node:path";
 var q = (name) => `"${name.replace(/"/g, '""')}"`;
+var NO_SQLITE_READER = "neither the sqlite3 binary nor Node's built-in node:sqlite (Node 22.13 or later) is here. Upgrade Node to 22.13 or later, or install sqlite3 (macOS: `brew install sqlite`, Debian/Ubuntu: `sudo apt-get install -y sqlite3`, Windows: `winget install SQLite.SQLite`)";
+async function nodeQuery(base, sql, cwd, load = () => import("node:sqlite")) {
+  let mod;
+  try {
+    mod = await load();
+  } catch {
+    return { ok: false, missing: true, reason: NO_SQLITE_READER };
+  }
+  if (typeof mod?.DatabaseSync !== "function")
+    return { ok: false, missing: true, reason: NO_SQLITE_READER };
+  let db;
+  try {
+    db = new mod.DatabaseSync(isAbsolute(base) ? base : join2(cwd, base), { readOnly: true });
+    const rows = db.prepare(sql).all().map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, v === null || v === undefined ? null : String(v)])));
+    return { ok: true, value: rows };
+  } catch {
+    return { ok: false, missing: false, reason: "node:sqlite could not read the base copy" };
+  } finally {
+    try {
+      db?.close();
+    } catch {}
+  }
+}
 async function query(run, env, base, sql, cwd) {
   const res = await run("sqlite3", ["-readonly", "-json", base, sql], env, cwd);
   if (res.status === 127)
-    return { ok: false, missing: true, reason: "the sqlite3 binary is not on PATH" };
+    return await nodeQuery(base, sql, cwd);
   if (res.status !== 0)
     return { ok: false, missing: false, reason: "sqlite3 could not read the base copy" };
   const text = res.stdout.trim();
@@ -796,7 +820,7 @@ function connectWebSocket(rawUrl, headers, handlers) {
 import { createHash as createHash3 } from "node:crypto";
 import http from "node:http";
 import { closeSync, createReadStream, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
-import { join as join2, relative, sep } from "node:path";
+import { join as join3, relative, sep } from "node:path";
 import { Readable } from "node:stream";
 var MAX_FILE_BYTES = 5 * 1024 ** 3;
 var HOP = new Set(["connection", "keep-alive", "transfer-encoding", "upgrade", "host", "authorization", "content-length"]);
@@ -889,7 +913,7 @@ function listFiles(root) {
   const out = [];
   const walk = (dir) => {
     for (const e of readdirSync(dir, { withFileTypes: true })) {
-      const full = join2(dir, e.name);
+      const full = join3(dir, e.name);
       const st = e.isSymbolicLink() ? statSync(full) : null;
       if (e.isDirectory() || st?.isDirectory())
         walk(full);
@@ -988,7 +1012,7 @@ var retryable = (status) => status === 0 || status === 408 || status === 429 || 
 async function pushFiles(opts) {
   const doFetch = opts.fetch ?? fetch;
   const all = listFiles(opts.from);
-  const database = all.filter((rel) => isDatabaseFile(join2(opts.from, rel)));
+  const database = all.filter((rel) => isDatabaseFile(join3(opts.from, rel)));
   const paths = all.filter((rel) => !database.includes(rel));
   const report = { files: 0, bytes: 0, put: 0, same: 0, failed: [], database };
   if (database.length > 0)
@@ -1001,7 +1025,7 @@ async function pushFiles(opts) {
   const one = async (rel) => {
     const key = `${opts.prefix}${rel}`;
     const url = `${base}/${key.split("/").map(encodeURIComponent).join("/")}`;
-    const full = join2(opts.from, rel);
+    const full = join3(opts.from, rel);
     const size = statSync(full).size;
     report.files++;
     report.bytes += size;
@@ -1310,7 +1334,7 @@ function wantedOrg(flags, dir, readFile) {
   const flag = flags.get("org");
   if (flag !== undefined)
     return ORG_ID.test(flag) ? flag : { error: "--org takes the org_id that dkoder.devdb.status gave." };
-  const text = readFile(join3(dir, ".dkod/org.json"));
+  const text = readFile(join4(dir, ".dkod/org.json"));
   if (text === null)
     return null;
   try {
@@ -1538,18 +1562,18 @@ function gitignoreCoversEnvLocal(text) {
   return text.split(`
 `).some((l) => [".env.local", "/.env.local", ".env*", ".env.*", "*.local"].includes(l.trim()));
 }
-var join3 = (dir, name) => dir.endsWith("/") || dir.endsWith("\\") ? `${dir}${name}` : `${dir}/${name}`;
+var join4 = (dir, name) => dir.endsWith("/") || dir.endsWith("\\") ? `${dir}${name}` : `${dir}/${name}`;
 var trimSlashes = (p) => p.length > 1 ? p.replace(/[\\/]+$/, "") : p;
 function originalFolderRefusal(dir, cwd, readFile) {
   const here = trimSlashes(resolvePath(cwd, dir));
-  if (readFile(join3(here, ".dkod/migration.json")) != null)
+  if (readFile(join4(here, ".dkod/migration.json")) != null)
     return null;
   const cut = here.lastIndexOf("/");
   const name = here.slice(cut + 1);
   if (!name || name.startsWith("dk-"))
     return null;
   const dkDir = `${cut > 0 ? here.slice(0, cut) : ""}/dk-${name}`;
-  const raw = readFile(join3(dkDir, ".dkod/migration.json"));
+  const raw = readFile(join4(dkDir, ".dkod/migration.json"));
   if (raw == null)
     return null;
   let original;
@@ -1617,7 +1641,7 @@ async function startUp(flags, io, cwd) {
     return fail(2, wrongOrg(issued.org, wanted));
   if (wanted) {
     try {
-      io.writeFile(join3(resolvePath(cwd, dir), ".dkod/org.json"), `${JSON.stringify({ org: wanted })}
+      io.writeFile(join4(resolvePath(cwd, dir), ".dkod/org.json"), `${JSON.stringify({ org: wanted })}
 `);
     } catch {}
   }
@@ -1868,9 +1892,9 @@ async function startUp(flags, io, cwd) {
     await new Promise((resolve) => server.close(() => resolve()));
     return fail(3, files === "busy" ? `Port ${filesPort} (the files port) is in use. Stop what uses it, or pick another with --files-port.` : `Could not listen on port ${filesPort} (the files port).`);
   }
-  const envPath = join3(dir, ".env.local");
+  const envPath = join4(dir, ".env.local");
   io.writeFile(envPath, mergeEnvLine(mergeDatabaseUrl(io.readFile(envPath), databaseUrlOf(app, actualPort)), "DKOD_FILES_URL", `http://127.0.0.1:${files.port}`));
-  if (!gitignoreCoversEnvLocal(io.readFile(join3(dir, ".gitignore"))))
+  if (!gitignoreCoversEnvLocal(io.readFile(join4(dir, ".gitignore"))))
     io.print("dkod-db: warning: .gitignore does not ignore .env.local. Add it so it is never committed.");
   io.print(`dkod-db: ${app} Dev database on 127.0.0.1:${actualPort} (DATABASE_URL in .env.local)`);
   const orgSaid = issued.org ?? creds.org;
@@ -1907,7 +1931,7 @@ async function runFiles(flags, io, cwd) {
     return 2;
   }
   const dir = resolvePath(cwd, flags.get("dir") ?? ".");
-  const filesUrl = envLine(io.readFile(join3(dir, ".env.local")), "DKOD_FILES_URL");
+  const filesUrl = envLine(io.readFile(join4(dir, ".env.local")), "DKOD_FILES_URL");
   if (!filesUrl) {
     say("There is no DKOD_FILES_URL in .env.local. Run `node dkod-db.mjs up --app <app key> --detach` first.");
     return 2;
@@ -1947,7 +1971,7 @@ function alembicCommands(dir, exists, os) {
   const args = ["upgrade", "head"];
   const out = [];
   for (const venv of [".venv", "venv"]) {
-    const bin = os === "win32" ? join3(dir, `${venv}\\Scripts\\alembic.exe`) : join3(dir, `${venv}/bin/alembic`);
+    const bin = os === "win32" ? join4(dir, `${venv}\\Scripts\\alembic.exe`) : join4(dir, `${venv}/bin/alembic`);
     if (exists(bin))
       out.push({ cmd: bin, args });
   }
@@ -1975,7 +1999,7 @@ async function runMigrate(flags, io, cwd, exists) {
     say(refusal);
     return 2;
   }
-  const url = readDatabaseUrl(io.readFile(join3(dir, ".env.local")));
+  const url = readDatabaseUrl(io.readFile(join4(dir, ".env.local")));
   if (!url) {
     say("There is no DATABASE_URL in .env.local. Run `node dkod-db.mjs up --app <app key>` first.");
     return 2;
@@ -1993,9 +2017,9 @@ async function runMigrate(flags, io, cwd, exists) {
     say("The Dev database is not up. Run `node dkod-db.mjs up --app <app key>` first, in the background.");
     return 2;
   }
-  const drizzle = ["drizzle.config.ts", "drizzle.config.js", "drizzle.config.mjs"].some((f) => exists(join3(dir, f)));
-  const alembic = !drizzle && exists(join3(dir, "alembic.ini"));
-  const script = !drizzle && !alembic && hasDbMigrateScript(io.readFile(join3(dir, "package.json")));
+  const drizzle = ["drizzle.config.ts", "drizzle.config.js", "drizzle.config.mjs"].some((f) => exists(join4(dir, f)));
+  const alembic = !drizzle && exists(join4(dir, "alembic.ini"));
+  const script = !drizzle && !alembic && hasDbMigrateScript(io.readFile(join4(dir, "package.json")));
   if (!drizzle && !alembic && !script) {
     say(NO_MIGRATION_TOOL);
     return 2;
@@ -2128,7 +2152,7 @@ async function importSqlite(c) {
     say(`the original's data is in SQLite and cannot be imported: ${why}`);
     return 2;
   };
-  const noBinary = "the sqlite3 binary is not on PATH. Install it, then run import again.";
+  const noBinary = `${NO_SQLITE_READER}. Then run import again.`;
   for (const b of c.bases) {
     const got = io.sha256?.(b.base) ?? null;
     if (got === null)
@@ -2144,7 +2168,7 @@ async function importSqlite(c) {
   for (const s of schemas.values())
     if (!s.ok)
       return cannot(s.missing ? noBinary : `${s.reason}. Run \`dkod-migrate.mjs snapshot\` again.`);
-  const mapped = readSqliteMapTables(io.readFile(join3(dir, ".dkod/map/app-map.json")));
+  const mapped = readSqliteMapTables(io.readFile(join4(dir, ".dkod/map/app-map.json")));
   const fromFile = mapped.length === 0 && c.light;
   if (fromFile) {
     for (const b of c.bases) {
@@ -2290,7 +2314,7 @@ END $$;
   inOrder.forEach((t, i) => {
     importedTables[t.name] = { cols: t.cols, rows: actual[i].rows, md5: actual[i].md5 };
   });
-  await addRowHashes(importedTables, readFreezeData(io.readFile(join3(c.dir, ".dkod/parity/freeze.json")))?.suite_writes ?? [], c.devUrl, c.devEnv, io.run, c.dir);
+  await addRowHashes(importedTables, readFreezeData(io.readFile(join4(c.dir, ".dkod/parity/freeze.json")))?.suite_writes ?? [], c.devUrl, c.devEnv, io.run, c.dir);
   let record = null;
   try {
     record = JSON.parse(io.readFile(c.snapshotFile) ?? "null");
@@ -2316,7 +2340,7 @@ function pickFlat(c) {
       return 1;
     }
   }
-  const mapped = readFlatMapTables(io.readFile(join3(dir, ".dkod/map/app-map.json")));
+  const mapped = readFlatMapTables(io.readFile(join4(dir, ".dkod/map/app-map.json")));
   const stem = (rel) => (rel.split("/").pop() ?? rel).replace(/\.[^.]*$/, "");
   const storeHit = (store, rel) => store !== null && (store === rel || rel.endsWith(`/${store}`) || store.endsWith(`/${rel}`));
   const picked = [];
@@ -2461,7 +2485,7 @@ END $$;
   tables.forEach((t, i) => {
     importedTables[t.name] = { cols: t.cols, rows: actual[i].rows, md5: actual[i].md5 };
   });
-  await addRowHashes(importedTables, readFreezeData(io.readFile(join3(c.dir, ".dkod/parity/freeze.json")))?.suite_writes ?? [], c.devUrl, c.devEnv, io.run, c.dir);
+  await addRowHashes(importedTables, readFreezeData(io.readFile(join4(c.dir, ".dkod/parity/freeze.json")))?.suite_writes ?? [], c.devUrl, c.devEnv, io.run, c.dir);
   let record = null;
   try {
     record = JSON.parse(io.readFile(c.snapshotFile) ?? "null");
@@ -2523,7 +2547,7 @@ async function runImport(flags, io, cwd) {
     say(refusal);
     return 2;
   }
-  const snapshotFile = join3(dir, ".dkod/snapshot.json");
+  const snapshotFile = join4(dir, ".dkod/snapshot.json");
   const noData = flags.has("no-data");
   if (noData && flags.has("tables")) {
     say("Give --tables or --no-data, not both.");
@@ -2547,7 +2571,7 @@ async function runImport(flags, io, cwd) {
     }
     let rec = null;
     try {
-      rec = JSON.parse(io.readFile(from === "snapshot" ? snapshotFile : /^([/\\]|[a-z]:[/\\])/i.test(from) ? from : join3(dir, from)) ?? "null");
+      rec = JSON.parse(io.readFile(from === "snapshot" ? snapshotFile : /^([/\\]|[a-z]:[/\\])/i.test(from) ? from : join4(dir, from)) ?? "null");
     } catch {}
     if (from === "snapshot" && rec === null) {
       say("There is no .dkod/snapshot.json in this folder: something deleted it (a copy that deletes, such as `rsync --delete`). Run `node <dkod-migrate scripts>/dkod-migrate.mjs snapshot <this folder>` again, then import again. Never import from the original's live database instead.");
@@ -2586,9 +2610,9 @@ async function runImport(flags, io, cwd) {
       lightSource = true;
       const file = typeof pg.source?.file === "string" ? pg.source.file : "";
       const key = typeof pg.source?.key === "string" ? pg.source.key : "DATABASE_URL";
-      const original = originalOfRecord(io.readFile(join3(dir, ".dkod/migration.json"))) ?? (typeof r?.original === "string" && r.original !== "" ? r.original : null);
+      const original = originalOfRecord(io.readFile(join4(dir, ".dkod/migration.json"))) ?? (typeof r?.original === "string" && r.original !== "" ? r.original : null);
       if (original !== null && file !== "" && !file.split("/").includes("..")) {
-        const named = envValue(io.readFile(join3(original, file)), key);
+        const named = envValue(io.readFile(join4(original, file)), key);
         try {
           const u = named === null ? null : new URL(named);
           const b = new URL(String(base));
@@ -2620,7 +2644,7 @@ async function runImport(flags, io, cwd) {
   const password = sourcePassword || lightPassword || io.env.PGPASSWORD || "";
   source.password = "";
   const sourceUrl = source.toString();
-  const devRaw = readDatabaseUrl(io.readFile(join3(dir, ".env.local")));
+  const devRaw = readDatabaseUrl(io.readFile(join4(dir, ".env.local")));
   if (!devRaw) {
     say("There is no DATABASE_URL in .env.local. Run `node dkod-db.mjs up --app <app key>` first, in the background.");
     return 2;
@@ -2644,7 +2668,7 @@ async function runImport(flags, io, cwd) {
   dev.port = String(port);
   dev.password = "";
   const devUrl = dev.toString();
-  const freezeText = io.readFile(join3(dir, ".dkod/parity/freeze.json"));
+  const freezeText = io.readFile(join4(dir, ".dkod/parity/freeze.json"));
   if (freezeText === null && !lightSource && sqliteBases === null) {
     say("There is no .dkod/parity/freeze.json. Freeze the parity suite (step 3 of the dkod-migrate skill) before the import.");
     return 2;
@@ -2696,7 +2720,7 @@ async function runImport(flags, io, cwd) {
     say("freeze.json records no data identity (no Postgres scratch database was frozen on). Run `dkod-migrate.mjs snapshot`, rerun the suite and freeze again.");
     return 1;
   }
-  let mapped = readMapTables(io.readFile(join3(dir, ".dkod/map/app-map.json")));
+  let mapped = readMapTables(io.readFile(join4(dir, ".dkod/map/app-map.json")));
   if (mapped.length === 0 && lightSource) {
     const all = await psql(sourceUrl, srcEnv, ["-c", "SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name"]);
     if (all.status !== 0)
@@ -2950,7 +2974,7 @@ END $$;
 }
 function statePaths(io, dir) {
   const resolved = resolvePath(dir);
-  const base = join3(io.stateDir(), `dkod-db-${createHash4("sha256").update(resolved).digest("hex").slice(0, 16)}`);
+  const base = join4(io.stateDir(), `dkod-db-${createHash4("sha256").update(resolved).digest("hex").slice(0, 16)}`);
   return { state: `${base}.json`, log: `${base}.log`, dir: resolved };
 }
 function readState(io, path) {
@@ -3042,7 +3066,7 @@ async function runUpDetached(flags, io) {
     await sleep2(io, POLL_MS);
     const log = io.readFile(paths.log) ?? "";
     const port = Number(READY_LINE.exec(log)?.[1] ?? 0);
-    if (port > 0 && readDatabaseUrl(io.readFile(join3(paths.dir, ".env.local"))) !== null && await probe(port)) {
+    if (port > 0 && readDatabaseUrl(io.readFile(join4(paths.dir, ".env.local"))) !== null && await probe(port)) {
       io.writeFile(paths.state, JSON.stringify({ pid, app, dir: paths.dir, log: paths.log, port }));
       io.print(JSON.stringify({ ok: true, app, port, pid, log: paths.log }));
       return 0;
@@ -3161,7 +3185,7 @@ function runProcess(cmd, args, env, cwd, input) {
 }
 
 function stateDir() {
-  const dir = join4(homedir(), ".dkod", "db");
+  const dir = join5(homedir(), ".dkod", "db");
   mkdirSync(dir, { recursive: true, mode: 448 });
   chmodSync(dir, 448);
   return dir;
@@ -3185,7 +3209,7 @@ process.exitCode = await runDbCli(process.argv.slice(2), {
     }
   },
   writeFile: (path, text) => writeFileSync(path, text, "utf8"),
-  devicePath: () => join4(stateDir(), "device.json"),
+  devicePath: () => join5(stateDir(), "device.json"),
   writePrivate: (path, text) => {
     writeFileSync(path, text, { encoding: "utf8", mode: 384 });
     chmodSync(path, 384);
@@ -3248,7 +3272,7 @@ process.exitCode = await runDbCli(process.argv.slice(2), {
   listStates: () => {
     try {
       const dir = stateDir();
-      return readdirSync2(dir).filter((name) => /^dkod-db-[0-9a-f]{16}\.json$/.test(name)).map((name) => join4(dir, name));
+      return readdirSync2(dir).filter((name) => /^dkod-db-[0-9a-f]{16}\.json$/.test(name)).map((name) => join5(dir, name));
     } catch {
       return [];
     }
