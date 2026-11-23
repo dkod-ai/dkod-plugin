@@ -2375,109 +2375,9 @@ function localStoreProblems(sources, read) {
   return problems;
 }
 
-var join3 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
-var numbers = (text) => (text ?? "").split(/[\s,]+/).filter((s) => /^[0-9]+$/.test(s)).map(Number);
-var KILL_WAIT_MS = 1500;
-var alive = (pid) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
-var signal = (pid, sig, group) => {
-  try {
-    process.kill(group ? -pid : pid, sig);
-  } catch {}
-};
-function recorded(runDir, extraPorts, io) {
-  const pids = new Set;
-  const ports = new Set(numbers(extraPorts ?? ""));
-  for (const n of numbers(io.readFile(join3(runDir, "pids"))))
-    pids.add(n);
-  for (const n of numbers(io.readFile(join3(runDir, "ports"))))
-    ports.add(n);
-  return { pids: [...pids], ports: [...ports] };
-}
-async function listeners(port, io) {
-  if (!io.hasTool("lsof"))
-    return null;
-  const res = await io.run("lsof", ["-nP", `-iTCP:${String(port)}`, "-sTCP:LISTEN", "-t"], {}, io.cwd);
-  return numbers(res.stdout);
-}
-async function stopServers(runDir, extraPorts, io) {
-  const { pids, ports } = recorded(runDir, extraPorts, io);
-  const problems = [];
-  const table = new Map;
-  if (io.hasTool("ps")) {
-    for (const line of (await io.run("ps", ["-A", "-o", "pid=,ppid=,pgid="], {}, io.cwd)).stdout.split(`
-`)) {
-      const [pid, ppid, pgid] = numbers(line);
-      if (pid !== undefined && ppid !== undefined && pgid !== undefined)
-        table.set(pid, { ppid, pgid });
-    }
-  }
-  const targets = new Map;
-  const add = (pid) => {
-    if (pid === process.pid || pid <= 1 || targets.has(pid))
-      return;
-    targets.set(pid, table.get(pid)?.pgid === pid && table.get(process.pid)?.pgid !== pid);
-    for (const [child, info] of table)
-      if (info.ppid === pid)
-        add(child);
-  };
-  for (const pid of pids)
-    if (table.has(pid))
-      add(pid);
-  const stopped = [...targets.keys()].filter(alive);
-  for (const [pid, group] of targets)
-    signal(pid, "SIGTERM", group);
-  const deadline = Date.now() + KILL_WAIT_MS;
-  while (Date.now() < deadline && stopped.some(alive))
-    await new Promise((r) => setTimeout(r, 50));
-  for (const [pid, group] of targets) {
-    if (alive(pid))
-      signal(pid, "SIGKILL", group);
-  }
-  if (pids.length > 0)
-    io.writeFile(join3(runDir, "pids"), "");
-  await new Promise((r) => setTimeout(r, 100));
-  for (const port of ports) {
-    const held = await listeners(port, io);
-    if (held === null)
-      problems.push(`port ${String(port)}: lsof is not installed, so the check that nothing listens there cannot run`);
-    else if (held.length > 0)
-      problems.push(`port ${String(port)} is still held by PID ${held.join(", ")}: stop it (it was not recorded in ${runDir}), then run stop-servers again`);
-  }
-  if (ports.length === 0)
-    problems.push(`no port to check: ${runDir}/ports is empty or missing. Pass --ports <a,b> (the parity ports), or let restartApp() record them`);
-  return { ok: problems.length === 0, ports, stopped, problems };
-}
-function flagValue(args, name) {
-  for (let i = 0;i < args.length; i++) {
-    const a = args[i];
-    if (a === name)
-      return args[i + 1];
-    if (a.startsWith(`${name}=`))
-      return a.slice(name.length + 1);
-  }
-  return;
-}
-async function stopServersCommand(args, io) {
-  const runDir = flagValue(args, "--run-dir");
-  if (runDir === undefined || runDir === "") {
-    io.print("dkod-migrate: stop-servers needs --run-dir <the run's mktemp folder>: stop-servers <folder> --run-dir <dir> [--ports a,b]");
-    return 2;
-  }
-  const res = await stopServers(runDir, flagValue(args, "--ports"), io);
-  io.print(JSON.stringify({ ok: res.ok, ports: res.ports, stopped: res.stopped, problems: res.problems }));
-  return res.ok ? 0 : 1;
-}
-
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
-var join4 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+var join3 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 var START_WAIT_MS = 60000;
 function envFileValues(text) {
@@ -2505,6 +2405,15 @@ async function freePort() {
   });
 }
 var answered = (a) => a !== null && a.status >= 200 && a.status < 400;
+async function getBody(base, path, io) {
+  const f = io.fetch ?? globalThis.fetch;
+  try {
+    const res = await f(`${base}${path}`, { signal: AbortSignal.timeout(15000) });
+    return { status: res.status, text: await res.text() };
+  } catch {
+    return null;
+  }
+}
 async function get(base, path, io) {
   const f = io.fetch ?? globalThis.fetch;
   try {
@@ -2519,7 +2428,7 @@ async function get(base, path, io) {
   }
 }
 function startScript(dir, io) {
-  const text = io.readFile(join4(dir, "package.json"));
+  const text = io.readFile(join3(dir, "package.json"));
   try {
     const start = text === null ? undefined : JSON.parse(text).scripts?.start;
     return typeof start === "string" && start.trim() !== "" ? start : null;
@@ -2527,20 +2436,51 @@ function startScript(dir, io) {
     return null;
   }
 }
-var NO_START = 'no start command: a bun or Node app needs a "start" script in package.json; a Python app needs pyproject.toml or requirements.txt and a FastAPI or Starlette app (`app = FastAPI()`), started with uvicorn. Or pass --start "<command>" that serves on $PORT.';
+var STATIC_OUTPUT_DIRS = ["dist", "build", "out", "public"];
+function staticApp(dir, io) {
+  const docker = io.readFile(join3(dir, "Dockerfile"));
+  if (docker === null || !/^\s*FROM\s+\S*nginx\S*/im.test(docker))
+    return false;
+  return io.readFile(join3(dir, "nginx.conf")) !== null;
+}
+function staticOutputDir(dir, io) {
+  for (const name of STATIC_OUTPUT_DIRS)
+    if (io.readFile(join3(dir, `${name}/index.html`)) !== null)
+      return name;
+  return null;
+}
+var STATIC_SERVER = `const { createServer } = require("node:http");
+const { readFile } = require("node:fs/promises");
+const { join, normalize, extname } = require("node:path");
+const root = process.env.STATIC_DIR || "dist";
+const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".txt": "text/plain", ".xml": "application/xml", ".woff2": "font/woff2" };
+createServer(async (req, res) => {
+  const path = decodeURIComponent(new URL(req.url, "http://x").pathname);
+  if (path === "/healthz") { res.writeHead(200, { "content-type": "text/plain" }); res.end("ok"); return; }
+  const file = normalize(join(root, path));
+  let body = null;
+  try { body = await readFile(file); } catch {}
+  if (body === null) { try { body = await readFile(join(root, path, "index.html")); } catch {} }
+  if (body === null) { try { body = await readFile(join(root, "index.html")); } catch {} }
+  if (body === null) { res.writeHead(404); res.end(); return; }
+  res.writeHead(200, { "content-type": types[extname(file)] || "application/octet-stream" });
+  res.end(body);
+}).listen(Number(process.env.PORT || "3000"), "127.0.0.1");
+`;
+var NO_START = 'no start command: a bun or Node app needs a "start" script in package.json; a Python app needs pyproject.toml or requirements.txt and a FastAPI or Starlette app (`app = FastAPI()`), started with uvicorn; a static nginx app needs its built output (dist/index.html) to serve. Or pass --start "<command>" that serves on $PORT.';
 var PY_SKIP = [".venv", "venv", "node_modules", ".git", "__pycache__", ".dkod", "tests", "test", "dist", "build"];
 var ASGI_APP = /^([A-Za-z_]\w*)\s*(?::[^=\n]+)?=\s*(?:fastapi\.|starlette\.applications\.)?(?:FastAPI|Starlette)\(/m;
 var UVICORN_TARGET = /\buvicorn\b[^\n]*?["'\s]([A-Za-z_][\w.]*:[A-Za-z_]\w*)\b/;
 function asgiTarget(dir, io) {
   for (const f of ["Procfile", "Dockerfile", "start.sh"]) {
-    const m = UVICORN_TARGET.exec(io.readFile(join4(dir, f)) ?? "");
+    const m = UVICORN_TARGET.exec(io.readFile(join3(dir, f)) ?? "");
     if (m !== null)
       return m[1];
   }
   const depth = (p) => p.split("/").length;
   const files = io.walk(dir, PY_SKIP).filter((f) => /^[\w/]+\.py$/.test(f)).sort((a, b) => depth(a) - depth(b) || a.localeCompare(b));
   for (const f of files) {
-    const m = ASGI_APP.exec(io.readFile(join4(dir, f)) ?? "");
+    const m = ASGI_APP.exec(io.readFile(join3(dir, f)) ?? "");
     if (m === null)
       continue;
     const src = f.startsWith("src/");
@@ -2554,13 +2494,18 @@ function startCommand(dir, io, override) {
     return { stack: "custom", cmd: "sh", args: ["-c", override], label: override };
   if (startScript(dir, io) !== null)
     return { stack: "bun", cmd: "bun", args: ["run", "start"], label: "bun run start" };
-  const pyproject = io.readFile(join4(dir, "pyproject.toml")) !== null;
-  if (!pyproject && io.readFile(join4(dir, "requirements.txt")) === null)
+  if (staticApp(dir, io)) {
+    const out = staticOutputDir(dir, io);
+    if (out !== null)
+      return { stack: "static", cmd: "bun", args: ["-e", STATIC_SERVER], label: "static (nginx)", env: { STATIC_DIR: out } };
+  }
+  const pyproject = io.readFile(join3(dir, "pyproject.toml")) !== null;
+  if (!pyproject && io.readFile(join3(dir, "requirements.txt")) === null)
     return null;
   const target = asgiTarget(dir, io);
   if (target === null)
     return null;
-  const venv = [".venv/bin/uvicorn", "venv/bin/uvicorn"].find((p) => io.realpath(join4(dir, p)) !== null);
+  const venv = [".venv/bin/uvicorn", "venv/bin/uvicorn"].find((p) => io.realpath(join3(dir, p)) !== null);
   const uvicorn = venv ?? (pyproject && io.hasTool("uv") ? "uv run uvicorn" : "python3 -m uvicorn");
   const label = `${uvicorn} ${target} --host 127.0.0.1 --port $PORT`;
   return { stack: "python", cmd: "sh", args: ["-c", `exec ${label.replace("$PORT", '"$PORT"')}`], label };
@@ -2570,7 +2515,8 @@ async function startApp(dir, io, start) {
   const base = `http://127.0.0.1:${String(port)}`;
   const env = {
     ...process.env,
-    ...envFileValues(io.readFile(join4(dir, ".env.local"))),
+    ...envFileValues(io.readFile(join3(dir, ".env.local"))),
+    ...start.env ?? {},
     NODE_ENV: "production",
     PORT: String(port)
   };
@@ -2631,6 +2577,106 @@ async function startApp(dir, io, start) {
       }
     }
   };
+}
+
+var join4 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+var numbers = (text) => (text ?? "").split(/[\s,]+/).filter((s) => /^[0-9]+$/.test(s)).map(Number);
+var KILL_WAIT_MS = 1500;
+var alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+var signal = (pid, sig, group) => {
+  try {
+    process.kill(group ? -pid : pid, sig);
+  } catch {}
+};
+function recorded(runDir, extraPorts, io) {
+  const pids = new Set;
+  const ports = new Set(numbers(extraPorts ?? ""));
+  for (const n of numbers(io.readFile(join4(runDir, "pids"))))
+    pids.add(n);
+  for (const n of numbers(io.readFile(join4(runDir, "ports"))))
+    ports.add(n);
+  return { pids: [...pids], ports: [...ports] };
+}
+async function listeners(port, io) {
+  if (!io.hasTool("lsof"))
+    return null;
+  const res = await io.run("lsof", ["-nP", `-iTCP:${String(port)}`, "-sTCP:LISTEN", "-t"], {}, io.cwd);
+  return numbers(res.stdout);
+}
+async function stopServers(runDir, extraPorts, io) {
+  const { pids, ports } = recorded(runDir, extraPorts, io);
+  const problems = [];
+  const table = new Map;
+  if (io.hasTool("ps")) {
+    for (const line of (await io.run("ps", ["-A", "-o", "pid=,ppid=,pgid="], {}, io.cwd)).stdout.split(`
+`)) {
+      const [pid, ppid, pgid] = numbers(line);
+      if (pid !== undefined && ppid !== undefined && pgid !== undefined)
+        table.set(pid, { ppid, pgid });
+    }
+  }
+  const targets = new Map;
+  const add = (pid) => {
+    if (pid === process.pid || pid <= 1 || targets.has(pid))
+      return;
+    targets.set(pid, table.get(pid)?.pgid === pid && table.get(process.pid)?.pgid !== pid);
+    for (const [child, info] of table)
+      if (info.ppid === pid)
+        add(child);
+  };
+  for (const pid of pids)
+    if (table.has(pid))
+      add(pid);
+  const stopped = [...targets.keys()].filter(alive);
+  for (const [pid, group] of targets)
+    signal(pid, "SIGTERM", group);
+  const deadline = Date.now() + KILL_WAIT_MS;
+  while (Date.now() < deadline && stopped.some(alive))
+    await new Promise((r) => setTimeout(r, 50));
+  for (const [pid, group] of targets) {
+    if (alive(pid))
+      signal(pid, "SIGKILL", group);
+  }
+  if (pids.length > 0)
+    io.writeFile(join4(runDir, "pids"), "");
+  await new Promise((r) => setTimeout(r, 100));
+  for (const port of ports) {
+    const held = await listeners(port, io);
+    if (held === null)
+      problems.push(`port ${String(port)}: lsof is not installed, so the check that nothing listens there cannot run`);
+    else if (held.length > 0)
+      problems.push(`port ${String(port)} is still held by PID ${held.join(", ")}: stop it (it was not recorded in ${runDir}), then run stop-servers again`);
+  }
+  if (ports.length === 0)
+    problems.push(`no port to check: ${runDir}/ports is empty or missing. Pass --ports <a,b> (the parity ports), or let restartApp() record them`);
+  return { ok: problems.length === 0, ports, stopped, problems };
+}
+function flagValue(args, name) {
+  for (let i = 0;i < args.length; i++) {
+    const a = args[i];
+    if (a === name)
+      return args[i + 1];
+    if (a.startsWith(`${name}=`))
+      return a.slice(name.length + 1);
+  }
+  return;
+}
+async function stopServersCommand(args, io) {
+  const runDir = flagValue(args, "--run-dir");
+  if (runDir === undefined || runDir === "") {
+    io.print("dkod-migrate: stop-servers needs --run-dir <the run's mktemp folder>: stop-servers <folder> --run-dir <dir> [--ports a,b]");
+    return 2;
+  }
+  const res = await stopServers(runDir, flagValue(args, "--ports"), io);
+  io.print(JSON.stringify({ ok: res.ok, ports: res.ports, stopped: res.stopped, problems: res.problems }));
+  return res.ok ? 0 : 1;
 }
 
 var join5 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
@@ -2767,7 +2813,7 @@ async function measureMemory(folder, io, args = []) {
       return fail(`The app stopped while it was measured. ${app.lastLine()}`.trim(), io);
     const toMi = (kib) => Math.ceil(kib / 1024);
     const peakMi = toMi(peakKib);
-    const record = { idleMi: toMi(idleKib), peakMi, ...memorySizing(peakMi), urls: urls.length, measuredAt: new Date().toISOString() };
+    const record = { idleMi: toMi(idleKib), peakMi, ...memorySizing(peakMi), urls: urls.length, ...start.stack === "static" ? { server: "static (nginx)" } : {}, measuredAt: new Date().toISOString() };
     io.writeFile(join5(dir, MEMORY_FILE), `${JSON.stringify(record, null, 2)}
 `);
     io.print(JSON.stringify({ ok: true, file: join5(dir, MEMORY_FILE), ...record }));
@@ -3425,7 +3471,7 @@ function memoryMissing(dir, io) {
   } catch {
     return [];
   }
-  if (typeof start !== "string" || start.trim() === "")
+  if ((typeof start !== "string" || start.trim() === "") && !staticApp(dir, io))
     return [];
   return io.readFile(join7(dir, MEMORY_FILE)) === null ? [`${MEMORY_FILE}: missing. Build the app, then run \`node <migrate> memory <folder>\`: DKOD sizes the app's memory from it.`] : [];
 }
@@ -4451,6 +4497,48 @@ function verifyRoutes(found) {
   }
   return [...out].sort((a, b) => a === "/" ? -1 : b === "/" ? 1 : a.localeCompare(b)).slice(0, MAX_ROUTES);
 }
+var ROUTE_SKIP = [".git", "node_modules", "dist", "build", "out", "public", ".dkod"];
+function staticRoutes(dir, io) {
+  if (!staticApp(dir, io))
+    return [];
+  const out = new Set(["/"]);
+  const add = (p) => {
+    if (p.startsWith("/") && !p.startsWith("//") && !/[\s{}<>]/.test(p))
+      out.add(p);
+  };
+  const nginx = io.readFile(join11(dir, "nginx.conf")) ?? "";
+  for (const m of nginx.matchAll(/location\s+(?:=\s*)?(?:\^~\s*)?(\/[^\s{]*)/g))
+    add(m[1]);
+  const output = staticOutputDir(dir, io);
+  if (output !== null) {
+    for (const f of io.walk(join11(dir, output), [])) {
+      if (f === "index.html")
+        continue;
+      if (f.endsWith("/index.html"))
+        add(`/${f.slice(0, -"index.html".length).replace(/\/$/, "")}`);
+      else if (f.endsWith(".html"))
+        add(`/${f.slice(0, -5)}`);
+      else if (f === "robots.txt" || f === "sitemap.xml" || f === "sitemap.txt")
+        add(`/${f}`);
+    }
+    const sitemap = io.readFile(join11(dir, `${output}/sitemap.xml`));
+    if (sitemap !== null) {
+      for (const m of sitemap.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)) {
+        try {
+          add(new URL(m[1], "http://x").pathname);
+        } catch {}
+      }
+    }
+  }
+  for (const f of io.walk(dir, ROUTE_SKIP)) {
+    if (!/\.(?:tsx?|jsx?|vue|svelte|astro|html)$/.test(f))
+      continue;
+    const text = io.readFile(join11(dir, f)) ?? "";
+    for (const m of text.matchAll(/\bpath\s*[:=]\s*["'](\/[^"'\s]*)["']/g))
+      add(m[1]);
+  }
+  return [...out].sort((a, b) => a === "/" ? -1 : b === "/" ? 1 : a.localeCompare(b)).slice(0, MAX_ROUTES);
+}
 function pageRoutes(routes) {
   return routes.filter((r) => !/^\/(?:api|healthz|readyz|livez|metrics)(?:\/|$)/.test(r) && !/\.[a-z0-9]{1,5}$/i.test(r)).slice(0, MAX_BROWSER_PAGES);
 }
@@ -4521,7 +4609,7 @@ async function verifyApp(folder, io, args = []) {
   const extrasOriginal = discoverBunExtras(original, io);
   const extrasDir = original === dir ? { websocket: [], cron: [], branchesOnPath: false } : discoverBunExtras(dir, io);
   const extras = { websocket: [...new Set([...extrasOriginal.websocket, ...extrasDir.websocket])].sort(), cron: [...new Set([...extrasOriginal.cron, ...extrasDir.cron])].sort(), branchesOnPath: extrasOriginal.branchesOnPath || extrasDir.branchesOnPath };
-  const routes = [...new Set([...verifyRoutes(discoverRoutes(original, io)), ...original === dir ? [] : verifyRoutes(discoverRoutes(dir, io)), ...previous.routes])].sort((a, b) => a === "/" ? -1 : b === "/" ? 1 : a.localeCompare(b)).slice(0, MAX_ROUTES);
+  const routes = [...new Set([...verifyRoutes(discoverRoutes(original, io)), ...original === dir ? [] : verifyRoutes(discoverRoutes(dir, io)), ...staticRoutes(dir, io), ...staticRoutes(original, io), ...previous.routes])].sort((a, b) => a === "/" ? -1 : b === "/" ? 1 : a.localeCompare(b)).slice(0, MAX_ROUTES);
   const record = { ok: false, routes, websocket: [...new Set([...extras.websocket, ...previous.websocket])].sort(), cron: [...new Set([...extras.cron, ...previous.cron])].sort(), results: [], assets: 0, browserPages: 0, failures: [], verifiedAt: new Date().toISOString() };
   if (extras.branchesOnPath && routes.length === 1 && routes[0] === "/") {
     record.incomplete = true;
@@ -4554,6 +4642,13 @@ async function verifyApp(folder, io, args = []) {
       }
     };
     await check(routes);
+    if (start.stack === "static" && routes.includes("/healthz")) {
+      const hz = await getBody(app.base, "/healthz", io);
+      const body = (hz?.text ?? "").trim();
+      if (hz === null || body === "" || body === up.home.html.trim() || /^<!doctype html/i.test(body) || /^<html[\s>]/i.test(body)) {
+        record.failures.push({ route: "/healthz", why: "answered the SPA fallback (index.html), not its own body: the health endpoint is masked by the wildcard" });
+      }
+    }
     const assets = [...new Set([...pagePaths(up.home.html), ...fileUrls(dir, io)])].filter((p) => !routes.includes(p));
     record.assets = assets.length;
     await check(assets);
