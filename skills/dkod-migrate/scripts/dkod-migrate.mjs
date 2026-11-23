@@ -1929,6 +1929,19 @@ async function render2(args, io) {
       continue;
     }
     const path = join2(dir, file.path);
+    if (file.path === ".gitignore") {
+      const existing = io.readFile(path);
+      if (existing !== null) {
+        const merged = mergeGitignore(existing, file.content);
+        if (merged === existing)
+          skipped.push(file.path);
+        else {
+          out.push({ to: path, content: merged });
+          written.push(file.path);
+        }
+        continue;
+      }
+    }
     if ((!force || isMigrationFile(file.path)) && io.readFile(path) !== null) {
       skipped.push(file.path);
       continue;
@@ -1987,6 +2000,19 @@ function writeAll(out, io) {
 }
 var isAppFolderFile = (path) => isTemplateInfraPath(path) || path === ".gitignore" || isMigrationFile(path);
 var isMigrationFile = (path) => /^drizzle\.config\.[cm]?[jt]s$/.test(path) || path === "alembic.ini" || path.startsWith("migrations/");
+function mergeGitignore(existing, template) {
+  const key = (line) => line.trim().replace(/^\/+|\/+$/g, "");
+  const have = new Set(existing.split(/\r?\n/).map(key));
+  const missing = template.split(/\r?\n/).filter((l) => key(l) !== "" && !l.trim().startsWith("#") && !have.has(key(l)));
+  if (missing.length === 0)
+    return existing;
+  const sep = existing === "" || existing.endsWith(`
+`) ? "" : `
+`;
+  return `${existing}${sep}${missing.map((l) => l.trim()).join(`
+`)}
+`;
+}
 function snapshotHasDatabase(snapshot) {
   if (!isRec2(snapshot) || snapshot.mode !== "snapshot")
     return false;
