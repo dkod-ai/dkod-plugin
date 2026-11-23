@@ -7,7 +7,7 @@
 # Replaces the folder only when it holds the dkod plugin already. Prints one JSON line.
 # On Windows a folder that Cursor holds open cannot be renamed. Then the new files are written over
 # the old ones in place, plugin.json last, with a copy of the old folder to put back on a failure.
-import base64, json, os, re, shutil, sys, urllib.request
+import base64, json, os, re, shutil, sys, urllib.error, urllib.request
 
 
 def done(out, code=0):
@@ -48,9 +48,12 @@ before = (plugin(folder) or {}).get("version")
 if os.path.exists(folder) and (plugin(folder) or {}).get("name") != "dkod":
     fail(f"{folder} is not the dkod plugin; nothing was changed")
 
+# DKO-2075: Cloudflare in front of DKOD refuses the default "Python-urllib" User-Agent with HTTP 403.
 try:
-    with urllib.request.urlopen(urllib.request.Request(url, headers={"accept": "application/json"}), timeout=60) as res:
+    with urllib.request.urlopen(urllib.request.Request(url, headers={"accept": "application/json", "user-agent": "dkod-update"}), timeout=60) as res:
         bundle = json.load(res)
+except urllib.error.HTTPError as err:
+    fail(f"DKOD answered {err.code}. Run `dk upgrade` in a terminal instead")
 except Exception as err:
     fail(f"could not download the plugin: {err}")
 files = bundle.get("files") if isinstance(bundle, dict) else None

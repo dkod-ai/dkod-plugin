@@ -51,8 +51,8 @@ if (existsSync(folder) && pluginName(folder) !== "dkod") fail(`${folder} is not 
 
 let bundle;
 try {
-  const res = await fetch(url, { headers: { accept: "application/json" } });
-  if (!res.ok) fail(`DKOD answered ${res.status}`);
+  const res = await fetch(url, { headers: { accept: "application/json", "user-agent": "dkod-update" } });
+  if (!res.ok) fail(`DKOD answered ${res.status}. Run \`dk upgrade\` in a terminal instead`);
   bundle = await res.json();
 } catch (err) {
   fail(`could not download the plugin: ${err instanceof Error ? err.message : String(err)}${sandboxed(err) ? `. ${SANDBOX_HINT}` : ""}`);
