@@ -2019,6 +2019,21 @@ function alembicCommands(dir, exists, os) {
     out.push({ cmd: py, args: ["-m", "alembic", ...args] });
   return out;
 }
+var alembicRevisions = (stdout) => stdout.split(`
+`).map((l) => /^(\S+)(?: \([^)]*\))*$/.exec(l.trim())?.[1]).filter((r) => r !== undefined);
+async function alembicApplied(alembic, before) {
+  const cur = await alembic(["current"]);
+  const after = cur.status === 0 ? alembicRevisions(cur.stdout) : [];
+  if (after.length !== 1 || before.length > 1)
+    return null;
+  if (after[0] === before[0])
+    return 0;
+  const h = await alembic(["history", "-r", `${before[0] ?? "base"}:${after[0]}`]);
+  if (h.status !== 0)
+    return null;
+  return h.stdout.split(`
+`).filter((l) => l.includes(" -> ")).length - before.length;
+}
 var NO_MIGRATION_TOOL = "No migration tool found: expected drizzle.config.ts (or .js, .mjs), alembic.ini, or a db:migrate script in package.json (the node-service template's plain SQL migrations) in the app folder.";
 function hasDbMigrateScript(pkg) {
   if (pkg === null)
@@ -2070,8 +2085,19 @@ async function runMigrate(flags, io, cwd, exists) {
     if (io.env[key] !== undefined)
       env[key] = io.env[key];
   let result = { status: NOT_STARTED, stdout: "", stderr: "" };
+  let used = tries[0];
+  let before = null;
   for (const t of tries) {
+    if (alembic) {
+      const cur = await io.run(t.cmd, [...t.args.slice(0, -2), "current"], env, dir);
+      if (missing(cur)) {
+        result = cur;
+        continue;
+      }
+      before = cur.status === 0 ? alembicRevisions(cur.stdout) : null;
+    }
     result = await io.run(t.cmd, t.args, env, dir);
+    used = t;
     if (!missing(result))
       break;
   }
@@ -2080,11 +2106,16 @@ async function runMigrate(flags, io, cwd, exists) {
     return 1;
   }
   const tool = { name };
-  const applied = `${result.stdout}
+  const revisions = alembic && before && result.status === 0 ? await alembicApplied((args) => io.run(used.cmd, [...used.args.slice(0, -2), ...args], env, dir), before) : null;
+  if (revisions !== null)
+    say(`${tool.name} finished with exit status ${result.status}; ${revisions} revision${revisions === 1 ? "" : "s"} applied.`);
+  else {
+    const applied = `${result.stdout}
 ${result.stderr}`.split(`
 `).filter((l) => APPLIED.test(l)).length;
-  say(`${tool.name} finished with exit status ${result.status}; ${applied} line${applied === 1 ? "" : "s"} look like applied migrations.`);
-  if (result.status !== 0 || script) {
+    say(`${tool.name} finished with exit status ${result.status}; ${applied} line${applied === 1 ? "" : "s"} look like applied migrations.`);
+  }
+  if (result.status !== 0 || script || alembic) {
     const plain = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
     const tail = plain(`${result.stdout}
 ${result.stderr}`).split(`
