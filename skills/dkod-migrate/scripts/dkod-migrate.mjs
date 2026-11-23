@@ -2397,7 +2397,45 @@ function startScript(dir, io) {
     return null;
   }
 }
-async function startApp(dir, io) {
+var NO_START = 'no start command: a bun or Node app needs a "start" script in package.json; a Python app needs pyproject.toml or requirements.txt and a FastAPI or Starlette app (`app = FastAPI()`), started with uvicorn. Or pass --start "<command>" that serves on $PORT.';
+var PY_SKIP = [".venv", "venv", "node_modules", ".git", "__pycache__", ".dkod", "tests", "test", "dist", "build"];
+var ASGI_APP = /^([A-Za-z_]\w*)\s*(?::[^=\n]+)?=\s*(?:fastapi\.|starlette\.applications\.)?(?:FastAPI|Starlette)\(/m;
+var UVICORN_TARGET = /\buvicorn\b[^\n]*?["'\s]([A-Za-z_][\w.]*:[A-Za-z_]\w*)\b/;
+function asgiTarget(dir, io) {
+  for (const f of ["Procfile", "Dockerfile", "start.sh"]) {
+    const m = UVICORN_TARGET.exec(io.readFile(join4(dir, f)) ?? "");
+    if (m !== null)
+      return m[1];
+  }
+  const depth = (p) => p.split("/").length;
+  const files = io.walk(dir, PY_SKIP).filter((f) => /^[\w/]+\.py$/.test(f)).sort((a, b) => depth(a) - depth(b) || a.localeCompare(b));
+  for (const f of files) {
+    const m = ASGI_APP.exec(io.readFile(join4(dir, f)) ?? "");
+    if (m === null)
+      continue;
+    const src = f.startsWith("src/");
+    const mod = (src ? f.slice(4) : f).slice(0, -3).replace(/\/__init__$/, "").replaceAll("/", ".");
+    return `${src ? "--app-dir src " : ""}${mod}:${m[1]}`;
+  }
+  return null;
+}
+function startCommand(dir, io, override) {
+  if (override !== undefined && override.trim() !== "")
+    return { stack: "custom", cmd: "sh", args: ["-c", override], label: override };
+  if (startScript(dir, io) !== null)
+    return { stack: "bun", cmd: "bun", args: ["run", "start"], label: "bun run start" };
+  const pyproject = io.readFile(join4(dir, "pyproject.toml")) !== null;
+  if (!pyproject && io.readFile(join4(dir, "requirements.txt")) === null)
+    return null;
+  const target = asgiTarget(dir, io);
+  if (target === null)
+    return null;
+  const venv = [".venv/bin/uvicorn", "venv/bin/uvicorn"].find((p) => io.realpath(join4(dir, p)) !== null);
+  const uvicorn = venv ?? (pyproject && io.hasTool("uv") ? "uv run uvicorn" : "python3 -m uvicorn");
+  const label = `${uvicorn} ${target} --host 127.0.0.1 --port $PORT`;
+  return { stack: "python", cmd: "sh", args: ["-c", `exec ${label.replace("$PORT", '"$PORT"')}`], label };
+}
+async function startApp(dir, io, start) {
   const port = await freePort();
   const base = `http://127.0.0.1:${String(port)}`;
   const env = {
@@ -2406,7 +2444,7 @@ async function startApp(dir, io) {
     NODE_ENV: "production",
     PORT: String(port)
   };
-  const child = spawn("bun", ["run", "start"], { cwd: dir, env, detached: true, stdio: ["ignore", "ignore", "pipe"] });
+  const child = spawn(start.cmd, start.args, { cwd: dir, env, detached: true, stdio: ["ignore", "ignore", "pipe"] });
   let stderr = "";
   child.stderr?.on("data", (b) => {
     if (stderr.length < 8000)
@@ -2433,7 +2471,7 @@ async function startApp(dir, io) {
     lastLine,
     async waitUp() {
       if (pid === undefined)
-        return { ok: false, why: "bun run start did not start." };
+        return { ok: false, why: `${start.label} did not start.` };
       const until = Date.now() + START_WAIT_MS;
       let last = null;
       while (Date.now() < until && !exited) {
@@ -2549,13 +2587,13 @@ function fail(why, io) {
 }
 async function measureMemory(folder, io, args = []) {
   const dir = folder === "" ? io.cwd : folder;
-  if (startScript(dir, io) === null) {
-    return fail("package.json has no start script, so there is no server to measure. Skip this step: the template's memory values stay.", io);
-  }
+  const start = startCommand(dir, io, flagValue(args, "--start"));
+  if (start === null)
+    return fail(`${NO_START} Skip this step: the template's memory values stay.`, io);
   if (!io.hasTool("ps"))
     return fail("ps is not on this computer, so the memory cannot be measured.", io);
   const seconds = Number(flagValue(args, "--seconds") ?? "0");
-  const app = await startApp(dir, io);
+  const app = await startApp(dir, io, start);
   const { base, pid } = app;
   let peakKib = 0;
   let sampling = true;
@@ -4250,14 +4288,15 @@ async function verifyApp(folder, io, args = []) {
   const original = flagValue(args, "--original") ?? originalOf(io.readFile(join11(dir, ".dkod/migration.json"))) ?? dir;
   const routes = verifyRoutes(discoverRoutes(original, io));
   const record = { ok: false, routes, assets: 0, browserPages: 0, failures: [], verifiedAt: new Date().toISOString() };
-  if (startScript(dir, io) === null) {
-    record.failures.push({ route: "/", why: "package.json has no start script, so the app cannot be started and checked" });
+  const start = startCommand(dir, io, flagValue(args, "--start"));
+  if (start === null) {
+    record.failures.push({ route: "/", why: NO_START });
     return finish2(dir, record, io);
   }
   if (isSamplePage(io.readFile(join11(dir, "src/web/main.tsx")))) {
     record.failures.push({ route: "/", why: "src/web/main.tsx is still the template's sample page" });
   }
-  const app = await startApp(dir, io);
+  const app = await startApp(dir, io, start);
   try {
     const up = await app.waitUp();
     if (!up.ok) {
@@ -4279,6 +4318,11 @@ async function verifyApp(folder, io, args = []) {
     await check(assets);
     if (app.exited())
       record.failures.push({ route: "/", why: `the app stopped while it was checked. ${app.lastLine()}`.trim() });
+    if (io.readFile(join11(dir, "package.json")) === null) {
+      record.browserSkipped = "no package.json in the dk- folder, so no Playwright: the routes were checked over HTTP only";
+      record.ok = record.failures.length === 0;
+      return finish2(dir, record, io);
+    }
     const browse = pageRoutes(routes);
     const script = join11(dir, BROWSER_SCRIPT);
     io.writeFile(script, BROWSER_SOURCE);
@@ -4863,8 +4907,8 @@ var USAGE = [
   "  node dkod-migrate.mjs switch <the dk- app's folder> <the original folder>",
   "  node dkod-migrate.mjs files <the dk- app's folder> [--dir NAME=<folder>]...",
   "  node dkod-migrate.mjs install-files <the dk- app's folder>",
-  "  node dkod-migrate.mjs memory <the dk- app's folder> [--seconds N]",
-  "  node dkod-migrate.mjs verify <the dk- app's folder> [--original <folder>]",
+  `  node dkod-migrate.mjs memory <the dk- app's folder> [--seconds N] [--start "<command>"]`,
+  `  node dkod-migrate.mjs verify <the dk- app's folder> [--original <folder>] [--start "<command>"]`,
   "  node dkod-migrate.mjs preflight <the dk- app's folder> [--rules <file.json>]"
 ].join(`
 `);
