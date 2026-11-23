@@ -3,7 +3,7 @@ import { spawn as spawn2 } from "node:child_process";
 import { createHash as createHash4 } from "node:crypto";
 import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, openSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join as join15 } from "node:path";
+import { dirname as dirname2, join as join15 } from "node:path";
 
 import { createHash as createHash3 } from "node:crypto";
 
@@ -1804,6 +1804,7 @@ function isTemplateInfraPath(path, keep = []) {
 }
 
 import { createHash as createHash2 } from "node:crypto";
+import { dirname, resolve } from "node:path";
 var join2 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var NOT_WRITTEN = new Set(["values.yaml", "README.md"]);
 var ROOTS = ["app", "answers", "policy", "dkod"];
@@ -1870,13 +1871,14 @@ async function render2(args, io) {
   if (templateFile === undefined || folder === undefined)
     return -1;
   const dir = folder === "" ? io.cwd : folder;
-  const source = io.readFile(templateFile);
+  const templatePath = resolve(io.cwd, templateFile);
+  const source = io.readFile(templatePath);
   const fail = (errors, gaps = []) => {
     io.print(JSON.stringify({ ok: false, written: [], skipped: [], gaps, errors }));
     return 1;
   };
   if (source === null)
-    return fail([`${templateFile}: not found. Save the template's content from dkoder.templates to this file first.`]);
+    return fail([`${templateFile}: not found or not a file. Save the template's content from dkoder.templates to this file first.`]);
   let values = {};
   if (valuesFile !== undefined) {
     values = json2(io.readFile(valuesFile));
@@ -1886,7 +1888,7 @@ async function render2(args, io) {
   const map = json2(io.readFile(join2(dir, ".dkod/map/app-map.json")));
   const tables = isRec2(map) && Array.isArray(map.tables) && map.tables.length > 0 || snapshotHasDatabase(json2(io.readFile(join2(dir, ".dkod/snapshot.json"))));
   const record = json2(io.readFile(join2(dir, ".dkod/migration.json")));
-  const sampleDir = !isRec2(map) && isRec2(record) && typeof record.original === "string" && record.original !== "" ? join2(templateFile.replace(/[\\/][^\\/]*$/, "") || ".", "template-sample") : null;
+  const sampleDir = !isRec2(map) && isRec2(record) && typeof record.original === "string" && record.original !== "" ? join2(dirname(templatePath), "template-sample") : null;
   const name = baseName(dir === "." ? io.cwd : dir);
   const rendered = renderTemplateFiles(source, contextFor(source, name, tables, values));
   if (rendered.errors.length > 0 || rendered.gaps.length > 0) {
@@ -1906,9 +1908,10 @@ async function render2(args, io) {
   if (errors.length > 0)
     return fail(errors);
   const sample = [];
+  const out = [];
   for (const file of todo) {
     if (sampleDir !== null && !isAppFolderFile(file.path)) {
-      io.writeFile(join2(sampleDir, file.path), file.content);
+      out.push({ to: join2(sampleDir, file.path), content: file.content });
       sample.push(file.path);
       continue;
     }
@@ -1917,15 +1920,18 @@ async function render2(args, io) {
       skipped.push(file.path);
       continue;
     }
-    io.writeFile(path, file.content);
+    out.push({ to: path, content: file.content });
     written.push(file.path);
   }
   const infra = {};
   for (const file of todo)
     if (isTemplateInfraPath(file.path))
       infra[file.path] = renderedHash(file.content);
-  io.writeFile(join2(dir, RENDERED_FILE), `${JSON.stringify({ files: infra }, null, 2)}
-`);
+  out.push({ to: join2(dir, RENDERED_FILE), content: `${JSON.stringify({ files: infra }, null, 2)}
+` });
+  const failed = writeAll(out, io);
+  if (failed !== null)
+    return fail([failed]);
   io.print(JSON.stringify({
     ok: true,
     written,
@@ -1935,6 +1941,36 @@ async function render2(args, io) {
     ...sampleDir !== null ? { sample: { folder: sampleDir, files: sample, note: "The template's sample app was not written into the folder: the app keeps its own code and its own framework. Read these files for the wiring the template's CI and Dockerfile expect (the scripts in package.json, the probes, the JSON logs, the database client), and add only that to the app's code." } } : {}
   }));
   return 0;
+}
+function writeAll(out, io) {
+  const stage = io.mkdtemp(join2(io.tmpdir(), "dkod-render-"));
+  const done = [];
+  const why = (e) => e instanceof Error ? e.message : String(e);
+  try {
+    try {
+      out.forEach((f, i) => io.writeFile(join2(stage, String(i)), f.content));
+    } catch (e) {
+      return `render stopped before writing any file: ${why(e)}`;
+    }
+    try {
+      out.forEach((f, i) => {
+        const old = io.readFile(f.to);
+        io.copyFile(join2(stage, String(i)), f.to);
+        done.push({ to: f.to, old });
+      });
+    } catch (e) {
+      for (const d of done.reverse()) {
+        if (d.old === null)
+          io.rm(d.to, { force: true });
+        else
+          io.writeFile(d.to, d.old);
+      }
+      return `render stopped and took back the ${String(done.length)} file(s) it had written: ${why(e)}`;
+    }
+    return null;
+  } finally {
+    io.rm(stage, { recursive: true, force: true });
+  }
 }
 var isAppFolderFile = (path) => isTemplateInfraPath(path) || path === ".gitignore" || isMigrationFile(path);
 var isMigrationFile = (path) => /^drizzle\.config\.[cm]?[jt]s$/.test(path) || path === "alembic.ini" || path.startsWith("migrations/");
@@ -4002,7 +4038,7 @@ function switchFolders(dkFolder, originalFolder, io) {
   return 0;
 }
 
-import { join as join10, resolve, relative, sep, isAbsolute } from "node:path";
+import { join as join10, resolve as resolve2, relative, sep, isAbsolute } from "node:path";
 var ENV_FILES = [".env", ".env.local", ".env.development", ".env.development.local", ".env.production", ".env.production.local"];
 var ENV_KEY = /(^|_)(DIR|PATH|ROOT|FOLDER|DIRECTORY)$/;
 var PATHLIKE = /^(\/|~\/|\.\.?\/)/;
@@ -4071,7 +4107,7 @@ function urlPrefixes(original, io) {
 }
 function movedFolder(named, root, io) {
   const parts = named.split(/[\\/]/).filter(Boolean);
-  const bases = [root, resolve(root, ".."), resolve(root, "../..")];
+  const bases = [root, resolve2(root, ".."), resolve2(root, "../..")];
   for (let i = 0;i <= parts.length - 2; i++) {
     const tail = parts.slice(i).join("/");
     for (const base of bases) {
@@ -4094,7 +4130,7 @@ async function findFileGroups(original, io, notFound, given = {}, excluded) {
     named.push({ key, value });
   for (const { key, value } of named) {
     const raw = value.startsWith("~/") && home !== "" ? join10(home, value.slice(2)) : value;
-    const target = isAbsolute(raw) ? raw : resolve(root, raw);
+    const target = isAbsolute(raw) ? raw : resolve2(root, raw);
     let real = io.realpath(target);
     let movedFrom = null;
     if (real === null) {
@@ -4244,7 +4280,7 @@ async function switchedOriginal(dir, io) {
   const here = io.realpath(dir);
   if (here === null)
     return null;
-  const archive = io.realpath(`${resolve(here, "..")}${sep}${baseName2(here)}-archive`);
+  const archive = io.realpath(`${resolve2(here, "..")}${sep}${baseName2(here)}-archive`);
   if (archive === null)
     return null;
   if (io.readFile(join10(archive, "package.json")) !== null)
@@ -4253,7 +4289,7 @@ async function switchedOriginal(dir, io) {
   if (res.status !== 0)
     return null;
   const apps = res.stdout.split(`
-`).map((l) => l.trim()).filter(Boolean).map((p) => resolve(p, ".."));
+`).map((l) => l.trim()).filter(Boolean).map((p) => resolve2(p, ".."));
   return apps.length === 1 ? apps[0] : null;
 }
 async function filesCommand(folder, io, args = []) {
@@ -7084,7 +7120,7 @@ var io = {
     }
   },
   writeFile: (path, text) => {
-    mkdirSync(dirname(path), { recursive: true });
+    mkdirSync(dirname2(path), { recursive: true });
     writeFileSync(path, text, "utf8");
   },
   sha256: (paths) => {
@@ -7095,7 +7131,7 @@ var io = {
   },
   walk,
   copyFile: (from, to) => {
-    mkdirSync(dirname(to), { recursive: true });
+    mkdirSync(dirname2(to), { recursive: true });
     copyFileSync(from, to);
   },
   rename: (from, to) => renameSync(from, to),
