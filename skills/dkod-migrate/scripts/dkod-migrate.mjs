@@ -1830,26 +1830,31 @@ function templateTokenLine(text) {
   const at = lines.findIndex((line) => token.test(line));
   return at === -1 ? null : at + 1;
 }
-function inputDefault(source, key) {
+function inputDefaults(source) {
   const { front } = splitFrontMatter(source);
+  const out = {};
   if (front === null)
-    return null;
+    return out;
   for (const chunk of front.split(/^\s*-\s+key:/m).slice(1)) {
-    if (chunk.split(`
-`)[0].trim().replace(/^["']|["']$/g, "") !== key)
+    const key = chunk.split(`
+`)[0].trim().replace(/^["']|["']$/g, "");
+    if (key.includes("."))
       continue;
     const m = /^\s*default:\s*(.+?)\s*$/m.exec(chunk);
-    return m === null ? null : m[1].replace(/^["']|["']$/g, "");
+    const raw = m === null ? undefined : m[1].replace(/^["']|["']$/g, "");
+    out[key] = raw !== undefined && /^\d+$/.test(raw) ? Number(raw) : raw === "true" || raw === "false" ? raw === "true" : raw;
   }
-  return null;
+  return out;
 }
 var baseName = (folder) => folder.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? folder;
 function contextFor(source, name, tables, values) {
-  const port = inputDefault(source, "port");
   const given = isRec2(values) ? values : {};
+  const defaults = inputDefaults(source);
+  if ("queue_name" in defaults && defaults.queue_name === undefined)
+    defaults.queue_name = "";
   const ctx = {
     app: { slug: name, name },
-    answers: { port: port !== null && /^\d+$/.test(port) ? Number(port) : port ?? undefined, needs_database: tables },
+    answers: { ...defaults, needs_database: tables },
     policy: {},
     dkod: {}
   };
