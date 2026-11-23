@@ -796,7 +796,19 @@ var LOCKFILE_BY_MANAGER = {
 var ALL_LOCKFILES = [...new Set(Object.values(LOCKFILE_BY_MANAGER).flat())];
 var FILE_DATABASE = /\.(?:db|sqlite)$/;
 var JS_SOURCE = "*.{ts,tsx,js,jsx,mjs,cjs,mts,cts}";
-var NOT_APP_SOURCE = [...TESTS, "**/dist/**", "**/build/**", "**/.next/**", "**/out/**", "**/coverage/**", "*.d.ts"];
+var PY_SOURCE = "*.py";
+var PY_DEPENDENCY_FILES = ["requirements.txt", "pyproject.toml"];
+var PY_ENV_FOLDERS = [
+  "**/.venv/**",
+  "**/venv/**",
+  "**/__pycache__/**",
+  "**/.tox/**",
+  "**/.mypy_cache/**",
+  "**/.ruff_cache/**",
+  "**/.pytest_cache/**",
+  "**/*.egg-info/**"
+];
+var NOT_APP_SOURCE = [...TESTS, "**/dist/**", "**/build/**", "**/.next/**", "**/out/**", "**/coverage/**", "*.d.ts", ...PY_ENV_FOLDERS];
 var IMPORT_SPEC = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)["']([^"'\s]+)["']/g;
 function databaseImports(text) {
   const out = [];
@@ -812,10 +824,45 @@ function databaseImports(text) {
   return out;
 }
 function isAppSource(path) {
-  return matchAny([JS_SOURCE], path) && !matchAny(NOT_APP_SOURCE, path);
+  return matchAny([JS_SOURCE, PY_SOURCE], path) && !matchAny(NOT_APP_SOURCE, path);
+}
+function pythonSqlite(text) {
+  const out = [];
+  const pyImport = /^\s*(?:import|from)\s+(sqlite3|aiosqlite)\b/;
+  const pyUrl = /["']sqlite:\/\//;
+  const pyDep = /^\s*-?\s*["']?aiosqlite["']?\s*(?:[=<>~!;]|$)/;
+  const pyDepQuoted = /["']aiosqlite\s*(?:==|>=|<=|~=|!=|>|<)/;
+  lines(text).forEach((l, i) => {
+    const imp = pyImport.exec(l);
+    if (imp !== null) {
+      out.push({ line: i + 1, what: `imports ${imp[1]}, a SQLite file database` });
+      return;
+    }
+    if (pyUrl.test(l)) {
+      out.push({ line: i + 1, what: "names a sqlite:// URL, a SQLite file database" });
+      return;
+    }
+    if (pyDep.test(l) || pyDepQuoted.test(l))
+      out.push({ line: i + 1, what: "depends on aiosqlite, a SQLite file database" });
+  });
+  return out;
+}
+function isPythonAppFile(path) {
+  if (matchAny(NOT_APP_SOURCE, path))
+    return false;
+  const base = path.split("/").pop() ?? path;
+  return matchAny([PY_SOURCE], path) || PY_DEPENDENCY_FILES.includes(base);
 }
 function stackFiles(dir) {
-  return [`${dir}/package.json`, `${dir}/{${ALL_LOCKFILES.join(",")}}`, `${dir}/*.db`, `${dir}/*.sqlite`, `${dir}/${JS_SOURCE}`];
+  return [
+    `${dir}/package.json`,
+    `${dir}/{${ALL_LOCKFILES.join(",")}}`,
+    `${dir}/*.db`,
+    `${dir}/*.sqlite`,
+    `${dir}/${JS_SOURCE}`,
+    ...PY_DEPENDENCY_FILES.map((f) => `${dir}/${f}`),
+    `${dir}/${PY_SOURCE}`
+  ];
 }
 function stackGlobs(folderPrefix) {
   return stackFiles(`**/${folderPrefix}*/**`);
@@ -1247,8 +1294,8 @@ var CATALOG = {
     folderPaths: STACK_FOLDER_PATHS,
     pathsFor: (params) => stackGlobs(typeof params.folder_prefix === "string" && params.folder_prefix !== "" ? params.folder_prefix : DEFAULT_FOLDER_PREFIX),
     byName: true,
-    textPaths: ["**/package.json", `**/${JS_SOURCE}`],
-    exclude: [],
+    textPaths: ["**/package.json", `**/${JS_SOURCE}`, `**/${PY_SOURCE}`, ...PY_DEPENDENCY_FILES.map((f) => `**/${f}`)],
+    exclude: PY_ENV_FOLDERS,
     params: [
       { name: "folder_prefix", kind: "string", hint: "The prefix of a migration app folder, from migration.yaml." },
       { name: "deny_dependencies", kind: "strings", hint: "Package names the stack refuses, from migration.yaml." },
@@ -1275,6 +1322,11 @@ var CATALOG = {
         if (!isAppSource(file.path) || stack === "")
           return [];
         return databaseImports(file.text).filter((d) => d.engine !== stack).map((d) => ({ path: file.path, line: d.line, detail: `${base} imports ${d.module}, a ${d.engine} driver; the stack uses ${engine}` }));
+      }
+      if (isPythonAppFile(file.path)) {
+        if (stack !== "postgres")
+          return [];
+        return pythonSqlite(file.text).map((u) => ({ path: file.path, line: u.line, detail: `${base} ${u.what}; the stack uses ${engine}` }));
       }
       if (base !== "package.json")
         return [];
@@ -2081,6 +2133,23 @@ async function checkFromArch(dockerfileText, fetchFn, path = "Dockerfile", timeo
 var POLICY_CHECK_TOOL = "policy_check";
 var POLICY_CHECK_TOOL_FULL = `mcp__dkod__${POLICY_CHECK_TOOL}`;
 var MAX_FOLDER_FILES = 5000;
+var PRUNE_DIRS = [
+  "node_modules",
+  ".git",
+  "vendor",
+  ".next",
+  ".turbo",
+  ".cache",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".pytest_cache"
+];
+var isPrunedDir = (name) => PRUNE_DIRS.includes(name) || name.endsWith(".egg-info");
+var isPrunedUnder = (path) => path.split("/").slice(0, -1).some(isPrunedDir);
+var prunedNames = () => [...PRUNE_DIRS, "*.egg-info"];
 var MAX_READ_BYTES = 64 * 1024 * 1024;
 var MAX_SHOWN = 50;
 var DOCKERFILE = /(^|\/)Dockerfile(\.[^/]+)?$/;
@@ -2122,11 +2191,19 @@ async function checkFolder(pack, dir, io) {
   if (!pack || pack.rules.length === 0) {
     return { ok: true, folder: dir, files: 0, skipped: 0, checked: 0, blocked: false, findings: [], summary: "", next: "Your organization's rules have no checks yet. Nothing to fix." };
   }
-  const listed = await io.list(dir).catch(() => null);
-  if (listed === null)
+  const raw = await io.list(dir).catch(() => null);
+  if (raw === null)
     return refuse("cannot_list", "Dkoder could not list the files of that folder. Check the path, then try again.");
-  if (listed.length > MAX_FOLDER_FILES)
-    return refuse("too_many_files", `That folder has more than ${String(MAX_FOLDER_FILES)} files. Run the check on the app's own folder.`);
+  const listed = raw.filter((path) => !isPrunedUnder(path));
+  if (listed.length > MAX_FOLDER_FILES) {
+    const counts = new Map;
+    for (const path of listed) {
+      const top = path.includes("/") ? path.split("/")[0] : "(files loose in the folder)";
+      counts.set(top, (counts.get(top) ?? 0) + 1);
+    }
+    const biggest = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([folder, count]) => `${folder} (${String(count)} files)`);
+    return refuse("too_many_files", `That folder has more than ${String(MAX_FOLDER_FILES)} files, even with ${prunedNames().join(", ")} skipped. Most files: ${biggest.join(", ")}. Move what is not the app's own code out of the folder, or run the check on a folder that holds only the app, then run it again.`);
+  }
   const base = dir.replace(/[\\/]+$/, "").replace(/[\\/]\.$/, "");
   const folder = base.split(/[\\/]/).pop() ?? "";
   const wanted = pathsToRead(pack, listed, { stage: "build", folder, folderPath: base });
@@ -4518,7 +4595,7 @@ function overridesOf(raw) {
   }
   return out;
 }
-var SKIP3 = ["node_modules", ".git", "dist", "build", ".next", ".dkod", "coverage", ".turbo", ".cache", ".venv", "__pycache__"];
+var SKIP3 = ["node_modules", ".git", "dist", "build", ".next", ".dkod", "coverage", ".turbo", ".cache", ".venv", "venv", "__pycache__", ".tox", ".mypy_cache", ".ruff_cache", ".pytest_cache"];
 var SOURCE4 = /\.(?:[cm]?[jt]sx?|py|go|rb)$/i;
 var SQL = /\.sql$/i;
 var DB_FILE2 = /\.(?:db|sqlite3?)$/i;
@@ -4837,6 +4914,10 @@ function preflightFindings(dir, io, overrides = {}) {
   for (const { rel, text } of texts(all.filter(isAppSource))) {
     for (const d of databaseImports(text).filter((x) => x.engine === "sqlite"))
       findings.push(finding("sqlite-wal", rel, d.line, `${rel} imports ${d.module}, a SQLite file database.`));
+  }
+  for (const { rel, text } of texts(all.filter(isPythonAppFile))) {
+    for (const hit of pythonSqlite(text))
+      findings.push(finding("sqlite-wal", rel, hit.line, `${rel} ${hit.what}.`));
   }
   const main = f.read("src/web/main.tsx");
   if (main !== null && isSamplePage(main))

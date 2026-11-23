@@ -359,7 +359,19 @@ var LOCKFILE_BY_MANAGER = {
 var ALL_LOCKFILES = [...new Set(Object.values(LOCKFILE_BY_MANAGER).flat())];
 var FILE_DATABASE = /\.(?:db|sqlite)$/;
 var JS_SOURCE = "*.{ts,tsx,js,jsx,mjs,cjs,mts,cts}";
-var NOT_APP_SOURCE = [...TESTS, "**/dist/**", "**/build/**", "**/.next/**", "**/out/**", "**/coverage/**", "*.d.ts"];
+var PY_SOURCE = "*.py";
+var PY_DEPENDENCY_FILES = ["requirements.txt", "pyproject.toml"];
+var PY_ENV_FOLDERS = [
+  "**/.venv/**",
+  "**/venv/**",
+  "**/__pycache__/**",
+  "**/.tox/**",
+  "**/.mypy_cache/**",
+  "**/.ruff_cache/**",
+  "**/.pytest_cache/**",
+  "**/*.egg-info/**"
+];
+var NOT_APP_SOURCE = [...TESTS, "**/dist/**", "**/build/**", "**/.next/**", "**/out/**", "**/coverage/**", "*.d.ts", ...PY_ENV_FOLDERS];
 var IMPORT_SPEC = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)["']([^"'\s]+)["']/g;
 function databaseImports(text) {
   const out = [];
@@ -375,10 +387,45 @@ function databaseImports(text) {
   return out;
 }
 function isAppSource(path) {
-  return matchAny([JS_SOURCE], path) && !matchAny(NOT_APP_SOURCE, path);
+  return matchAny([JS_SOURCE, PY_SOURCE], path) && !matchAny(NOT_APP_SOURCE, path);
+}
+function pythonSqlite(text) {
+  const out = [];
+  const pyImport = /^\s*(?:import|from)\s+(sqlite3|aiosqlite)\b/;
+  const pyUrl = /["']sqlite:\/\//;
+  const pyDep = /^\s*-?\s*["']?aiosqlite["']?\s*(?:[=<>~!;]|$)/;
+  const pyDepQuoted = /["']aiosqlite\s*(?:==|>=|<=|~=|!=|>|<)/;
+  lines(text).forEach((l, i) => {
+    const imp = pyImport.exec(l);
+    if (imp !== null) {
+      out.push({ line: i + 1, what: `imports ${imp[1]}, a SQLite file database` });
+      return;
+    }
+    if (pyUrl.test(l)) {
+      out.push({ line: i + 1, what: "names a sqlite:// URL, a SQLite file database" });
+      return;
+    }
+    if (pyDep.test(l) || pyDepQuoted.test(l))
+      out.push({ line: i + 1, what: "depends on aiosqlite, a SQLite file database" });
+  });
+  return out;
+}
+function isPythonAppFile(path) {
+  if (matchAny(NOT_APP_SOURCE, path))
+    return false;
+  const base = path.split("/").pop() ?? path;
+  return matchAny([PY_SOURCE], path) || PY_DEPENDENCY_FILES.includes(base);
 }
 function stackFiles(dir) {
-  return [`${dir}/package.json`, `${dir}/{${ALL_LOCKFILES.join(",")}}`, `${dir}/*.db`, `${dir}/*.sqlite`, `${dir}/${JS_SOURCE}`];
+  return [
+    `${dir}/package.json`,
+    `${dir}/{${ALL_LOCKFILES.join(",")}}`,
+    `${dir}/*.db`,
+    `${dir}/*.sqlite`,
+    `${dir}/${JS_SOURCE}`,
+    ...PY_DEPENDENCY_FILES.map((f) => `${dir}/${f}`),
+    `${dir}/${PY_SOURCE}`
+  ];
 }
 function stackGlobs(folderPrefix) {
   return stackFiles(`**/${folderPrefix}*/**`);
@@ -801,8 +848,8 @@ var CATALOG = {
     folderPaths: STACK_FOLDER_PATHS,
     pathsFor: (params) => stackGlobs(typeof params.folder_prefix === "string" && params.folder_prefix !== "" ? params.folder_prefix : DEFAULT_FOLDER_PREFIX),
     byName: true,
-    textPaths: ["**/package.json", `**/${JS_SOURCE}`],
-    exclude: [],
+    textPaths: ["**/package.json", `**/${JS_SOURCE}`, `**/${PY_SOURCE}`, ...PY_DEPENDENCY_FILES.map((f) => `**/${f}`)],
+    exclude: PY_ENV_FOLDERS,
     params: [
       { name: "folder_prefix", kind: "string", hint: "The prefix of a migration app folder, from migration.yaml." },
       { name: "deny_dependencies", kind: "strings", hint: "Package names the stack refuses, from migration.yaml." },
@@ -829,6 +876,11 @@ var CATALOG = {
         if (!isAppSource(file.path) || stack === "")
           return [];
         return databaseImports(file.text).filter((d) => d.engine !== stack).map((d) => ({ path: file.path, line: d.line, detail: `${base} imports ${d.module}, a ${d.engine} driver; the stack uses ${engine}` }));
+      }
+      if (isPythonAppFile(file.path)) {
+        if (stack !== "postgres")
+          return [];
+        return pythonSqlite(file.text).map((u) => ({ path: file.path, line: u.line, detail: `${base} ${u.what}; the stack uses ${engine}` }));
       }
       if (base !== "package.json")
         return [];
