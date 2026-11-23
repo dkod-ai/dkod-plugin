@@ -4405,6 +4405,22 @@ var BROWSER_SCRIPT = ".dkod-verify-browser.mjs";
 var PLAYWRIGHT_HINT = "bun add -d @playwright/test && bunx playwright install chromium";
 var SAMPLE_SOURCE = /useState\(\s*["']asking the API["']\s*\)/;
 var SAMPLE_TEXT = /^(?:asking the API|no answer: .*)$/m;
+function previousVerify(dir, io) {
+  const out = { routes: [], websocket: [], cron: [] };
+  let parsed = {};
+  try {
+    parsed = JSON.parse(io.readFile(join11(dir, VERIFY_FILE)) ?? "{}");
+  } catch {
+    parsed = {};
+  }
+  if (Array.isArray(parsed.routes))
+    out.routes = parsed.routes.filter((r) => typeof r === "string" && r.startsWith("/"));
+  if (Array.isArray(parsed.websocket))
+    out.websocket = parsed.websocket.filter((r) => typeof r === "string");
+  if (Array.isArray(parsed.cron))
+    out.cron = parsed.cron.filter((r) => typeof r === "string");
+  return out;
+}
 function verifyRoutes(found) {
   const out = new Set(["/"]);
   for (const r of found) {
@@ -4484,8 +4500,17 @@ function finish2(dir, record, io) {
 async function verifyApp(folder, io, args = []) {
   const dir = folder === "" ? io.cwd : folder;
   const original = flagValue(args, "--original") ?? originalOf(io.readFile(join11(dir, ".dkod/migration.json"))) ?? dir;
-  const routes = verifyRoutes(discoverRoutes(original, io));
-  const record = { ok: false, routes, assets: 0, browserPages: 0, failures: [], verifiedAt: new Date().toISOString() };
+  const previous = previousVerify(dir, io);
+  const extrasOriginal = discoverBunExtras(original, io);
+  const extrasDir = original === dir ? { websocket: [], cron: [], branchesOnPath: false } : discoverBunExtras(dir, io);
+  const extras = { websocket: [...new Set([...extrasOriginal.websocket, ...extrasDir.websocket])].sort(), cron: [...new Set([...extrasOriginal.cron, ...extrasDir.cron])].sort(), branchesOnPath: extrasOriginal.branchesOnPath || extrasDir.branchesOnPath };
+  const routes = [...new Set([...verifyRoutes(discoverRoutes(original, io)), ...original === dir ? [] : verifyRoutes(discoverRoutes(dir, io)), ...previous.routes])].sort((a, b) => a === "/" ? -1 : b === "/" ? 1 : a.localeCompare(b)).slice(0, MAX_ROUTES);
+  const record = { ok: false, routes, websocket: [...new Set([...extras.websocket, ...previous.websocket])].sort(), cron: [...new Set([...extras.cron, ...previous.cron])].sort(), results: [], assets: 0, browserPages: 0, failures: [], verifiedAt: new Date().toISOString() };
+  if (extras.branchesOnPath && routes.length === 1 && routes[0] === "/") {
+    record.incomplete = true;
+    record.warning = "verify is incomplete: the fetch handler branches on the request path but only / was discovered. Add the missing routes to `routes` in .dkod/verify.json (or confirm the count against the app) and run verify again; it checks every listed route.";
+    record.failures.push({ route: "/", why: record.warning });
+  }
   const start = startCommand(dir, io, flagValue(args, "--start"));
   if (start === null) {
     record.failures.push({ route: "/", why: NO_START });
@@ -4505,6 +4530,7 @@ async function verifyApp(folder, io, args = []) {
       for (let i = 0;i < paths.length; i += PARALLEL2) {
         await Promise.all(paths.slice(i, i + PARALLEL2).map(async (p) => {
           const a = await get(app.base, p, io);
+          record.results.push({ route: p, status: a === null ? null : a.status });
           if (!answered(a))
             record.failures.push({ route: p, why: a === null ? "no answer" : `answered ${String(a.status)}` });
         }));
@@ -6271,6 +6297,48 @@ function fileRoutes(files, io, original) {
   }
   return out;
 }
+function routesObjectPaths(text) {
+  const out = [];
+  for (const m of text.matchAll(/\broutes\s*:\s*\{/g)) {
+    let depth = 1;
+    let i = m.index + m[0].length;
+    while (i < text.length && depth > 0) {
+      const c = text[i];
+      if (c === "/" && text[i + 1] === "/") {
+        const end = text.indexOf(`
+`, i + 2);
+        i = end < 0 ? text.length : end;
+        continue;
+      }
+      if (c === "/" && text[i + 1] === "*") {
+        const end = text.indexOf("*/", i + 2);
+        i = end < 0 ? text.length : end + 2;
+        continue;
+      }
+      if (c === "'" || c === '"' || c === "`") {
+        const start = i;
+        i++;
+        while (i < text.length && text[i] !== c)
+          i += text[i] === "\\" ? 2 : 1;
+        if (depth === 1) {
+          let j = i + 1;
+          while (j < text.length && /\s/.test(text[j]))
+            j++;
+          if (text[j] === ":")
+            out.push(text.slice(start + 1, i));
+        }
+        i++;
+        continue;
+      }
+      if (c === "{")
+        depth++;
+      else if (c === "}")
+        depth--;
+      i++;
+    }
+  }
+  return out;
+}
 function sourceRoutes(files, io, original) {
   const out = [];
   for (const f of files) {
@@ -6305,6 +6373,20 @@ function sourceRoutes(files, io, original) {
         for (const m of text.matchAll(/\bcase\s+(["'`])(\/[^"'`]*)\1\s*:/g))
           add(m[2]);
       }
+    }
+    if (/\bBun\s*\.\s*serve\s*\(/.test(text)) {
+      for (const p of routesObjectPaths(text))
+        add(p, "ANY");
+      for (const m of text.matchAll(/\b(?:pathname|path|url)\s*(?:={2,3}\s*|!==?\s*|\.startsWith\(\s*|\.includes\(\s*)(["'`])(\/[^"'`]*)\1/g))
+        add(m[2], "ANY");
+      for (const m of text.matchAll(/(["'`])(\/[^"'`]*)\1\s*(?:==={1,3}\s*|!==?)\s*(?:[\w$.]*\.)?(?:pathname|path|url)\b/g))
+        add(m[2], "ANY");
+      if (/switch\s*\(\s*(?:[\w$.]*\.)?(?:pathname|path|url)\s*\)/.test(text)) {
+        for (const m of text.matchAll(/\bcase\s+(["'`])(\/[^"'`]*)\1\s*:/g))
+          add(m[2], "ANY");
+      }
+      for (const m of text.matchAll(/\/\^\\\/([\w-]+(?:\/[\w-]+)*)/g))
+        add(`/${m[1]}`, "ANY");
     }
     const fn = /(?:^|\/)netlify\/functions\/([^/]+?)(?:\/index)?\.[cm]?[jt]s$/.exec(f);
     if (fn !== null)
@@ -6356,6 +6438,44 @@ function discoverRoutes(original, io) {
     const key = `${r.method} ${r.path}`;
     return seen.has(key) ? false : (seen.add(key), true);
   });
+}
+function discoverBunExtras(original, io) {
+  const websocket = new Set;
+  const cron = new Set;
+  let branchesOnPath = false;
+  for (const f of io.walk(original, SKIP5)) {
+    if (IS_TEST.test(f) || !CODE4.test(f))
+      continue;
+    const text = io.readFile(join14(original, f));
+    if (text === null)
+      continue;
+    if (/\bpathname\s*(?:==|===|!=|!==)/.test(text) || /(?:==|===|!=|!==)\s*(?:[\w$.]*\.)?pathname\b/.test(text))
+      branchesOnPath = true;
+    if (/\bpathname\b[^;\n]{0,40}?\.(?:startsWith|includes|match|endsWith)\s*\(/.test(text))
+      branchesOnPath = true;
+    if (/switch\s*\(\s*(?:[\w$.]*\.)?(?:pathname|path|url)\s*\)/.test(text))
+      branchesOnPath = true;
+    if (/\/\^\\\/[\w/-]/.test(text) && /\bpathname\b|\burl\b/.test(text))
+      branchesOnPath = true;
+    const upgrades = [...text.matchAll(/\.upgrade\s*\(/g)];
+    for (const u of upgrades) {
+      const before = text.slice(Math.max(0, u.index - 800), u.index);
+      const checks = [...before.matchAll(/\bpathname\s*(?:==|===|!=|!==)\s*(["'`])(\/[^"'`]*)\1/g)];
+      websocket.add(checks.length > 0 ? checks[checks.length - 1][2] : "(upgrade)");
+    }
+    if (upgrades.length === 0 && /\bBun\s*\.\s*serve\s*\(/.test(text) && /\bwebsocket\s*:/.test(text))
+      websocket.add("(websocket)");
+    for (const m of text.matchAll(/\bBun\s*\.\s*cron\s*\(\s*(["'`])((?:(?!\1).)*)\1/g))
+      cron.add(m[2]);
+    for (const m of text.matchAll(/\bBun\s*\.\s*cron\s*\(\s*\{([\s\S]*?)\}\s*\)/g)) {
+      const s = /\bschedule\s*:\s*(["'`])((?:(?!\1).)*)\1/.exec(m[1]);
+      if (s !== null)
+        cron.add(s[2]);
+    }
+    for (const m of text.matchAll(/\bcron\s*\.\s*schedule\s*\(\s*(["'`])((?:(?!\1).)*)\1/g))
+      cron.add(m[2]);
+  }
+  return { websocket: [...websocket].sort(), cron: [...cron].sort(), branchesOnPath };
 }
 var bare = (s) => s.replace(/[`"'[\]]/g, "");
 var CONSTRAINT = /^(?:primary|foreign|unique|constraint|check|key|index|fulltext|exclude)$/i;
