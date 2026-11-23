@@ -664,9 +664,99 @@ function viewFrom(body) {
 
 var SKIP = new Set(["node_modules", ".git", ".venv", "venv", "dist", "build", ".next", ".turbo", ".dkod", "coverage", "test-results", "playwright-report", "__pycache__", ".cache"]);
 
+import https from "node:https";
+import net from "node:net";
+import tls from "node:tls";
 var MAX_MESSAGE_BYTES = 16 << 20;
 var MAX_HANDSHAKE_BYTES = 16 << 10;
 var LOOPBACK = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+function proxyFor(host, env = process.env) {
+  const raw = (env.HTTPS_PROXY ?? env.https_proxy ?? "").trim();
+  const name = host.toLowerCase();
+  if (!raw || LOOPBACK.has(name))
+    return null;
+  for (const entry of (env.NO_PROXY ?? env.no_proxy ?? "").split(",")) {
+    const e = entry.trim().toLowerCase().replace(/^([^:]+):\d+$/, "$1");
+    if (e === "*")
+      return null;
+    const bare = e.replace(/^\*?\./, "");
+    if (bare && (name === bare || name.endsWith(`.${bare}`)))
+      return null;
+  }
+  let url;
+  try {
+    url = new URL(raw.includes("://") ? raw : `http://${raw}`);
+  } catch {
+    return null;
+  }
+  return url.protocol === "http:" ? url : null;
+}
+function openTunnel(proxy, host, port, onReady, onFail) {
+  const raw = net.connect({ host: proxy.hostname.replace(/^\[|\]$/g, ""), port: proxy.port ? Number(proxy.port) : 80 });
+  const target = `${host}:${port}`;
+  const auth = proxy.username ? `Proxy-Authorization: Basic ${Buffer.from(`${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`).toString("base64")}\r
+` : "";
+  let head = Buffer.alloc(0);
+  let done = false;
+  const settle = (reason) => {
+    if (done)
+      return;
+    done = true;
+    raw.off("data", onData);
+    raw.off("error", onError);
+    raw.off("close", onClose);
+    if (reason === null) {
+      onReady(raw);
+      return;
+    }
+    raw.destroy();
+    onFail(reason);
+  };
+  const onData = (chunk) => {
+    head = Buffer.concat([head, chunk]);
+    const end = head.indexOf(`\r
+\r
+`);
+    if (end < 0) {
+      if (head.length > MAX_HANDSHAKE_BYTES)
+        settle("bad proxy answer");
+      return;
+    }
+    const status = Number(/^HTTP\/1\.[01] (\d{3})/.exec(head.subarray(0, end).toString("latin1"))?.[1] ?? 0);
+    settle(status !== 200 ? `proxy refused the tunnel (${status || "no status"})` : end + 4 < head.length ? "bad proxy answer" : null);
+  };
+  const onError = (error) => settle(`proxy ${error.code ?? "socket_error"}`);
+  const onClose = () => settle("proxy closed the connection");
+  raw.on("data", onData);
+  raw.on("error", onError);
+  raw.on("close", onClose);
+  raw.once("connect", () => raw.write(`CONNECT ${target} HTTP/1.1\r
+Host: ${target}\r
+${auth}\r
+`));
+  return raw;
+}
+function dashboardFetch(url, init, direct, env = process.env) {
+  const target = new URL(url);
+  const proxy = target.protocol === "https:" && env.NODE_USE_ENV_PROXY !== "1" ? proxyFor(target.hostname, env) : null;
+  if (!proxy)
+    return direct(url, init);
+  const host = target.hostname.replace(/^\[|\]$/g, "");
+  return new Promise((resolve, reject) => {
+    const createConnection = (_, done) => {
+      openTunnel(proxy, host, Number(target.port || 443), (raw) => done(null, tls.connect({ socket: raw, servername: host, rejectUnauthorized: true })), (reason) => done(Object.assign(new Error(reason), { code: "PROXY_TUNNEL" })));
+      return;
+    };
+    const req = https.request(target, { method: init.method, headers: { ...init.headers, "content-length": String(Buffer.byteLength(init.body)) }, createConnection }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, text: async () => Buffer.concat(chunks).toString("utf8") }));
+      res.on("error", reject);
+    });
+    req.on("error", reject);
+    req.end(init.body);
+  });
+}
 
 var MAX_FILE_BYTES = 5 * 1024 ** 3;
 var HOP = new Set(["connection", "keep-alive", "transfer-encoding", "upgrade", "host", "authorization", "content-length"]);
@@ -705,10 +795,7 @@ function resolveCredentials(env, configPath, readFile, pluginRoot, devicePath) {
     const dashboardUrl = trustedDashboard(env.DKOD_URL);
     return dashboardUrl ? { dashboardUrl, token: env.DKODER_TOKEN } : null;
   }
-  const candidates = [configPath, env.CLAUDE_PLUGIN_ROOT && `${env.CLAUDE_PLUGIN_ROOT}/dkoder.json`, env.CURSOR_PLUGIN_ROOT && `${env.CURSOR_PLUGIN_ROOT}/dkoder.json`, pluginRoot && `${pluginRoot}/dkoder.json`];
-  for (const path of candidates) {
-    if (!path)
-      continue;
+  for (const path of configCandidates(env, configPath, pluginRoot)) {
     const text = readFile(path);
     if (text === null)
       continue;
@@ -722,6 +809,9 @@ function resolveCredentials(env, configPath, readFile, pluginRoot, devicePath) {
       return null;
   }
   return devicePath ? readDeviceFile(devicePath, readFile) : null;
+}
+function configCandidates(env, configPath, pluginRoot) {
+  return [configPath, env.CLAUDE_PLUGIN_ROOT && `${env.CLAUDE_PLUGIN_ROOT}/dkoder.json`, env.CURSOR_PLUGIN_ROOT && `${env.CURSOR_PLUGIN_ROOT}/dkoder.json`, pluginRoot && `${pluginRoot}/dkoder.json`].filter((p) => Boolean(p));
 }
 function readDeviceFile(path, readFile) {
   const text = readFile(path);
@@ -773,6 +863,13 @@ var pairOf = (dashboardUrl, body, org) => {
   const said = typeof body.org === "string" && ORG_ID.test(body.org) ? body.org : org;
   return { dashboardUrl, token: body.token, refresh: body.refresh, expiresAt, ...said ? { org: said } : {} };
 };
+function unreachable(url, error, next) {
+  const e = error ?? {};
+  const code = e.cause?.code ?? e.code;
+  const message = e.cause?.message ?? e.message;
+  const why = [code, message].filter((v) => typeof v === "string" && v).join(": ") || "no error detail";
+  return `Could not reach the dashboard at ${url} (${why}). ${next}`;
+}
 var CODE_GONE = "The connect code was refused: it works once, for 60 seconds. Call dkoder.devdb.connect again and run this at once with the new code.";
 async function connectWithCode(code, dashboardUrl, io) {
   if (!/^dkodc_[a-z0-9]{16,64}_[A-Za-z0-9_-]{20,}$/.test(code))
@@ -780,8 +877,8 @@ async function connectWithCode(code, dashboardUrl, io) {
   let res;
   try {
     res = await io.fetch(`${dashboardUrl}/api/v1/dkoder/connect/exchange`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code }) });
-  } catch {
-    return "Could not reach the dashboard. Check the network, then call dkoder.devdb.connect again.";
+  } catch (error) {
+    return unreachable(`${dashboardUrl}/api/v1/dkoder/connect/exchange`, error, "Check the network, then call dkoder.devdb.connect again.");
   }
   if (res.status === 401)
     return CODE_GONE;
@@ -802,8 +899,8 @@ async function freshCredentials(creds, io) {
   let res;
   try {
     res = await io.fetch(`${creds.dashboardUrl}/api/v1/dkoder/connect/refresh`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ refresh: creds.refresh }) });
-  } catch {
-    throw new TokenError("unavailable", "Could not reach the dashboard. Check the network and try again.");
+  } catch (error) {
+    throw new TokenError("unavailable", unreachable(`${creds.dashboardUrl}/api/v1/dkoder/connect/refresh`, error, "Check the network and try again."));
   }
   if (res.status === 401)
     throw new TokenError("refused", `DKOD no longer accepts this computer's helper token. ${NO_DEVICE}`);
@@ -1087,7 +1184,7 @@ process.exitCode = await runSecretsCli(process.argv.slice(2), {
     },
     devicePath,
     pluginRoot: resolve(dirname(process.argv[1] ?? "."), "..", "..", ".."),
-    fetch: async (url, init) => await fetch(url, { ...init, redirect: "error" }),
+    fetch: (url, init) => dashboardFetch(url, init, (u, i) => fetch(u, { ...i, redirect: "error" })),
     now: () => Date.now()
   }
 });

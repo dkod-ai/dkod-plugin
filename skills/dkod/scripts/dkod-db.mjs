@@ -455,6 +455,7 @@ function readFlatMapTables(text) {
 }
 
 import { createHash as createHash2, randomBytes } from "node:crypto";
+import https from "node:https";
 import net from "node:net";
 import tls from "node:tls";
 var MAX_MESSAGE_BYTES = 16 << 20;
@@ -539,6 +540,27 @@ Host: ${target}\r
 ${auth}\r
 `));
   return raw;
+}
+function dashboardFetch(url, init, direct, env = process.env) {
+  const target = new URL(url);
+  const proxy = target.protocol === "https:" && env.NODE_USE_ENV_PROXY !== "1" ? proxyFor(target.hostname, env) : null;
+  if (!proxy)
+    return direct(url, init);
+  const host = target.hostname.replace(/^\[|\]$/g, "");
+  return new Promise((resolve, reject) => {
+    const createConnection = (_, done) => {
+      openTunnel(proxy, host, Number(target.port || 443), (raw) => done(null, tls.connect({ socket: raw, servername: host, rejectUnauthorized: true })), (reason) => done(Object.assign(new Error(reason), { code: "PROXY_TUNNEL" })));
+      return;
+    };
+    const req = https.request(target, { method: init.method, headers: { ...init.headers, "content-length": String(Buffer.byteLength(init.body)) }, createConnection }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, text: async () => Buffer.concat(chunks).toString("utf8") }));
+      res.on("error", reject);
+    });
+    req.on("error", reject);
+    req.end(init.body);
+  });
 }
 function frame(opcode, payload) {
   const len = payload.length;
@@ -1286,10 +1308,7 @@ function resolveCredentials(env, configPath, readFile, pluginRoot, devicePath) {
     const dashboardUrl = trustedDashboard(env.DKOD_URL);
     return dashboardUrl ? { dashboardUrl, token: env.DKODER_TOKEN } : null;
   }
-  const candidates = [configPath, env.CLAUDE_PLUGIN_ROOT && `${env.CLAUDE_PLUGIN_ROOT}/dkoder.json`, env.CURSOR_PLUGIN_ROOT && `${env.CURSOR_PLUGIN_ROOT}/dkoder.json`, pluginRoot && `${pluginRoot}/dkoder.json`];
-  for (const path of candidates) {
-    if (!path)
-      continue;
+  for (const path of configCandidates(env, configPath, pluginRoot)) {
     const text = readFile(path);
     if (text === null)
       continue;
@@ -1303,6 +1322,19 @@ function resolveCredentials(env, configPath, readFile, pluginRoot, devicePath) {
       return null;
   }
   return devicePath ? readDeviceFile(devicePath, readFile) : null;
+}
+function configCandidates(env, configPath, pluginRoot) {
+  return [configPath, env.CLAUDE_PLUGIN_ROOT && `${env.CLAUDE_PLUGIN_ROOT}/dkoder.json`, env.CURSOR_PLUGIN_ROOT && `${env.CURSOR_PLUGIN_ROOT}/dkoder.json`, pluginRoot && `${pluginRoot}/dkoder.json`].filter((p) => Boolean(p));
+}
+function missingCredentials(env, configPath, readFile, pluginRoot, devicePath) {
+  const notes = [];
+  if (env.DKOD_URL && env.DKODER_TOKEN)
+    notes.push("DKOD_URL is not an https address");
+  for (const path of [...configCandidates(env, configPath, pluginRoot), ...devicePath ? [devicePath] : []]) {
+    const needs = path === devicePath ? "dashboardUrl, token, refresh and expiresAt" : "dashboardUrl and token";
+    notes.push(`${path} ${readFile(path) === null ? "is missing" : `is not valid (it needs ${needs})`}`);
+  }
+  return `No DKOD credentials found: ${notes.join("; ")}.`;
 }
 function readDeviceFile(path, readFile) {
   const text = readFile(path);
@@ -1368,6 +1400,13 @@ var pairOf = (dashboardUrl, body, org) => {
   const said = typeof body.org === "string" && ORG_ID.test(body.org) ? body.org : org;
   return { dashboardUrl, token: body.token, refresh: body.refresh, expiresAt, ...said ? { org: said } : {} };
 };
+function unreachable(url, error, next) {
+  const e = error ?? {};
+  const code = e.cause?.code ?? e.code;
+  const message = e.cause?.message ?? e.message;
+  const why = [code, message].filter((v) => typeof v === "string" && v).join(": ") || "no error detail";
+  return `Could not reach the dashboard at ${url} (${why}). ${next}`;
+}
 var CODE_GONE = "The connect code was refused: it works once, for 60 seconds. Call dkoder.devdb.connect again and run this at once with the new code.";
 async function connectWithCode(code, dashboardUrl, io) {
   if (!/^dkodc_[a-z0-9]{16,64}_[A-Za-z0-9_-]{20,}$/.test(code))
@@ -1375,8 +1414,8 @@ async function connectWithCode(code, dashboardUrl, io) {
   let res;
   try {
     res = await io.fetch(`${dashboardUrl}/api/v1/dkoder/connect/exchange`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code }) });
-  } catch {
-    return "Could not reach the dashboard. Check the network, then call dkoder.devdb.connect again.";
+  } catch (error) {
+    return unreachable(`${dashboardUrl}/api/v1/dkoder/connect/exchange`, error, "Check the network, then call dkoder.devdb.connect again.");
   }
   if (res.status === 401)
     return CODE_GONE;
@@ -1397,8 +1436,8 @@ async function freshCredentials(creds, io) {
   let res;
   try {
     res = await io.fetch(`${creds.dashboardUrl}/api/v1/dkoder/connect/refresh`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ refresh: creds.refresh }) });
-  } catch {
-    throw new TokenError("unavailable", "Could not reach the dashboard. Check the network and try again.");
+  } catch (error) {
+    throw new TokenError("unavailable", unreachable(`${creds.dashboardUrl}/api/v1/dkoder/connect/refresh`, error, "Check the network and try again."));
   }
   if (res.status === 401)
     throw new TokenError("refused", `DKOD no longer accepts this computer's helper token. ${NO_DEVICE}`);
@@ -1429,8 +1468,8 @@ async function fetchDbToken(creds, app, io) {
       headers: { authorization: `Bearer ${creds.token}`, "content-type": "application/json" },
       body: JSON.stringify({ app_key: app })
     });
-  } catch {
-    throw new TokenError("unavailable", "Could not reach the dashboard. Check the network and try again.");
+  } catch (error) {
+    throw new TokenError("unavailable", unreachable(`${creds.dashboardUrl}/api/v1/dkoder/devdb/token`, error, "Check the network and try again."));
   }
   const raw = await res.text().catch(() => "");
   let body = {};
@@ -1622,7 +1661,7 @@ async function startUp(flags, io, cwd) {
     const own = wanted && devicePath ? readDeviceFile(orgDevicePath(devicePath, wanted), io.readFile) : null;
     const found = own ?? resolveCredentials(io.env, flags.get("config"), io.readFile, io.pluginRoot, devicePath);
     if (!found)
-      return fail(2, NO_DEVICE);
+      return fail(2, `${missingCredentials(io.env, flags.get("config"), io.readFile, io.pluginRoot, devicePath)} ${NO_DEVICE}`);
     creds = found;
   }
   if (wanted && creds.org && creds.org !== wanted)
@@ -3216,7 +3255,7 @@ process.exitCode = await runDbCli(process.argv.slice(2), {
   },
   pluginRoot: resolve(dirname(process.argv[1] ?? "."), "..", "..", ".."),
   exists: (path) => existsSync(path),
-  fetch: async (url, init) => await fetch(url, init),
+  fetch: (url, init) => dashboardFetch(url, init, (u, i) => fetch(u, i)),
   print: (line) => process.stdout.write(`${line}
 `),
   now: () => Date.now(),

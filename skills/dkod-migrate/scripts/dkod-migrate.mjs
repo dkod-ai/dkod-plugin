@@ -4707,8 +4707,6 @@ var RECOGNISERS = [
     ]
   }
 ];
-var join12 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
-var PREFLIGHT_FILE = ".dkod/preflight.json";
 var PREFLIGHT_RULE_IDS = [
   "bind-loopback",
   "start-download",
@@ -4722,6 +4720,9 @@ var PREFLIGHT_RULE_IDS = [
   "two-app-keys",
   "files-database"
 ];
+
+var join12 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+var PREFLIGHT_FILE = ".dkod/preflight.json";
 var PREFLIGHT_FIX = {
   "bind-loopback": "Listen on 0.0.0.0 (or on HOST, which the Dockerfile sets to 0.0.0.0). A server on 127.0.0.1 or localhost never answers the pod's probes.",
   "start-download": "Install and build in the Dockerfile, not at start. The container's root file system is read only, so npx, bunx, an install or a download at start fails.",
