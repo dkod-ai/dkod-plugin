@@ -4285,6 +4285,14 @@ async function findFileGroups(original, io, notFound, given = {}, excluded) {
       usedPrefixes.add(key);
     groups.push({ env: f.env, reason: f.reason, source: f.source, moved_from: f.movedFrom ?? null, key_prefix: key, url_prefix: url === null ? null : `/${url}/`, inside: outer ? outer.env ?? outer.key_prefix : null, ...st });
   }
+  for (const p of io.walk(root, SKIP2)) {
+    if (JUNK_FILE.test(p) || !isDbFile(join10(root, p), io))
+      continue;
+    const path = toPosix(p);
+    if (!excluded?.some((e) => e.path === path))
+      excluded?.push({ path, bytes: io.size?.(join10(root, p)) ?? 0 });
+  }
+  excluded?.sort((a, b) => a.path.localeCompare(b.path));
   return groups;
 }
 async function dbScan(url, pattern, flags, io, cwd) {
