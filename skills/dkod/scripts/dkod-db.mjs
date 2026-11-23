@@ -1956,6 +1956,17 @@ function alembicCommands(dir, exists, os) {
     out.push({ cmd: py, args: ["-m", "alembic", ...args] });
   return out;
 }
+var NO_MIGRATION_TOOL = "No migration tool found: expected drizzle.config.ts (or .js, .mjs), alembic.ini, or a db:migrate script in package.json (the node-service template's plain SQL migrations) in the app folder.";
+function hasDbMigrateScript(pkg) {
+  if (pkg === null)
+    return false;
+  try {
+    const script = JSON.parse(pkg)?.scripts?.["db:migrate"];
+    return typeof script === "string" && script.trim() !== "";
+  } catch {
+    return false;
+  }
+}
 async function runMigrate(flags, io, cwd, exists) {
   const say = (line) => io.print(`dkod-db: ${line}`);
   const dir = flags.get("dir") ?? cwd;
@@ -1984,12 +1995,13 @@ async function runMigrate(flags, io, cwd, exists) {
   }
   const drizzle = ["drizzle.config.ts", "drizzle.config.js", "drizzle.config.mjs"].some((f) => exists(join3(dir, f)));
   const alembic = !drizzle && exists(join3(dir, "alembic.ini"));
-  if (!drizzle && !alembic) {
-    say("No migration tool found: expected drizzle.config.ts (or .js, .mjs) or alembic.ini in the app folder.");
+  const script = !drizzle && !alembic && hasDbMigrateScript(io.readFile(join3(dir, "package.json")));
+  if (!drizzle && !alembic && !script) {
+    say(NO_MIGRATION_TOOL);
     return 2;
   }
-  const tries = drizzle ? [{ cmd: "bunx", args: ["drizzle-kit", "migrate"] }] : alembicCommands(dir, exists, platform(io));
-  const name = drizzle ? "drizzle-kit" : "alembic";
+  const tries = drizzle ? [{ cmd: "bunx", args: ["drizzle-kit", "migrate"] }] : script ? [{ cmd: "bun", args: ["run", "db:migrate"] }] : alembicCommands(dir, exists, platform(io));
+  const name = drizzle ? "drizzle-kit" : script ? "bun run db:migrate" : "alembic";
   const env = { DATABASE_URL: url };
   for (const key of ["PATH", "HOME", "USER", "USERPROFILE", "TMPDIR", "TEMP", "SystemRoot", "LANG"])
     if (io.env[key] !== undefined)
@@ -2009,14 +2021,14 @@ async function runMigrate(flags, io, cwd, exists) {
 ${result.stderr}`.split(`
 `).filter((l) => APPLIED.test(l)).length;
   say(`${tool.name} finished with exit status ${result.status}; ${applied} line${applied === 1 ? "" : "s"} look like applied migrations.`);
-  if (result.status !== 0) {
+  if (result.status !== 0 || script) {
     const plain = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
     const tail = plain(`${result.stdout}
 ${result.stderr}`).split(`
 `).filter((l) => l.trim() !== "").slice(-20);
     for (const l of tail)
       io.print(l);
-    if (!tail.some((l) => /error|exception|fail|refused|denied/i.test(l)))
+    if (result.status !== 0 && !tail.some((l) => /error|exception|fail|refused|denied/i.test(l)))
       say(`${tool.name} gave no reason. It gives none when it cannot reach the database: run \`node dkod-db.mjs up --app <app key>\` again and wait until it prints \`ready\`, then run migrate again.`);
   }
   return result.status === 0 ? 0 : 1;

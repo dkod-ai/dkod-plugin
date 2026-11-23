@@ -61,7 +61,7 @@ Skip this step when the snapshot said `new-app-only` and the app keeps no data.
 
 1. Call `dkoder.devdb.status` with the original's app key (never the `dk-` key). Call `dkoder.devdb.make` with `confirm: true` when it says `missing`.
 2. Run `node <scripts>/dkod-db.mjs up --app <original key> --org <org_id> --dir <folder> --detach` (`org_id` from `dkoder.devdb.status`). It writes `DATABASE_URL` into `<folder>/.env.local`. When it asks for a code, do what the dkod skill's "Dev database" section says.
-3. Run `node <scripts>/dkod-db.mjs migrate --dir <folder>`: the dk- app's own migrations make its tables in Dev.
+3. Run `node <scripts>/dkod-db.mjs migrate --dir <folder>`: the dk- app's own migrations make its tables in Dev. It runs the migration tool the template ships, named in `migrate_tools` from `dkoder.migrate.start`; a `db:migrate` script in package.json counts as one. Use that tool: never add another migration tool to the app, even when `stack.database.orm` names one.
 4. Read `data_import` in the migration file. With `ask`, ask the builder once: "Which data of <key> comes along? It goes into Dev now, and into prod after the deploy." (the question tool; without one, ask in plain text and wait). The options, in this order:
    - "Only the small tables (recommended)": offer it only when the snapshot's `suggest.heavy` and `suggest.small` are both not empty, and then it is the first option. In its description, name each heavy table with its size, and say that the heavy tables, and the `suggest.blocked` tables whose rows point at them, are made empty.
    - "All the data": the rows of every table. When `suggest.heavy` is not empty, say in its description that the heavy tables make it slow, and that it can fail on a very big table.
