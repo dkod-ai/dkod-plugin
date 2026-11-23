@@ -3921,8 +3921,10 @@ function envPaths(original, io) {
   return out;
 }
 var JUNK_FILE = /(^|\/)(\.DS_Store|Thumbs\.db|desktop\.ini|\._[^/]*)$/;
+var DB_FILE = /\.(?:sqlite3?|db3?)(?:-(?:wal|shm|journal))?$/i;
+var appFiles = (dir, io) => io.walk(dir, SKIP2).filter((p) => !JUNK_FILE.test(p) && !DB_FILE.test(p));
 function stats(dir, io) {
-  const paths = io.walk(dir, SKIP2).filter((p) => !JUNK_FILE.test(p));
+  const paths = appFiles(dir, io);
   const counts = new Map;
   let bytes = 0;
   for (const p of paths) {
@@ -3986,7 +3988,7 @@ async function findFileGroups(original, io, notFound, given = {}) {
     }
     if (real === "/" || within(root, real) || NOT_FILES.test(toPosix(real)))
       continue;
-    if (io.walk(real, SKIP2).length === 0)
+    if (appFiles(real, io).length === 0)
       continue;
     if (found.some((g) => g.source === real))
       continue;
@@ -4003,7 +4005,7 @@ async function findFileGroups(original, io, notFound, given = {}) {
         const real = io.realpath(join10(root, rel));
         if (real === null || found.some((g) => within(real, g.source)))
           continue;
-        if (io.walk(real, SKIP2).length === 0)
+        if (appFiles(real, io).length === 0)
           continue;
         found.push({ env: null, reason: "ignored", source: real });
       }
@@ -4108,7 +4110,17 @@ async function filesCommand(folder, io, args = []) {
   const notFound = [];
   const groups = await findFileGroups(original, io, notFound, given);
   const upload = groups.filter((g) => g.inside === null).map((g) => ({ from: g.source, prefix: g.key_prefix }));
-  const report = { ok: true, original, groups, upload, db_refs: { checked: false, links: 0, missing: [], missing_count: 0 }, not_found: notFound };
+  const bucket = groups.length > 0 || notFound.length > 0;
+  const report = {
+    ok: true,
+    original,
+    groups,
+    upload,
+    db_refs: { checked: false, links: 0, missing: [], missing_count: 0 },
+    not_found: notFound,
+    step_4b: bucket ? "bucket" : "skip",
+    say: bucket ? "Step 4b: bucket. These files go into the app's own private files bucket: run install-files and route the folders through src/dkod-files.ts." : "Step 4b: skip. The original has no uploads or other files outside its code (database files such as data/app.db are data, brought by step 4). There is nothing to seed and no bucket to use."
+  };
   const served = groups.filter((g) => g.url_prefix !== null);
   const dbUrl = (io.readFile(join10(dir, ".env.local")) ?? "").split(`
 `).map((l) => /^\s*(?:export\s+)?DATABASE_URL\s*=\s*["']?([^"'\s]+)/.exec(l)?.[1]).find(Boolean);
@@ -4465,7 +4477,7 @@ function overridesOf(raw) {
 var SKIP3 = ["node_modules", ".git", "dist", "build", ".next", ".dkod", "coverage", ".turbo", ".cache", ".venv", "__pycache__"];
 var SOURCE4 = /\.(?:[cm]?[jt]sx?|py|go|rb)$/i;
 var SQL = /\.sql$/i;
-var DB_FILE = /\.(?:db|sqlite3?)$/i;
+var DB_FILE2 = /\.(?:db|sqlite3?)$/i;
 var MAX_FILES2 = 4000;
 var MAX_BYTES = 512 * 1024;
 function at(text, re) {
@@ -4774,7 +4786,7 @@ function preflightFindings(dir, io, overrides = {}) {
   findings.push(...startRules(f));
   const tables = new Map([...drizzleTables(texts(sources.filter((p) => /schema|db|model|table/i.test(p)))), ...sqlTables(texts(all.filter((p) => SQL.test(p))))]);
   findings.push(...fkFindings(tables));
-  for (const rel of all.filter((p) => DB_FILE.test(p))) {
+  for (const rel of all.filter((p) => DB_FILE2.test(p))) {
     const wal = all.includes(`${rel}-wal`);
     findings.push(finding("sqlite-wal", rel, null, wal ? `${rel} and its -wal file are in the app's folder.` : `${rel} is a SQLite file in the app's folder.`));
   }
