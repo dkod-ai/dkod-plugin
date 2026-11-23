@@ -3065,6 +3065,20 @@ var VALUE_PATTERNS = [
   { rule: "db_url_password", re: /:\/\/[^\s:@/'"`]+:([^\s@/'"`]+)@/dg, group: 1 }
 ];
 var TEST_PATH_RE = /(^|\/)(test|tests|__tests__|spec|specs|fixtures?|testdata)\/|\.(test|spec)\.[a-z]+$|_test\.(go|py|rs)$/i;
+var PUBLIC_TEST_VECTORS = new Set([
+  "12345678901234567890",
+  "12345678901234567890123456789012",
+  "1234567890123456789012345678901234567890123456789012345678901234",
+  "3132333435363738393031323334353637383930",
+  "3132333435363738393031323334353637383930313233343536373839303132",
+  "31323334353637383930313233343536373839303132333435363738393031323334353637383930313233343536373839303132333435363738393031323334",
+  "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+  "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZA",
+  "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNA"
+]);
+function isPublicTestVector(value) {
+  return PUBLIC_TEST_VECTORS.has(value) || PUBLIC_TEST_VECTORS.has(value.toUpperCase());
+}
 var FAKE_HOST_RE = /^(?:localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|\[::1\]|(?:[a-z0-9-]+\.)*(?:example\.(?:com|net|org)|example|test|invalid|localhost))(?=[:/?#\s'"`]|$)/i;
 var AWS_SECRET_RE = /(?<![A-Za-z0-9/+=])[A-Za-z0-9/+=]{40}(?![A-Za-z0-9/+=])/g;
 var AWS_PAIR_WINDOW = 400;
@@ -3299,6 +3313,12 @@ function namedSecretLiterals(path, content) {
     const v = literal.value.trim();
     if (v === "" || looksLikeReference(v) || isFakeValue(v) || TIER_B_PLACEHOLDER.test(v) || TYPE_WORD_RE.test(v) || v.includes("://"))
       continue;
+    if (isPublicTestVector(v)) {
+      if (TEST_PATH_RE.test(path))
+        continue;
+      out.push({ line: i + 1, name: m[1] });
+      continue;
+    }
     if (relaxed) {
       if (v.length >= 16 && !/[\s()]/.test(v) && !notSecretShape(v) && !IDENTIFIER_VALUE.test(v) && looksRandom(v))
         out.push({ line: i + 1, name: m[1] });
