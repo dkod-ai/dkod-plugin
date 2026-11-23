@@ -772,7 +772,7 @@ var USAGE = [
   "Usage:",
   "  node dkod-db.mjs up --app <app key> [--org <org_id>] [--port 6543] [--files-port <port + 1>] [--dir <app folder>] [--wait <seconds>] [--detach]",
   "  node dkod-db.mjs files --from <folder> [--prefix media/] [--dir <app folder>] [--jobs 32]   (while `up` runs)",
-  "  node dkod-db.mjs down [--dir <app folder>] [--all]",
+  "  node dkod-db.mjs down [--app <app key> | --dir <app folder>] [--all]",
   "  node dkod-db.mjs migrate [--dir <app folder>] [--port 6543]",
   "  node dkod-db.mjs import --app <app key> --from <local postgres URL | snapshot> [--dir <app folder>] [--port 6543] [--tables <name,name> [--clear-links] | --no-data]",
   "  node dkod-db.mjs detect [--dir <app folder>]"

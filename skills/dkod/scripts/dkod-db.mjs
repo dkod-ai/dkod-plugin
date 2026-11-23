@@ -1242,7 +1242,7 @@ var RETRY_STEPS_MS = [30000, 60000, 120000, 300000];
 var FLAGS = {
   up: ["app", "port", "files-port", "dir", "gateway", "config", "wait", "code", "dashboard", "org"],
   files: ["from", "prefix", "dir"],
-  down: ["dir"],
+  down: ["dir", "app"],
   migrate: ["dir", "port"],
   explain: [],
   import: ["app", "from", "dir", "port", "tables"],
@@ -1251,8 +1251,10 @@ var FLAGS = {
 var BOOLEAN_FLAGS = { up: ["detach"], down: ["all"], import: ["no-data", "clear-links"] };
 function parseArgs(argv) {
   const [command, ...rest] = argv;
-  if (!command || !(command in FLAGS))
+  if (!command)
     return { error: "usage" };
+  if (!(command in FLAGS))
+    return { error: `Unknown command "${command}".` };
   const flags = new Map;
   for (let i = 0;i < rest.length; i += 2) {
     const name = rest[i]?.startsWith("--") ? rest[i].slice(2) : null;
@@ -1261,9 +1263,13 @@ function parseArgs(argv) {
       i--;
       continue;
     }
-    const value = rest[i + 1];
-    if (name === null || value === undefined || !FLAGS[command].includes(name))
+    if (name === null)
       return { error: "usage" };
+    if (!FLAGS[command].includes(name))
+      return { error: `Unknown flag --${name} for "${command}".` };
+    const value = rest[i + 1];
+    if (value === undefined)
+      return { error: `Flag --${name} needs a value.` };
     flags.set(name, value);
   }
   return { command, flags };
@@ -1272,7 +1278,7 @@ var USAGE = [
   "Usage:",
   "  node dkod-db.mjs up --app <app key> [--org <org_id>] [--port 6543] [--files-port <port + 1>] [--dir <app folder>] [--wait <seconds>] [--detach]",
   "  node dkod-db.mjs files --from <folder> [--prefix media/] [--dir <app folder>] [--jobs 32]   (while `up` runs)",
-  "  node dkod-db.mjs down [--dir <app folder>] [--all]",
+  "  node dkod-db.mjs down [--app <app key> | --dir <app folder>] [--all]",
   "  node dkod-db.mjs migrate [--dir <app folder>] [--port 6543]",
   "  node dkod-db.mjs import --app <app key> --from <local postgres URL | snapshot> [--dir <app folder>] [--port 6543] [--tables <name,name> [--clear-links] | --no-data]",
   "  node dkod-db.mjs detect [--dir <app folder>]"
@@ -3135,7 +3141,7 @@ async function runUpDetached(flags, io) {
     const holder = (await liveTunnels(io)).find((t) => t.path !== paths.state && t.state.port === wanted);
     if (holder) {
       const h = holder.state;
-      say(`Port ${wanted} is held by the dkod-db tunnel for app ${h.app} (pid ${h.pid}) started in ${h.dir}. Stop it with: node dkod-db.mjs down --dir ${h.dir} (or down --all), then run this again.`);
+      say(`Port ${wanted} is held by the dkod-db tunnel for app ${h.app} (pid ${h.pid}) started in ${h.dir}. Stop it with: node dkod-db.mjs down --app ${h.app} (or down --dir ${h.dir}, or down --all), then run this again.`);
       return 3;
     }
   }
@@ -3173,6 +3179,28 @@ async function runUpDetached(flags, io) {
   }
 }
 async function runDown(flags, io) {
+  if (flags.has("app") && flags.has("dir")) {
+    io.print("dkod-db: Pass either --app or --dir, not both.");
+    return 2;
+  }
+  if (flags.has("app") && flags.has("all")) {
+    io.print("dkod-db: Pass either --app or --all, not both.");
+    return 2;
+  }
+  if (flags.has("app")) {
+    const app = flags.get("app") ?? "";
+    if (!DB_APP_KEY.test(app)) {
+      io.print("dkod-db: Give the app's key with --app: lowercase letters, digits and dashes.");
+      return 2;
+    }
+    const matched = (await liveTunnels(io)).filter((t) => t.state.app === app);
+    for (const t of matched) {
+      await stopTunnel(io, t.state);
+      io.remove(t.path);
+    }
+    io.print(JSON.stringify({ ok: true, stopped: matched.length > 0, app, tunnels: matched.map((t) => describeTunnel(t.state)) }));
+    return 0;
+  }
   if (flags.has("all")) {
     const live = await liveTunnels(io);
     for (const t of live)
@@ -3198,6 +3226,8 @@ async function runDown(flags, io) {
 async function runDbCli(argv, io) {
   const args = parseArgs(argv);
   if ("error" in args) {
+    if (args.error !== "usage")
+      io.print(`dkod-db: ${args.error}`);
     io.print(USAGE);
     return 2;
   }
