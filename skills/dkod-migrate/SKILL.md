@@ -157,4 +157,6 @@ Then go on from the first step that is not done, in the order of the steps above
 
 The refusal names the state the migration is at and the step it waits for. Do that step, then go on. A refusal that says "report this Guard block first" is cleared by calling `dkoder_guard_report` with the object it gives, then retrying, without asking.
 
-When the attempt was a mistake, or the app does not need migrating, call `dkoder.migrate.abandon`. Abandoning leaves the app's Dev data: ask the builder whether to delete it; on yes call `dkoder.devdb.delete` with the original's app key and `confirm: true`.
+When the attempt was a mistake, or the app does not need migrating, call `dkoder.migrate.abandon`. When you stop a migration early for any other reason (the builder stops, the chat ends, you cannot go on), call `dkoder.migrate.abandon` too, with `note`: one line of what was already done (files written, Dev database made, data imported). An open migration with no activity for 12 hours is timed out on its own; `dkoder.migrate.start` resumes it at the step it stopped at. Abandoning leaves the app's Dev data: ask the builder whether to delete it; on yes call `dkoder.devdb.delete` with the original's app key and `confirm: true`.
+
+To check where a migration is, call `dkoder.migrate.status` (with the app key, or without one for every open migration). It only reads. Never call `dkoder.session.start` or `dkoder.migrate.start` only to look.
