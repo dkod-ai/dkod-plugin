@@ -925,6 +925,21 @@ var TYPES = {
   xml: "application/xml"
 };
 var contentTypeOf = (path) => TYPES[path.slice(path.lastIndexOf(".") + 1).toLowerCase()] ?? "application/octet-stream";
+function isDatabaseFile(full) {
+  if (/(\.(db|db3|sqlite3?)|-(shm|wal|journal))$/i.test(full))
+    return true;
+  try {
+    const fd = openSync(full, "r");
+    try {
+      const head = Buffer.alloc(16);
+      return head.toString("latin1", 0, readSync(fd, head, 0, 16, 0)) === "SQLite format 3\x00";
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+}
 var PART_BYTES = 8 << 20;
 var DEFAULT_JOBS = 32;
 var RETRIES = 4;
@@ -972,9 +987,13 @@ var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 var retryable = (status) => status === 0 || status === 408 || status === 429 || status >= 500;
 async function pushFiles(opts) {
   const doFetch = opts.fetch ?? fetch;
-  const report = { files: 0, bytes: 0, put: 0, same: 0, failed: [] };
+  const all = listFiles(opts.from);
+  const database = all.filter((rel) => isDatabaseFile(join2(opts.from, rel)));
+  const paths = all.filter((rel) => !database.includes(rel));
+  const report = { files: 0, bytes: 0, put: 0, same: 0, failed: [], database };
+  if (database.length > 0)
+    opts.print?.(`left out ${database.length} database file(s), never put in the files bucket (the app's data moves through the Postgres import): ${database.slice(0, 20).join(", ")}`);
   const base = opts.filesUrl.replace(/\/+$/, "");
-  const paths = listFiles(opts.from);
   const held = await listBucket(base, opts.prefix, doFetch);
   const backoff = opts.backoffMs ?? 200;
   let next = 0;
@@ -1899,7 +1918,7 @@ async function runFiles(flags, io, cwd) {
     return 2;
   }
   const report = await pushFiles({ filesUrl, from: resolvePath(cwd, from), prefix, print: io.print, ...jobs === undefined ? {} : { jobs } });
-  io.print(JSON.stringify({ files: report.files, bytes: report.bytes, put: report.put, same: report.same, failed: report.failed }));
+  io.print(JSON.stringify({ files: report.files, bytes: report.bytes, put: report.put, same: report.same, failed: report.failed, database: report.database }));
   if (report.failed.length > 0 && report.put === 0 && report.same === 0 && report.failed.every((f) => f.reason.includes("bucket_unavailable"))) {
     say("The app's dev files bucket is not there yet. Call dkoder.devdb.make with the app key and confirm: true (it only adds the bucket to an app made before), wait a few minutes, then run this again.");
     return 1;

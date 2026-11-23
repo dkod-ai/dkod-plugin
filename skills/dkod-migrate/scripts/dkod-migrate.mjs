@@ -1,7 +1,7 @@
 // Built by packages/dkoder-plugin/scripts/build-migrate.ts from dkod-app. Do not edit: run `bun run --cwd packages/dkoder-plugin build:migrate`.
 import { spawn as spawn2 } from "node:child_process";
 import { createHash as createHash4 } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, openSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join as join15 } from "node:path";
 
@@ -4036,10 +4036,15 @@ function envPaths(original, io) {
   return out;
 }
 var JUNK_FILE = /(^|\/)(\.DS_Store|Thumbs\.db|desktop\.ini|\._[^/]*)$/;
-var DB_FILE = /\.(?:sqlite3?|db3?)(?:-(?:wal|shm|journal))?$/i;
-var appFiles = (dir, io) => io.walk(dir, SKIP2).filter((p) => !JUNK_FILE.test(p) && !DB_FILE.test(p));
+var DB_FILE = /(\.(db|db3|sqlite3?)|-(shm|wal|journal))$/i;
+var SQLITE_HEADER = "SQLite format 3\x00";
+var DB_NOTE = "Database files are never put in the files bucket: the app's data moves through the Postgres import (steps 2 and 4).";
+var isDbFile = (full, io) => DB_FILE.test(full) || io.head?.(full, SQLITE_HEADER.length) === SQLITE_HEADER;
+var appFiles = (dir, io) => io.walk(dir, SKIP2).filter((p) => !JUNK_FILE.test(p) && !isDbFile(join10(dir, p), io));
 function stats(dir, io) {
-  const paths = appFiles(dir, io);
+  const all = io.walk(dir, SKIP2).filter((p) => !JUNK_FILE.test(p));
+  const excluded = all.filter((p) => isDbFile(join10(dir, p), io)).sort();
+  const paths = all.filter((p) => !excluded.includes(p));
   const counts = new Map;
   let bytes = 0;
   for (const p of paths) {
@@ -4049,7 +4054,7 @@ function stats(dir, io) {
     counts.set(ext, (counts.get(ext) ?? 0) + 1);
   }
   const types = Object.fromEntries([...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 8));
-  return { files: paths.length, bytes, types };
+  return { files: paths.length, bytes, types, excluded };
 }
 function urlPrefixes(original, io) {
   const out = new Set;
@@ -4080,7 +4085,7 @@ function movedFolder(named, root, io) {
 var within = (inner, outer) => inner === outer || inner.startsWith(outer.endsWith(sep) ? outer : outer + sep);
 var toPosix = (p) => p.split(sep).join("/");
 var baseName2 = (p) => p.split(/[\\/]/).filter(Boolean).pop() ?? "files";
-async function findFileGroups(original, io, notFound, given = {}) {
+async function findFileGroups(original, io, notFound, given = {}, excluded) {
   const root = io.realpath(original) ?? original;
   const found = [];
   const home = (io.env?.("HOME") ?? "").replace(/\/+$/, "");
@@ -4103,7 +4108,7 @@ async function findFileGroups(original, io, notFound, given = {}) {
     }
     if (real === "/" || within(root, real) || NOT_FILES.test(toPosix(real)))
       continue;
-    if (appFiles(real, io).length === 0)
+    if (io.walk(real, SKIP2).length === 0)
       continue;
     if (found.some((g) => g.source === real))
       continue;
@@ -4120,7 +4125,7 @@ async function findFileGroups(original, io, notFound, given = {}) {
         const real = io.realpath(join10(root, rel));
         if (real === null || found.some((g) => within(real, g.source)))
           continue;
-        if (appFiles(real, io).length === 0)
+        if (io.walk(real, SKIP2).length === 0)
           continue;
         found.push({ env: null, reason: "ignored", source: real });
       }
@@ -4141,13 +4146,23 @@ async function findFileGroups(original, io, notFound, given = {}) {
       key = `${name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-")}/`;
       for (let i = 2;usedPrefixes.has(key); i++)
         key = `${name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-")}-${i}/`;
-      usedPrefixes.add(key);
     }
-    groups.push({ env: f.env, reason: f.reason, source: f.source, moved_from: f.movedFrom ?? null, key_prefix: key, url_prefix: url === null ? null : `/${url}/`, inside: outer ? outer.env ?? outer.key_prefix : null, ...stats(f.source, io) });
+    const st = stats(f.source, io);
+    for (const p of st.excluded) {
+      const full = join10(f.source, p);
+      const path = within(full, root) ? toPosix(relative(root, full)) : full;
+      if (!excluded?.some((e) => e.path === path))
+        excluded?.push({ path, bytes: io.size?.(full) ?? 0 });
+    }
+    if (st.files === 0)
+      continue;
+    if (!outer)
+      usedPrefixes.add(key);
+    groups.push({ env: f.env, reason: f.reason, source: f.source, moved_from: f.movedFrom ?? null, key_prefix: key, url_prefix: url === null ? null : `/${url}/`, inside: outer ? outer.env ?? outer.key_prefix : null, ...st });
   }
   return groups;
 }
-async function dbLinks(url, prefixes, io, cwd) {
+async function dbScan(url, pattern, flags, io, cwd) {
   const env = { ...PG_TIMEOUT, PGSSLMODE: "disable" };
   const psql = ["-w", "-X", "-q", "-At", "-F", "\t", "-v", "ON_ERROR_STOP=1", "--dbname", url];
   const tables = await io.run("psql", [...psql, "-c", "SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY 1"], env, cwd);
@@ -4155,28 +4170,75 @@ async function dbLinks(url, prefixes, io, cwd) {
     return { error: isNoPassword(tables.stderr) ? "the Dev database refused this login" : "the Dev database could not be read" };
   const names = tables.stdout.split(`
 `).map((l) => l.trim()).filter(Boolean);
-  const pattern = `/(${prefixes.map((p) => p.replace(/[^A-Za-z0-9_-]/g, "")).join("|")})/([^"'\\s?#)<>\\\\]+)`;
-  const links = new Map;
+  const lines = [];
   for (const name of names) {
-    const sql = `SELECT DISTINCT m[1] || E'\\t' || m[2] FROM ${quoteIdent(name)} t, regexp_matches(row_to_json(t)::text, '${pattern.replace(/'/g, "''")}', 'g') m`;
+    const sql = `SELECT DISTINCT array_to_string(m, E'\\t') FROM ${quoteIdent(name)} t, regexp_matches(row_to_json(t)::text, '${pattern.replace(/'/g, "''")}', '${flags}') m`;
     const res = await io.run("psql", [...psql, "-c", sql], env, cwd);
     if (res.status !== 0)
       continue;
-    for (const line of res.stdout.split(`
-`)) {
-      const [prefix, path] = line.split("\t");
-      if (!prefix || !path)
-        continue;
-      let clean = path;
-      try {
-        clean = decodeURIComponent(path);
-      } catch {}
-      if (!links.has(prefix))
-        links.set(prefix, new Set);
-      links.get(prefix).add(clean.replace(/\\\//g, "/"));
-    }
+    lines.push(...res.stdout.split(`
+`).filter(Boolean));
+  }
+  return { lines };
+}
+var decoded = (path) => {
+  let clean = path;
+  try {
+    clean = decodeURIComponent(path);
+  } catch {}
+  return clean.replace(/\\\//g, "/");
+};
+async function dbLinks(url, prefixes, io, cwd) {
+  const pattern = `/(${prefixes.map((p) => p.replace(/[^A-Za-z0-9_-]/g, "")).join("|")})/([^"'\\s?#)<>\\\\]+)`;
+  const read = await dbScan(url, pattern, "g", io, cwd);
+  if ("error" in read)
+    return read;
+  const links = new Map;
+  for (const line of read.lines) {
+    const [prefix, path] = line.split("\t");
+    if (!prefix || !path)
+      continue;
+    if (!links.has(prefix))
+      links.set(prefix, new Set);
+    links.get(prefix).add(decoded(path));
   }
   return { links };
+}
+async function dbNames(url, groups, original, io, cwd) {
+  const have = new Set;
+  const exts = new Set;
+  for (const g of groups) {
+    for (const p of appFiles(g.source, io)) {
+      have.add(p);
+      const ext = /\.([A-Za-z0-9]{1,8})$/.exec(p)?.[1];
+      if (ext)
+        exts.add(ext.toLowerCase());
+    }
+  }
+  const bases = [...new Set(groups.map((g) => baseName2(g.source).replace(/[^A-Za-z0-9_-]/g, "")).filter(Boolean))];
+  const parts = [...bases.length > 0 ? [`(?:${bases.join("|")})/[^"'\\s?#)<>\\\\]+`] : [], ...exts.size > 0 ? [`[A-Za-z0-9._~:/-]+\\.(?:${[...exts].join("|")})(?![A-Za-z0-9])`] : []];
+  if (parts.length === 0)
+    return { links: 0, missing: [] };
+  const read = await dbScan(url, `(${parts.join("|")})`, "gi", io, cwd);
+  if ("error" in read)
+    return read;
+  const names = new Set(read.lines.map(decoded).filter((n) => !n.includes("://")));
+  const tails = (n) => {
+    const s = n.split("/").filter(Boolean);
+    return s.map((_, i) => s.slice(i).join("/"));
+  };
+  const own = (t) => io.realpath(join10(original, t)) !== null || io.realpath(join10(original, "public", t)) !== null;
+  let links = 0;
+  const missing = [];
+  for (const n of names) {
+    const t = tails(n);
+    if (t.length === 0 || t.some(own) && !t.some((x) => have.has(x)))
+      continue;
+    links++;
+    if (!t.some((x) => have.has(x)))
+      missing.push(n);
+  }
+  return { links, missing };
 }
 async function switchedOriginal(dir, io) {
   const here = io.realpath(dir);
@@ -4223,7 +4285,8 @@ async function filesCommand(folder, io, args = []) {
     i++;
   }
   const notFound = [];
-  const groups = await findFileGroups(original, io, notFound, given);
+  const excluded = [];
+  const groups = await findFileGroups(original, io, notFound, given, excluded);
   const upload = groups.filter((g) => g.inside === null).map((g) => ({ from: g.source, prefix: g.key_prefix }));
   const bucket = groups.length > 0 || notFound.length > 0;
   const report = {
@@ -4234,32 +4297,52 @@ async function filesCommand(folder, io, args = []) {
     db_refs: { checked: false, links: 0, missing: [], missing_count: 0 },
     not_found: notFound,
     step_4b: bucket ? "bucket" : "skip",
-    say: bucket ? "Step 4b: bucket. These files go into the app's own private files bucket: run install-files and route the folders through src/dkod-files.ts." : "Step 4b: skip. The original has no uploads or other files outside its code (database files such as data/app.db are data, brought by step 4). There is nothing to seed and no bucket to use."
+    say: bucket ? "Step 4b: bucket. These files go into the app's own private files bucket: run install-files and route the folders through src/dkod-files.ts." : "Step 4b: skip. The original has no uploads or other files outside its code (database files such as data/app.db are data, brought by step 4). There is nothing to seed and no bucket to use.",
+    excluded: { database: excluded }
   };
+  if (excluded.length > 0)
+    report.database_note = DB_NOTE;
   const served = groups.filter((g) => g.url_prefix !== null);
+  const named = groups.filter((g) => g.url_prefix === null && g.inside === null);
   const dbUrl = (io.readFile(join10(dir, ".env.local")) ?? "").split(`
 `).map((l) => /^\s*(?:export\s+)?DATABASE_URL\s*=\s*["']?([^"'\s]+)/.exec(l)?.[1]).find(Boolean);
-  if (served.length === 0)
-    report.db_refs.note = "no group has a URL the code serves, so the data's links were not read";
+  if (groups.length === 0)
+    report.db_refs.note = "no file group, so the data's links were not read";
   else if (!dbUrl)
     report.db_refs.note = "no DATABASE_URL in .env.local: run `dkod-db.mjs up` first to check the data's links";
   else if (!io.hasTool("psql"))
     report.db_refs.note = "psql is not on PATH, so the data's links were not read";
   else {
-    const read = await dbLinks(dbUrl, served.map((g) => g.url_prefix.replace(/\//g, "")), io, dir);
-    if ("error" in read)
-      report.db_refs.note = `${read.error}, so the data's links were not read`;
+    const missing = [];
+    let error = null;
+    if (served.length > 0) {
+      const read = await dbLinks(dbUrl, served.map((g) => g.url_prefix.replace(/\//g, "")), io, dir);
+      if ("error" in read)
+        error = read.error;
+      else {
+        for (const g of served) {
+          const linked = read.links.get(g.url_prefix.replace(/\//g, "")) ?? new Set;
+          report.db_refs.links += linked.size;
+          const have = new Set(io.walk(g.source, SKIP2));
+          for (const p of linked)
+            if (!have.has(p))
+              missing.push(`${g.url_prefix}${p}`);
+        }
+      }
+    }
+    if (error === null && named.length > 0) {
+      const read = await dbNames(dbUrl, named, io.realpath(original) ?? original, io, dir);
+      if ("error" in read)
+        error = read.error;
+      else {
+        report.db_refs.links += read.links;
+        missing.push(...read.missing);
+      }
+    }
+    if (error !== null)
+      report.db_refs.note = `${error}, so the data's links were not read`;
     else {
       report.db_refs.checked = true;
-      const missing = [];
-      for (const g of served) {
-        const linked = read.links.get(g.url_prefix.replace(/\//g, "")) ?? new Set;
-        report.db_refs.links += linked.size;
-        const have = new Set(io.walk(g.source, SKIP2));
-        for (const p of linked)
-          if (!have.has(p))
-            missing.push(`${g.url_prefix}${p}`);
-      }
       missing.sort();
       report.db_refs.missing_count = missing.length;
       report.db_refs.missing = missing.slice(0, 50);
@@ -4271,6 +4354,8 @@ async function filesCommand(folder, io, args = []) {
     report.ok = false;
   io.writeFile(join10(dir, ".dkod/files.json"), `${JSON.stringify(report, null, 2)}
 `);
+  if (excluded.length > 0)
+    io.print(`${DB_NOTE} Left out: ${excluded.map((e) => e.path).join(", ")}.`);
   io.print(JSON.stringify(report));
   return report.ok ? 0 : 1;
 }
@@ -4564,7 +4649,8 @@ var PREFLIGHT_RULE_IDS = [
   "template-page",
   "dockerfile-policy",
   "probe-paths",
-  "two-app-keys"
+  "two-app-keys",
+  "files-database"
 ];
 var PREFLIGHT_FIX = {
   "bind-loopback": "Listen on 0.0.0.0 (or on HOST, which the Dockerfile sets to 0.0.0.0). A server on 127.0.0.1 or localhost never answers the pod's probes.",
@@ -4576,7 +4662,8 @@ var PREFLIGHT_FIX = {
   "template-page": "Replace the template's sample page (src/web/main.tsx) with the original app's pages before you deploy.",
   "dockerfile-policy": "Pin every FROM by digest (image:tag@sha256:...) and set USER to a number (USER 10001). Deploy blocks this even when the Dockerfile came from the template.",
   "probe-paths": "Answer GET /healthz (the process is up) and GET /readyz (it can serve), with no sign-in, fast. Without them the pod gets no HTTP probes and is never Ready.",
-  "two-app-keys": "Use one app key. The dk- folder is named after the app key in .dkod/migration.json; rename nothing by hand, and ask the builder before you go on."
+  "two-app-keys": "Use one app key. The dk- folder is named after the app key in .dkod/migration.json; rename nothing by hand, and ask the builder before you go on.",
+  "files-database": "Never put a database file in the files bucket: the app's data moves through the Postgres import. Run `node <migrate> files <folder>` again, which leaves database files out, and never add a database folder to `upload` by hand."
 };
 function overridesOf(raw) {
   const inner = typeof raw === "object" && raw !== null && "structuredContent" in raw ? raw.structuredContent : raw;
@@ -4893,6 +4980,27 @@ function appKeyRule(f, io) {
   }
   return out;
 }
+function filesDatabaseRule(f, io) {
+  let plan;
+  try {
+    plan = JSON.parse(f.read(".dkod/files.json") ?? "null") ?? {};
+  } catch {
+    return [];
+  }
+  const original = typeof plan.original === "string" ? io.realpath(plan.original) ?? plan.original : "";
+  const left = new Set((Array.isArray(plan.excluded?.database) ? plan.excluded.database : []).map((e) => typeof e?.path !== "string" ? "" : e.path.startsWith("/") ? e.path : join12(original, e.path)));
+  const out = [];
+  for (const u of Array.isArray(plan.upload) ? plan.upload : []) {
+    if (typeof u?.from !== "string")
+      continue;
+    for (const rel of io.walk(u.from, []).filter((p) => !JUNK_FILE.test(p))) {
+      const full = join12(u.from, rel);
+      if (!left.has(full) && isDbFile(full, io))
+        out.push(finding("files-database", ".dkod/files.json", null, `${full} is a database file in the upload of ${typeof u.prefix === "string" ? u.prefix : u.from}.`));
+    }
+  }
+  return out;
+}
 function finding(rule, file, line, why, level = "block") {
   return { rule, level, file, line, why, fix: PREFLIGHT_FIX[rule] };
 }
@@ -4929,6 +5037,7 @@ function preflightFindings(dir, io, overrides = {}) {
   }
   findings.push(...probeRule(f, sources));
   findings.push(...appKeyRule(f, io));
+  findings.push(...filesDatabaseRule(f, io));
   const off = PREFLIGHT_RULE_IDS.filter((id) => overrides[id]?.off === true);
   return {
     off,
@@ -6957,6 +7066,19 @@ var io = {
   readFile: (path) => {
     try {
       return readFileSync(path, "utf8");
+    } catch {
+      return null;
+    }
+  },
+  head: (path, bytes) => {
+    try {
+      const fd = openSync(path, "r");
+      try {
+        const buf = Buffer.alloc(bytes);
+        return buf.toString("latin1", 0, readSync(fd, buf, 0, bytes, 0));
+      } finally {
+        closeSync(fd);
+      }
     } catch {
       return null;
     }
