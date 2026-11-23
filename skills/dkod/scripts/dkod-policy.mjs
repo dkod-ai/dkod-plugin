@@ -1315,26 +1315,30 @@ function archFinding(text, level) {
     message: m?.[3] ?? text
   };
 }
-async function templateAdvice(findings, raw, files) {
+var TEMPLATE_DOCKERFILE_ADVICE = "This unchanged Dockerfile came from the org's template. Do not edit it: deploy writes it again. Continue the app work. Ask an admin to update the template or merge the starter upgrade PR if one is open. The server's deploy policy still applies.";
+function isUnchangedTemplateFile(path, sha256, raw) {
   let record;
   try {
     record = JSON.parse(raw);
   } catch {
-    return findings;
+    return false;
   }
   if (typeof record !== "object" || record === null || !("files" in record))
-    return findings;
+    return false;
   const hashes = record.files;
   if (typeof hashes !== "object" || hashes === null || Array.isArray(hashes))
-    return findings;
+    return false;
+  return hashes[path] === sha256;
+}
+async function templateAdvice(findings, raw, files) {
   const dockerfile = files.find((f) => f.path === "Dockerfile");
-  if (!dockerfile || !("Dockerfile" in hashes))
+  if (!dockerfile)
     return findings;
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(dockerfile.text));
   const hash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
-  if (hashes.Dockerfile !== hash)
+  if (!isUnchangedTemplateFile("Dockerfile", hash, raw))
     return findings;
-  return findings.map((f) => f.path === "Dockerfile" && (f.check === "dockerfile.from_digest" || f.check === "dockerfile.numeric_user") ? { ...f, level: "warn", origin: "template", message: `${f.message} This unchanged Dockerfile came from the org's template. Do not edit it: deploy writes it again. Continue the app work. Ask an admin to update the template or merge the starter upgrade PR if one is open. The server's deploy policy still applies.` } : f);
+  return findings.map((f) => f.path === "Dockerfile" && (f.check === "dockerfile.from_digest" || f.check === "dockerfile.numeric_user") ? { ...f, level: "warn", origin: "template", message: `${f.message} ${TEMPLATE_DOCKERFILE_ADVICE}` } : f);
 }
 var refuse = (error, message) => ({ ok: false, error, message });
 function packFromAnswer(raw) {

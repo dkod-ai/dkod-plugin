@@ -1,11 +1,11 @@
 // Built by packages/dkoder-plugin/scripts/build-migrate.ts from dkod-app. Do not edit: run `bun run --cwd packages/dkoder-plugin build:migrate`.
 import { spawn as spawn2 } from "node:child_process";
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, openSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname as dirname2, join as join15 } from "node:path";
 
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 
 var APP_MAP = {
   kind: "app.map",
@@ -2214,26 +2214,30 @@ function archFinding(text, level) {
     message: m?.[3] ?? text
   };
 }
-async function templateAdvice(findings, raw, files) {
+var TEMPLATE_DOCKERFILE_ADVICE = "This unchanged Dockerfile came from the org's template. Do not edit it: deploy writes it again. Continue the app work. Ask an admin to update the template or merge the starter upgrade PR if one is open. The server's deploy policy still applies.";
+function isUnchangedTemplateFile(path, sha256, raw) {
   let record;
   try {
     record = JSON.parse(raw);
   } catch {
-    return findings;
+    return false;
   }
   if (typeof record !== "object" || record === null || !("files" in record))
-    return findings;
+    return false;
   const hashes = record.files;
   if (typeof hashes !== "object" || hashes === null || Array.isArray(hashes))
-    return findings;
+    return false;
+  return hashes[path] === sha256;
+}
+async function templateAdvice(findings, raw, files) {
   const dockerfile = files.find((f) => f.path === "Dockerfile");
-  if (!dockerfile || !("Dockerfile" in hashes))
+  if (!dockerfile)
     return findings;
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(dockerfile.text));
   const hash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
-  if (hashes.Dockerfile !== hash)
+  if (!isUnchangedTemplateFile("Dockerfile", hash, raw))
     return findings;
-  return findings.map((f) => f.path === "Dockerfile" && (f.check === "dockerfile.from_digest" || f.check === "dockerfile.numeric_user") ? { ...f, level: "warn", origin: "template", message: `${f.message} This unchanged Dockerfile came from the org's template. Do not edit it: deploy writes it again. Continue the app work. Ask an admin to update the template or merge the starter upgrade PR if one is open. The server's deploy policy still applies.` } : f);
+  return findings.map((f) => f.path === "Dockerfile" && (f.check === "dockerfile.from_digest" || f.check === "dockerfile.numeric_user") ? { ...f, level: "warn", origin: "template", message: `${f.message} ${TEMPLATE_DOCKERFILE_ADVICE}` } : f);
 }
 var refuse = (error, message) => ({ ok: false, error, message });
 async function checkFolder(pack, dir, io) {
@@ -3637,7 +3641,7 @@ async function checkBuild(folder, reportFile, io, opts = {}) {
       const text = `${f.path ?? "(folder)"}${f.line === null ? "" : `:${String(f.line)}`}: ${f.rule}: ${f.message}`;
       if (f.level === "block")
         problems.push(text);
-      else if (f.origin === "template" || f.check === "dockerfile.from_digest")
+      else
         warnings.push(text);
     }
   } else
@@ -4590,6 +4594,8 @@ async function verifyApp(folder, io, args = []) {
   record.ok = record.failures.length === 0;
   return finish2(dir, record, io);
 }
+
+import { createHash as createHash3 } from "node:crypto";
 var MIGRATION_STACK_DEFAULTS = {
   folderPrefix: "dk-",
   denyDependencies: ["express", "sqlite3", "better-sqlite3", "mongoose", "mysql2", "prisma", "npm"],
@@ -4736,7 +4742,7 @@ var PREFLIGHT_FIX = {
   "fk-target": "Point every foreign key at a primary key or a unique column. When two tables point at each other, make one constraint DEFERRABLE INITIALLY DEFERRED, or the data import fails.",
   "sqlite-wal": "Do not ship a SQLite file. The app's data goes to its database; the snapshot copies the original's data, with its -wal file folded in.",
   "template-page": "Replace the template's sample page (src/web/main.tsx) with the original app's pages before you deploy.",
-  "dockerfile-policy": "Pin every FROM by digest (image:tag@sha256:...) and set USER to a number (USER 10001). Deploy blocks this even when the Dockerfile came from the template.",
+  "dockerfile-policy": "Pin every FROM by digest (image:tag@sha256:...) and set USER to a number (USER 10001). An unchanged template Dockerfile only warns: deploy pins FROM digests in a Dockerfile it wrote again, so do not edit it.",
   "probe-paths": "Answer GET /healthz (the process is up) and GET /readyz (it can serve), with no sign-in, fast. Without them the pod gets no HTTP probes and is never Ready.",
   "two-app-keys": "Use one app key. The dk- folder is named after the app key in .dkod/migration.json; rename nothing by hand, and ask the builder before you go on.",
   "files-database": "Never put a database file in the files bucket: the app's data moves through the Postgres import. Run `node <migrate> files <folder>` again, which leaves database files out, and never add a database folder to `upload` by hand."
@@ -4967,8 +4973,10 @@ function fkFindings(tables) {
   return out;
 }
 var DIGEST_FROM = /^\s*FROM\s+(?:--platform=\S+\s+)?(\S+)/i;
-function dockerfileFindings(rel, text) {
+function dockerfileFindings(rel, text, unchangedTemplate = false) {
   const out = [];
+  const level = unchangedTemplate ? "warn" : "block";
+  const tail = unchangedTemplate ? ` ${TEMPLATE_DOCKERFILE_ADVICE}` : "";
   const stages = new Set;
   const lines = text.split(`
 `);
@@ -4980,7 +4988,7 @@ function dockerfileFindings(rel, text) {
       const image = from[1];
       const alias = /\bAS\s+(\S+)/i.exec(line);
       if (!stages.has(image.toLowerCase()) && image.toLowerCase() !== "scratch" && !/@sha256:[0-9a-f]{64}\b/.test(image)) {
-        out.push(finding("dockerfile-policy", rel, i + 1, `FROM ${image} has no @sha256 digest.`));
+        out.push(finding("dockerfile-policy", rel, i + 1, `FROM ${image} has no @sha256 digest.${tail}`, level));
       }
       if (alias !== null)
         stages.add(alias[1].toLowerCase());
@@ -4992,9 +5000,9 @@ function dockerfileFindings(rel, text) {
   }
   if (stages.size > 0 || lines.some((l) => DIGEST_FROM.test(l))) {
     if (lastUser === null)
-      out.push(finding("dockerfile-policy", rel, null, "The final stage sets no USER, so the container runs as root."));
+      out.push(finding("dockerfile-policy", rel, null, `The final stage sets no USER, so the container runs as root.${tail}`, level));
     else if (!/^\d+(?::\d+)?$/.test(lastUser))
-      out.push(finding("dockerfile-policy", rel, at(text, new RegExp(`^\\s*USER\\s+${lastUser.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i")), `USER ${lastUser} is not a number.`));
+      out.push(finding("dockerfile-policy", rel, at(text, new RegExp(`^\\s*USER\\s+${lastUser.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i")), `USER ${lastUser} is not a number.${tail}`, level));
   }
   return out;
 }
@@ -5106,10 +5114,11 @@ function preflightFindings(dir, io, overrides = {}) {
   const main = f.read("src/web/main.tsx");
   if (main !== null && isSamplePage(main))
     findings.push(finding("template-page", "src/web/main.tsx", null, "src/web/main.tsx is still the template's sample page."));
+  const rendered = f.read(".dkod/rendered.json") ?? "";
   for (const rel of all.filter((p) => /(?:^|\/)(?:Dockerfile|Containerfile)(?:\.[\w-]+)?$/.test(p) && !/\.dev$/i.test(p))) {
     const text = f.read(rel);
     if (text !== null)
-      findings.push(...dockerfileFindings(rel, text));
+      findings.push(...dockerfileFindings(rel, text, rel === "Dockerfile" && isUnchangedTemplateFile(rel, createHash3("sha256").update(text).digest("hex"), rendered)));
   }
   findings.push(...probeRule(f, sources));
   findings.push(...appKeyRule(f, io));
@@ -6652,7 +6661,7 @@ function discoverFunctions(original, io) {
   return [...names].sort();
 }
 function queryId(q) {
-  return `q:${createHash3("sha256").update(normalizeQuery(q)).digest("hex").slice(0, 12)}`;
+  return `q:${createHash4("sha256").update(normalizeQuery(q)).digest("hex").slice(0, 12)}`;
 }
 function normalizeQuery(sql) {
   return sql.replace(/\s+/g, " ").trim().replace(/\s*;$/, "");
@@ -7258,7 +7267,7 @@ var io = {
     writeFileSync(path, text, "utf8");
   },
   sha256: (paths) => {
-    const hash = createHash4("sha256");
+    const hash = createHash5("sha256");
     for (const path of paths)
       hash.update(readFileSync(path));
     return hash.digest("hex");

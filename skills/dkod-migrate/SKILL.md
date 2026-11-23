@@ -60,7 +60,7 @@ Run `node <migrate> snapshot <folder>`. It finds the original's data: the data U
 
 Skip this step when the snapshot said `new-app-only` and the app keeps no data.
 
-1. Call `dkoder.devdb.status` with the original's app key (never the `dk-` key). Call `dkoder.devdb.make` with `confirm: true` when it says `missing`.
+1. When nothing says the app keeps data (the snapshot said `new-app-only`, or `dkod-db.mjs detect` on the folder says `uses_database: false`), ask the person whether it does. When it does not, skip this step and deploy with `no_database: true`: never make a database for it. When the app keeps data (or the person says it does), call `dkoder.devdb.status` with the original's app key (never the `dk-` key). Call `dkoder.devdb.make` with `confirm: true` when it says `missing`.
 2. Run `node <scripts>/dkod-db.mjs up --app <original key> --org <org_id> --dir <folder> --detach` (`org_id` from `dkoder.devdb.status`). It writes `DATABASE_URL` into `<folder>/.env.local`. When it asks for a code, do what the dkod skill's "Dev database" section says.
 3. Run `node <scripts>/dkod-db.mjs migrate --dir <folder>`: the dk- app's own migrations make its tables in Dev. It runs the migration tool the template ships, named in `migrate_tools` from `dkoder.migrate.start`; a `db:migrate` script in package.json counts as one. Use that tool: never add another migration tool to the app, even when `stack.database.orm` names one.
 4. Read `data_import` in the migration file. With `ask`, ask the builder once: "Which data of <key> comes along? It goes into Dev now, and into prod after the deploy." (the question tool; without one, ask in plain text and wait). The options, in this order:
