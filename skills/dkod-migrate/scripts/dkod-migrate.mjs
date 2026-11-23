@@ -1807,6 +1807,12 @@ import { createHash as createHash2 } from "node:crypto";
 import { dirname, resolve } from "node:path";
 var join2 = (dir, name) => dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
 var NOT_WRITTEN = new Set(["values.yaml", "README.md"]);
+var DEFAULT_GITIGNORE = `node_modules
+dist
+.env.local
+test-results/
+playwright-report/
+`;
 var ROOTS = ["app", "answers", "policy", "dkod"];
 var SOURCE_KEYS = ["package_manager", "install_command", "lockfile", "run_command", "build_command", "start_command", "lockfile_command", "fullstack", "app_start", "static_dir", "app_port"];
 var UNWRITTEN_KEYS = ["org", "image_repository", "app_commit_sha", "governance_repo", "governance_sha"];
@@ -1900,6 +1906,8 @@ async function render2(args, io) {
   const written = [];
   const skipped = [];
   const todo = rendered.files.filter((f) => !NOT_WRITTEN.has(f.path));
+  if (!todo.some((f) => f.path === ".gitignore"))
+    todo.push({ path: ".gitignore", lang: "", content: DEFAULT_GITIGNORE });
   for (const file of todo) {
     const line = templateTokenLine(file.content);
     if (line !== null)
